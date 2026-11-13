@@ -242,14 +242,14 @@ fn attachment_info(part: &MessagePart<'_>) -> AttachmentInfo {
 }
 
 fn id_list(value: &HeaderValue<'_>) -> Vec<String> {
-    match (value.as_text(), value.as_text_list()) {
-        (Some(one), _) => vec![clean_id(one)],
-        (None, Some(many)) => many.iter().map(|id| clean_id(id)).collect(),
+    // Check the list form first: for a multi-value header `as_text` would
+    // return only the first ID and silently drop the rest of the thread.
+    let ids: Vec<String> = match (value.as_text_list(), value.as_text()) {
+        (Some(many), _) => many.iter().map(|id| clean_id(id)).collect(),
+        (None, Some(one)) => one.split_whitespace().map(clean_id).collect(),
         (None, None) => Vec::new(),
-    }
-    .into_iter()
-    .filter(|id| !id.is_empty())
-    .collect()
+    };
+    ids.into_iter().filter(|id| !id.is_empty()).collect()
 }
 
 fn parse(raw: &[u8]) -> Result<Message<'_>, ParseError> {
@@ -413,6 +413,14 @@ SGVsbG8=\r\n\
         assert_eq!(att.file_name, "invoicefdp.exe");
         assert_eq!(att.mime_type, "application/pdf");
         assert_eq!(att.size, 5);
+    }
+
+    #[test]
+    fn keeps_every_reference_in_a_thread() {
+        let raw = b"From: a@b.example\r\nSubject: Re: x\r\nIn-Reply-To: <c@x>\r\nReferences: <a@x> <b@x>\r\n <c@x>\r\n\r\nbody";
+        let s = parse_summary(raw).unwrap();
+        assert_eq!(s.in_reply_to.as_deref(), Some("c@x"));
+        assert_eq!(s.references, vec!["a@x", "b@x", "c@x"]);
     }
 
     #[test]
