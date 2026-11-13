@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/mail-core", "apps/desktop/src-tauri"]
+# The desktop shell needs WebKitGTK on Linux. Default commands build only the
+# engine so `cargo test` works on any machine; CI builds everything.
+default-members = ["crates/mail-core"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+module_name_repetitions = "allow"
