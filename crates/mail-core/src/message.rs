@@ -6,8 +6,10 @@
 //! invisible Unicode direction marks used to disguise file names and
 //! senders.
 
-use mail_parser::{Address, MessageParser, MimeHeaders, PartType};
-use serde::Serialize;
+use mail_parser::{
+    Address, HeaderValue, Message, MessageParser, MessagePart, MimeHeaders, PartType,
+};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Largest message we will parse in one go (100 MiB). Bigger ones are
@@ -38,7 +40,7 @@ pub enum ParseError {
 }
 
 /// A sender or recipient.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mailbox {
     /// Display name, if any.
     pub name: Option<String>,
@@ -47,7 +49,7 @@ pub struct Mailbox {
 }
 
 /// An attachment, without its contents.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentInfo {
     /// Safe file name to show and to suggest when saving.
     pub file_name: String,
@@ -58,7 +60,7 @@ pub struct AttachmentInfo {
 }
 
 /// Everything the list and the reading pane header need.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageSummary {
     /// The Message-ID header, used to find duplicates in Sent.
     pub message_id: Option<String>,
@@ -66,6 +68,8 @@ pub struct MessageSummary {
     pub subject: String,
     /// First sender.
     pub from: Option<Mailbox>,
+    /// Where replies should go, if the sender asked for somewhere else.
+    pub reply_to: Vec<Mailbox>,
     /// Recipients in To.
     pub to: Vec<Mailbox>,
     /// Recipients in Cc.
@@ -78,7 +82,40 @@ pub struct MessageSummary {
     pub has_html: bool,
     /// Attachments (not inline images).
     pub attachments: Vec<AttachmentInfo>,
+    /// The Message-ID this message replies to.
+    pub in_reply_to: Option<String>,
+    /// Message-IDs of the thread so far, oldest first.
+    pub references: Vec<String>,
 }
+
+/// An image embedded in an HTML body and referenced as `cid:`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImage {
+    /// Content-ID without angle brackets.
+    pub content_id: String,
+    /// Image MIME type (raster formats only).
+    pub mime_type: String,
+    /// Decoded image bytes.
+    pub data: Vec<u8>,
+}
+
+/// The readable content of a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageBody {
+    /// Plain-text body, if the sender included one.
+    pub text: Option<String>,
+    /// HTML body, unsanitized. Always pass through `sanitize` before showing.
+    pub html: Option<String>,
+    /// Attachments, in the same order as [`attachment_bytes`] indexes them.
+    pub attachments: Vec<AttachmentInfo>,
+    /// Images referenced from the HTML body.
+    pub inline_images: Vec<InlineImage>,
+}
+
+/// Image types that may be shown inline. SVG is excluded: it can carry script.
+const INLINE_IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// Largest inline image kept (5 MiB).
+pub const MAX_INLINE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 /// True for characters that must never be shown from untrusted text:
 /// control characters and invisible bidirectional formatting marks.
@@ -152,12 +189,70 @@ fn mailboxes(address: Option<&Address<'_>>) -> Vec<Mailbox> {
         .collect()
 }
 
-/// Parse a raw message into a [`MessageSummary`].
-///
-/// # Errors
-/// Returns [`ParseError`] for empty, oversized or unparseable input. Never
-/// panics, whatever the input.
-pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
+fn mime_type(part: &MessagePart<'_>) -> String {
+    part.content_type().map_or_else(
+        || "application/octet-stream".to_owned(),
+        |ct| match ct.subtype() {
+            Some(sub) => format!("{}/{}", ct.ctype(), sub).to_ascii_lowercase(),
+            None => ct.ctype().to_ascii_lowercase(),
+        },
+    )
+}
+
+fn clean_id(id: &str) -> String {
+    display_safe(id.trim().trim_start_matches('<').trim_end_matches('>'))
+}
+
+/// An image shown inside the HTML body rather than offered as a download.
+fn inline_image(part: &MessagePart<'_>) -> Option<InlineImage> {
+    let content_id = clean_id(part.content_id()?);
+    let explicit_attachment = part
+        .content_disposition()
+        .is_some_and(mail_parser::ContentType::is_attachment);
+    let mime = mime_type(part);
+    if content_id.is_empty() || explicit_attachment || !INLINE_IMAGE_TYPES.contains(&mime.as_str())
+    {
+        return None;
+    }
+    let data = part.contents();
+    (data.len() <= MAX_INLINE_IMAGE_BYTES).then(|| InlineImage {
+        content_id,
+        mime_type: mime,
+        data: data.to_vec(),
+    })
+}
+
+fn attachment_parts<'a>(message: &'a Message<'a>) -> impl Iterator<Item = &'a MessagePart<'a>> {
+    message
+        .attachments()
+        .filter(|part| matches!(part.body, PartType::Message(_)) || inline_image(part).is_none())
+}
+
+fn attachment_info(part: &MessagePart<'_>) -> AttachmentInfo {
+    let fallback = if matches!(part.body, PartType::Message(_)) {
+        "message.eml"
+    } else {
+        ""
+    };
+    AttachmentInfo {
+        file_name: safe_file_name(part.attachment_name().unwrap_or(fallback)),
+        mime_type: mime_type(part),
+        size: u64::try_from(part.len()).unwrap_or(u64::MAX),
+    }
+}
+
+fn id_list(value: &HeaderValue<'_>) -> Vec<String> {
+    match (value.as_text(), value.as_text_list()) {
+        (Some(one), _) => vec![clean_id(one)],
+        (None, Some(many)) => many.iter().map(|id| clean_id(id)).collect(),
+        (None, None) => Vec::new(),
+    }
+    .into_iter()
+    .filter(|id| !id.is_empty())
+    .collect()
+}
+
+fn parse(raw: &[u8]) -> Result<Message<'_>, ParseError> {
     if raw.is_empty() {
         return Err(ParseError::Empty);
     }
@@ -167,35 +262,72 @@ pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
             max: MAX_MESSAGE_BYTES,
         });
     }
-    let message = MessageParser::default()
+    MessageParser::default()
         .parse(raw)
-        .ok_or(ParseError::Malformed)?;
+        .ok_or(ParseError::Malformed)
+}
 
-    let attachments = message
-        .attachments()
-        .map(|part| AttachmentInfo {
-            file_name: safe_file_name(part.attachment_name().unwrap_or_default()),
-            mime_type: part.content_type().map_or_else(
-                || "application/octet-stream".to_owned(),
-                |ct| match ct.subtype() {
-                    Some(sub) => format!("{}/{}", ct.ctype(), sub).to_ascii_lowercase(),
-                    None => ct.ctype().to_ascii_lowercase(),
-                },
-            ),
-            size: u64::try_from(part.contents().len()).unwrap_or(u64::MAX),
-        })
-        .collect();
+/// Extract the readable body, attachments and inline images.
+///
+/// # Errors
+/// Same as [`parse_summary`].
+pub fn parse_body(raw: &[u8]) -> Result<MessageBody, ParseError> {
+    let message = parse(raw)?;
+    let html = has_real_html(&message)
+        .then(|| message.body_html(0))
+        .flatten()
+        .map(std::borrow::Cow::into_owned);
+    let text = message
+        .text_body
+        .iter()
+        .filter_map(|&i| message.parts.get(i as usize))
+        .any(|part| matches!(part.body, PartType::Text(_)))
+        .then(|| message.body_text(0))
+        .flatten()
+        .map(std::borrow::Cow::into_owned);
+    Ok(MessageBody {
+        text,
+        html,
+        attachments: attachment_parts(&message).map(attachment_info).collect(),
+        inline_images: message.parts.iter().filter_map(inline_image).collect(),
+    })
+}
 
-    let has_html = message
+/// The bytes of attachment number `index` (as listed by [`parse_body`]),
+/// for saving to disk.
+///
+/// # Errors
+/// Same as [`parse_summary`]. `Ok(None)` when there is no such attachment.
+pub fn attachment_bytes(
+    raw: &[u8],
+    index: usize,
+) -> Result<Option<(AttachmentInfo, Vec<u8>)>, ParseError> {
+    let message = parse(raw)?;
+    Ok(attachment_parts(&message)
+        .nth(index)
+        .map(|part| (attachment_info(part), part.contents().to_vec())))
+}
+
+fn has_real_html(message: &Message<'_>) -> bool {
+    message
         .html_body
         .iter()
         .filter_map(|&index| message.parts.get(index as usize))
-        .any(|part| matches!(part.body, PartType::Html(_)));
+        .any(|part| matches!(part.body, PartType::Html(_)))
+}
 
+/// Parse a raw message into a [`MessageSummary`].
+///
+/// # Errors
+/// Returns [`ParseError`] for empty, oversized or unparseable input. Never
+/// panics, whatever the input.
+pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
+    let message = parse(raw)?;
     Ok(MessageSummary {
-        message_id: message.message_id().map(display_safe),
+        message_id: message.message_id().map(clean_id),
         subject: message.subject().map(display_safe).unwrap_or_default(),
         from: mailboxes(message.from()).into_iter().next(),
+        reply_to: mailboxes(message.reply_to()),
         to: mailboxes(message.to()),
         cc: mailboxes(message.cc()),
         date: message.date().map(mail_parser::DateTime::to_timestamp),
@@ -203,8 +335,10 @@ pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
             .body_text(0)
             .map(|text| make_preview(&text, PREVIEW_CHARS))
             .unwrap_or_default(),
-        has_html,
-        attachments,
+        has_html: has_real_html(&message),
+        attachments: attachment_parts(&message).map(attachment_info).collect(),
+        in_reply_to: id_list(message.in_reply_to()).into_iter().next(),
+        references: id_list(message.references()),
     })
 }
 

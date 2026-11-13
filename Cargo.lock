@@ -2084,6 +2084,7 @@ name = "mail-core"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "base64 0.23.1",
  "mail-parser",
  "proptest",
  "serde",

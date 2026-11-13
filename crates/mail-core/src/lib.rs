@@ -5,6 +5,8 @@
 //! be tested exhaustively and the same code runs in the app, the sync
 //! engine and the test suite.
 
+pub mod compose;
+pub mod folders;
 pub mod limits;
 pub mod message;
 pub mod outbox;

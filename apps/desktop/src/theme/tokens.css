@@ -1,0 +1,93 @@
+/* Colour tokens from the published design. Light is the default; dark applies
+   when the app sets data-theme="dark" (system preference or user choice). */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+  --surface: #ffffff;
+  --list: #fafaf9;
+  --chrome: #f3f3f1;
+  --border: #e4e4e0;
+  --border-soft: #ededea;
+  --text: #1c1c1a;
+  --text-2: #2b2b28;
+  --muted: #5e5e58;
+  --faint: #9a9a92;
+  --input-bg: #ffffff;
+  --input-border: #d6d6d0;
+  --dashed: #c9c9c2;
+  --primary: #2450c8;
+  --primary-pressed: #1b3e9e;
+  --logo: #2450c8;
+  --sel-bg: #e3e9fa;
+  --sel-text: #173a99;
+  --unread: #2450c8;
+  --row-sel: #e3e9fa;
+  --row-hover: #f1f1ee;
+  --warn-bg: #fff4e0;
+  --warn-text: #6b4100;
+  --warn-border: #f2d19a;
+  --badge-bg: #ffe7c2;
+  --info-bg: #eaf0fd;
+  --info-text: #173a99;
+  --info-border: #c3d2f5;
+  --info-bar: #2450c8;
+  --error-bg: #fef0ee;
+  --error-text: #8f1d14;
+  --error-border: #f5c2bc;
+  --tab-on-bg: #1c1c1a;
+  --tab-on-text: #ffffff;
+  --focus: #2450c8;
+  --conn-dot: #c77700;
+  --hue-blue: #2450c8;
+  --hue-teal: #0f7b6c;
+  --hue-orange: #b5471b;
+  --hue-purple: #8a3fb0;
+  --hue-green: #1e6b3a;
+  --file-pdf: #b42318;
+  --file-image: #2450c8;
+  --file-other: #4b5563;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --surface: #17181b;
+  --list: #1c1d21;
+  --chrome: #121316;
+  --border: #2c2e33;
+  --border-soft: #25272b;
+  --text: #ececea;
+  --text-2: #d4d4cf;
+  --muted: #a3a39d;
+  --faint: #5f5f5a;
+  --input-bg: #1f2024;
+  --input-border: #3a3c42;
+  --dashed: #45474d;
+  --primary: #2f5bd6;
+  --primary-pressed: #2449b0;
+  --logo: #6e95ff;
+  --sel-bg: #22325c;
+  --sel-text: #c9d7ff;
+  --unread: #6e95ff;
+  --row-sel: #22304f;
+  --row-hover: #212226;
+  --warn-bg: #33260d;
+  --warn-text: #f5c979;
+  --warn-border: #5c4416;
+  --badge-bg: #4a3510;
+  --info-bg: #1a2647;
+  --info-text: #b9cbff;
+  --info-border: #2c3f73;
+  --info-bar: #6e95ff;
+  --error-bg: #3b1715;
+  --error-text: #ffb4ab;
+  --error-border: #5e2420;
+  --tab-on-bg: #ececea;
+  --tab-on-text: #17181b;
+  --focus: #8fb0ff;
+  --conn-dot: #e0a33a;
+  --hue-blue: #6e95ff;
+  --hue-teal: #3cc2ae;
+  --hue-orange: #f08a5d;
+  --hue-purple: #c792ea;
+  --hue-green: #5fcb8a;
+}

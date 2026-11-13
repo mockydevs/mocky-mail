@@ -15,7 +15,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ammonia::{Builder, UrlRelative};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
+
+use crate::message::InlineImage;
 
 /// Whether images and other content from the internet may load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -120,6 +124,32 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
         html,
         blocked_remote_images: blocked.load(Ordering::Relaxed),
     }
+}
+
+/// Replace `cid:` image references in *already sanitized* HTML with the
+/// matching embedded images as `data:` URLs.
+///
+/// Only images parsed by `message::parse_body` (raster types, size-capped)
+/// are used, and the replacement happens after sanitizing, so a sender cannot
+/// smuggle a `data:` URL of their own choosing past the sanitizer.
+#[must_use]
+pub fn embed_inline_images(sanitized_html: &str, images: &[InlineImage]) -> String {
+    let mut html = sanitized_html.to_owned();
+    for image in images {
+        if image.content_id.contains(['"', '<', '>', '&', '\'']) {
+            continue;
+        }
+        let needle = format!("src=\"cid:{}\"", image.content_id);
+        if html.contains(&needle) {
+            let data_url = format!(
+                "src=\"data:{};base64,{}\"",
+                image.mime_type,
+                STANDARD.encode(&image.data)
+            );
+            html = html.replace(&needle, &data_url);
+        }
+    }
+    html
 }
 
 #[cfg(test)]
@@ -231,6 +261,30 @@ mod tests {
         assert!(out.contains("<table>"));
         assert!(out.contains("<b>Total</b>"));
         assert!(out.contains("padding"));
+    }
+
+    #[test]
+    fn embeds_known_inline_images_only() {
+        let images = vec![InlineImage {
+            content_id: "logo@x".into(),
+            mime_type: "image/png".into(),
+            data: vec![1, 2, 3],
+        }];
+        let html = clean(r#"<img src="cid:logo@x"><img src="cid:other@x">"#);
+        let out = embed_inline_images(&html, &images);
+        assert!(out.contains(r#"src="data:image/png;base64,AQID""#));
+        assert!(out.contains("cid:other@x"));
+    }
+
+    #[test]
+    fn content_ids_with_markup_are_ignored() {
+        let images = vec![InlineImage {
+            content_id: "x\" onerror=\"y".into(),
+            mime_type: "image/png".into(),
+            data: vec![1],
+        }];
+        let html = r#"<img src="cid:x" onerror="y">"#;
+        assert_eq!(embed_inline_images(html, &images), html);
     }
 
     proptest! {
