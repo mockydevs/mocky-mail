@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mail-core", "apps/desktop/src-tauri"]
+members = ["crates/mail-core", "apps/desktop/src-tauri", "crates/mail-auth"]
 # The desktop shell needs WebKitGTK on Linux. Default commands build only the
 # engine so `cargo test` works on any machine; CI builds everything.
 default-members = ["crates/mail-core"]
