@@ -8,6 +8,7 @@ default-members = ["crates/mail-core"]
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/mockydevs/mocky-mail"
 rust-version = "1.95"
 
 [workspace.lints.rust]

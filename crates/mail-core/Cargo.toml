@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Pure, I/O-free mail logic for Mocky Mail: parsing, sanitizing, outbox rules and size limits."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [lints]

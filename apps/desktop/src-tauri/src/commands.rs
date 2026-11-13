@@ -4,6 +4,10 @@
 //! from the webview are size-checked here before any work is done, so a
 //! compromised or buggy page cannot make the backend parse gigabytes.
 
+// Tauri deserializes command arguments into owned values, so taking them by
+// value is required, not wasteful.
+#![allow(clippy::needless_pass_by_value)]
+
 use mail_core::limits::{self, TooLarge};
 use mail_core::message::{self, MessageSummary};
 use mail_core::sanitize::{self, RemoteContent, SanitizedHtml};
