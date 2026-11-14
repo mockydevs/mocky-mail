@@ -1,14 +1,33 @@
 import { act, screen, waitFor, within } from '@testing-library/react';
+import type * as TauriCore from '@tauri-apps/api/core';
 import { afterEach, beforeEach, vi } from 'vitest';
 
 import { reader, renderApp, rows } from '../../test/renderApp';
+
+/** The Android Back button, as the app sees it through Tauri. */
+const back = vi.hoisted(() => ({ press: null as (() => void) | null }));
+vi.mock('@tauri-apps/api/core', async (original) => ({
+  ...(await original<typeof TauriCore>()),
+  isTauri: () => true,
+}));
+vi.mock('@tauri-apps/api/app', () => ({
+  onBackButtonPress: (handler: () => void) => {
+    back.press = handler;
+    return Promise.resolve({
+      unregister: () => {
+        if (back.press === handler) back.press = null;
+        return Promise.resolve();
+      },
+    });
+  },
+}));
 
 /** Pretend the window is phone-sized. */
 function phoneWidth() {
   vi.stubGlobal(
     'matchMedia',
     vi.fn((query: string) => ({
-      matches: query === '(max-width: 760px)',
+      matches: query.startsWith('(max-width'),
       media: query,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
@@ -51,7 +70,7 @@ describe('phone message view', () => {
     // The email is part of the page scroll, not a box of its own.
     expect(pane.getByTitle('Message: Nightly build passed on main').style.flexGrow).toBe('0');
 
-    // Back goes through the browser history, so the phone's Back button works the same way.
+    // The bar's Back arrow returns to the list.
     await user.click(pane.getByRole('button', { name: 'Back to list' }));
     await waitFor(() => {
       expect(app()).not.toHaveClass('app--reading');
@@ -62,8 +81,11 @@ describe('phone message view', () => {
     const { user } = renderApp();
     await user.click((await rows()).getByRole('button', { name: /Build server/ }));
     expect(app()).toHaveClass('app--reading');
+    await waitFor(() => {
+      expect(back.press).not.toBeNull();
+    });
     act(() => {
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      back.press?.();
     });
     expect(app()).not.toHaveClass('app--reading');
   });

@@ -1265,8 +1265,9 @@ button:disabled {
   flex: none;
   align-items: center;
   gap: 2px;
-  height: 56px;
-  padding: 0 6px;
+  /* Clear the phone's status bar (clock, Wi-Fi, battery). */
+  height: calc(56px + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) 6px 0;
   border-bottom: 1px solid var(--border);
 }
 
