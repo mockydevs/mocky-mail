@@ -14,6 +14,8 @@ interface Props {
 
 type Busy = null | 'password' | 'google' | 'microsoft';
 
+const providerName = (which: 'google' | 'microsoft') => (which === 'google' ? 'Google' : 'Microsoft');
+
 function ServerFields({
   legend,
   value,
@@ -74,7 +76,9 @@ function ServerFields({
 }
 
 /**
- * Email, then server suggestions, then password. The password is read from
+ * One path from top to bottom: email, password, name, then Add account.
+ * Google and Microsoft sign-in sit below as alternatives, or move up under
+ * the email when the address belongs to one of them. The password is read from
  * the field on submit and the field is cleared at once; it is never kept in
  * component state.
  */
@@ -165,11 +169,27 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
 
   const copy = error ? accountErrorCopy(error, email) : null;
 
+  const oauthButton = (which: 'google' | 'microsoft', variant = 'btn--secondary') => (
+    <button
+      type="button"
+      className={`btn ${variant} btn--large`}
+      disabled={busy !== null}
+      onClick={() => {
+        oauth(which);
+      }}
+    >
+      {busy === which ? `Waiting for ${providerName(which)}` : `Continue with ${providerName(which)}`}
+    </button>
+  );
+
   return (
     <form className="account-form" aria-labelledby={`${id}-title`} onSubmit={submit} noValidate>
-      <h2 id={`${id}-title`} className="account-form__title">
-        Add an email account
-      </h2>
+      <header className="account-form__header">
+        <h2 id={`${id}-title`} className="account-form__title">
+          Add an email account
+        </h2>
+        <p className="form-hint">Works with Mocky Mail, Gmail, Outlook and any other IMAP mailbox.</p>
+      </header>
 
       {copy && (
         <div className="notice notice--error" role="alert">
@@ -197,49 +217,16 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
         />
       </label>
 
-      <label className="form-field" htmlFor={`${id}-name`}>
-        <span className="form-field__label">Your name (shown to people you email)</span>
-        <input
-          id={`${id}-name`}
-          className="field"
-          autoComplete="name"
-          value={displayName}
-          onChange={(e) => {
-            setDisplayName(e.target.value);
-          }}
-        />
-      </label>
-
-      <div className="oauth">
-        <button
-          type="button"
-          className={`btn btn--secondary${suggestedOAuth === 'google' ? ' btn--highlight' : ''}`}
-          disabled={busy !== null}
-          onClick={() => {
-            oauth('google');
-          }}
-        >
-          {busy === 'google' ? 'Waiting for Google' : 'Continue with Google'}
-        </button>
-        <button
-          type="button"
-          className={`btn btn--secondary${suggestedOAuth === 'microsoft' ? ' btn--highlight' : ''}`}
-          disabled={busy !== null}
-          onClick={() => {
-            oauth('microsoft');
-          }}
-        >
-          {busy === 'microsoft' ? 'Waiting for Microsoft' : 'Continue with Microsoft'}
-        </button>
-      </div>
       {suggestedOAuth && (
-        <p className="form-hint">
-          This looks like a {suggestedOAuth === 'google' ? 'Google' : 'Microsoft'} account. Signing in with{' '}
-          {suggestedOAuth === 'google' ? 'Google' : 'Microsoft'} is easiest; an app password also works.
-        </p>
+        <div className="oauth-suggest" role="status">
+          <p className="form-hint">
+            This is a {providerName(suggestedOAuth)} account. Signing in with {providerName(suggestedOAuth)} is
+            quickest, with no password to type.
+          </p>
+          {oauthButton(suggestedOAuth, 'btn--primary btn--block')}
+          <p className="divider">or use an app password</p>
+        </div>
       )}
-
-      <p className="divider">or use a password</p>
 
       <div className="form-field">
         <label className="form-field__label" htmlFor={`${id}-password`}>
@@ -257,6 +244,20 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
           ? `${provider} needs an app password here, not your normal password. Create one in your ${provider} account security settings.`
           : 'Gmail, Yahoo and iCloud need an app password for mail apps. Your password is kept in the system password store, never in plain text.'}
       </p>
+
+      <label className="form-field" htmlFor={`${id}-name`}>
+        <span className="form-field__label">Your name (optional)</span>
+        <input
+          id={`${id}-name`}
+          className="field"
+          autoComplete="name"
+          placeholder="Shown to people you email"
+          value={displayName}
+          onChange={(e) => {
+            setDisplayName(e.target.value);
+          }}
+        />
+      </label>
 
       {noSuggestion && (
         <p className="form-hint" role="status">
@@ -296,10 +297,20 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
             Cancel
           </button>
         )}
-        <button type="submit" className="btn btn--primary btn--large" disabled={busy !== null}>
+        <button type="submit" className={`btn ${suggestedOAuth ? 'btn--secondary' : 'btn--primary'} btn--large account-form__submit`} disabled={busy !== null}>
           {busy === 'password' ? 'Checking sign-in' : 'Add account'}
         </button>
       </div>
+
+      {!suggestedOAuth && (
+        <>
+          <p className="divider">or sign in with</p>
+          <div className="oauth">
+            {oauthButton('google')}
+            {oauthButton('microsoft')}
+          </div>
+        </>
+      )}
     </form>
   );
 }

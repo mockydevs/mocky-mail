@@ -47,12 +47,14 @@ impl ErrorKind {
 #[derive(Debug, Error)]
 pub enum SyncError {
     /// Could not open a connection.
-    #[error("couldn't reach {host}:{port}. Check the server name and your connection.")]
+    #[error("couldn't reach {host}:{port}: {reason}.")]
     Connect {
         /// Server host.
         host: String,
         /// Server port.
         port: u16,
+        /// Why, in plain words, so a blocked port and a typo look different.
+        reason: String,
     },
     /// The connection broke mid-conversation (Wi-Fi lost, laptop slept).
     #[error("the connection to the mail server dropped.")]
@@ -102,6 +104,36 @@ pub enum SyncError {
         /// True when retrying will not help (5xx).
         permanent: bool,
     },
+}
+
+/// Plain words for a failed TCP connect. The OS message is kept for the
+/// cases we don't recognise, so support can still tell what happened.
+#[must_use]
+pub fn connect_reason(error: &std::io::Error) -> String {
+    use std::io::ErrorKind as Io;
+    match error.kind() {
+        Io::ConnectionRefused => {
+            "the server refused the connection. The port may be wrong, or a firewall is blocking it".to_owned()
+        }
+        Io::PermissionDenied => {
+            "this computer blocked the connection. Antivirus or firewall software may be stopping Mocky Mail; allow it there".to_owned()
+        }
+        Io::NetworkUnreachable | Io::HostUnreachable | Io::NetworkDown => {
+            "there is no network route to the server. Check your internet connection".to_owned()
+        }
+        Io::ConnectionReset | Io::ConnectionAborted => {
+            "the connection was cut off straight away, often by a firewall or antivirus".to_owned()
+        }
+        _ => {
+            let text = error.to_string();
+            let lower = text.to_lowercase();
+            if lower.contains("lookup") || lower.contains("no such host") || lower.contains("not known") {
+                "the server name could not be found. Check the spelling".to_owned()
+            } else {
+                text
+            }
+        }
+    }
 }
 
 impl SyncError {
@@ -160,6 +192,29 @@ impl From<async_imap::error::Error> for SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_failures_say_why() {
+        use std::io::{Error, ErrorKind as Io};
+        let blocked = connect_reason(&Error::from(Io::PermissionDenied));
+        assert!(blocked.contains("Antivirus or firewall"), "{blocked}");
+        let refused = connect_reason(&Error::from(Io::ConnectionRefused));
+        assert!(refused.contains("refused"), "{refused}");
+        let unknown = connect_reason(&Error::other("No such host is known. (os error 11001)"));
+        assert!(unknown.contains("could not be found"), "{unknown}");
+        let other = connect_reason(&Error::other("something odd"));
+        assert_eq!(other, "something odd");
+        let error = SyncError::Connect {
+            host: "mail.example.com".into(),
+            port: 993,
+            reason: blocked,
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with("couldn't reach mail.example.com:993: this computer")
+        );
+    }
 
     #[test]
     fn server_refusals_are_final_unless_marked_temporary() {

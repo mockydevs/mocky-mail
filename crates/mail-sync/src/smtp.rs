@@ -87,6 +87,7 @@ pub async fn test_login(server: &ServerConfig, credentials: &Credentials) -> Res
         Ok(false) => Err(SyncError::Connect {
             host: server.host.clone(),
             port: server.port,
+            reason: "the server did not accept the connection".to_owned(),
         }),
         Err(e) => Err(classify(&server.host, &e)),
     }

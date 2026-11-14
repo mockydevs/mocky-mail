@@ -12,7 +12,10 @@ describe('adding an account', () => {
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
     await user.type(field('Email address'), 'don@gmail.com');
     await user.tab();
-    expect(await within(form()).findByText(/This looks like a Google account/)).toBeInTheDocument();
+    expect(await within(form()).findByText(/This is a Google account/)).toBeInTheDocument();
+    // The suggested sign-in moves up under the email; the other provider steps aside.
+    expect(within(form()).getByRole('button', { name: 'Continue with Google' })).toHaveClass('btn--primary');
+    expect(within(form()).queryByRole('button', { name: 'Continue with Microsoft' })).not.toBeInTheDocument();
     expect(within(form()).getByText(/Gmail needs an app password here/)).toBeInTheDocument();
     await user.click(within(form()).getByRole('button', { name: 'Advanced: server settings' }));
     const imap = within(form()).getByRole('group', { name: 'Incoming mail (IMAP)' });
@@ -116,7 +119,7 @@ describe('adding an account', () => {
     const { user } = renderApp({ accounts: [] });
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
     await user.type(field('Email address'), 'don@mocky.co.ke');
-    await user.type(field('Your name (shown to people you email)'), 'Don');
+    await user.type(field('Your name (optional)'), 'Don');
     await user.tab();
     await user.type(field('Password or app password'), 'correct horse');
     await user.click(within(form()).getByRole('button', { name: 'Add account' }));

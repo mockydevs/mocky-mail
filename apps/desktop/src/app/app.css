@@ -1345,6 +1345,26 @@ kbd {
   gap: 8px;
 }
 
+.account-form__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.account-form__submit {
+  flex: 1 1 auto;
+}
+
+.oauth-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
 .oauth {
   display: flex;
   flex-wrap: wrap;

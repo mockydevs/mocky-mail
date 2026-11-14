@@ -257,9 +257,10 @@ async fn open_stream(server: &ServerConfig) -> Result<ImapStream, SyncError> {
     let host = server.host.as_str();
     let tcp = within(host, TcpStream::connect((host, server.port)))
         .await?
-        .map_err(|_| SyncError::Connect {
+        .map_err(|e| SyncError::Connect {
             host: host.to_owned(),
             port: server.port,
+            reason: crate::error::connect_reason(&e),
         })?;
     match server.security {
         Security::Tls => Ok(Either::Left(within(host, tls::wrap(tcp, host)).await??)),
@@ -270,6 +271,7 @@ async fn open_stream(server: &ServerConfig) -> Result<ImapStream, SyncError> {
                 .map_err(|_| SyncError::Connect {
                     host: host.to_owned(),
                     port: server.port,
+                    reason: "the server did not send a greeting".to_owned(),
                 })?;
             within(host, client.run_command_and_check_ok("STARTTLS", None))
                 .await?
