@@ -31,6 +31,8 @@ const FETCH_CHUNK: usize = 100;
 const FLAG_CHUNK: usize = 500;
 /// Bodies prefetched per folder per pass, for offline reading and search.
 const BODY_PREFETCH: u32 = 40;
+/// The inbox is read most, so more of it is kept offline.
+const INBOX_BODY_PREFETCH: u32 = 200;
 /// How often every folder is checked, not just the inbox.
 const FULL_SYNC_EVERY: Duration = Duration::from_mins(10);
 /// Check interval when the server has no IDLE.
@@ -70,6 +72,14 @@ pub enum Op {
         /// Create the target first (it was made locally, e.g. Archive).
         create_target: bool,
     },
+    /// Delete permanently the messages with this Message-ID (an old draft
+    /// copy whose UID may not be known yet).
+    DeleteByMessageId {
+        /// Folder path.
+        folder: String,
+        /// Message-ID without angle brackets.
+        message_id: String,
+    },
     /// Delete permanently.
     Delete {
         /// Folder path.
@@ -87,7 +97,7 @@ pub fn enqueue(state: &AppState, account_id: &str, op: &Op) -> AppResult<()> {
     let kind = match op {
         Op::SetFlags { .. } => OpKind::SetFlags,
         Op::Move { .. } => OpKind::Move,
-        Op::Delete { .. } => OpKind::Delete,
+        Op::Delete { .. } | Op::DeleteByMessageId { .. } => OpKind::Delete,
     };
     let payload = serde_json::to_value(op).map_err(|e| AppError::internal(e.to_string()))?;
     state.store.enqueue_op(account_id, kind, &payload, now())?;
@@ -244,6 +254,10 @@ async fn apply(conn: &mut ImapConnection, op: &Op) -> Result<(), mail_sync::Sync
             conn.move_messages(from, uids, to).await
         }
         Op::Delete { folder, uids } => conn.delete_forever(folder, uids).await,
+        Op::DeleteByMessageId { folder, message_id } => {
+            let uids = conn.uids_with_message_id(folder, message_id).await?;
+            conn.delete_forever(folder, &uids).await
+        }
     }
 }
 
@@ -395,9 +409,14 @@ async fn sync_folder(
         }
     }
 
+    let prefetch = if folder.role == FolderRole::Inbox {
+        INBOX_BODY_PREFETCH
+    } else {
+        BODY_PREFETCH
+    };
     for (id, uid) in state.store.messages_missing_raw(
         &folder.id,
-        BODY_PREFETCH,
+        prefetch,
         u64::from(MAX_BACKGROUND_BODY_BYTES),
     )? {
         if let Some(raw) = conn.fetch_raw(&folder.path, uid).await? {

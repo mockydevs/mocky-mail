@@ -22,7 +22,11 @@ type Account = {
 };
 
 type FolderRole = "inbox" | "sent" | "drafts" | "archive" | "junk" | "trash" | "all" | "flagged" | "other";
-type Folder = { id: string; accountId: string; name: string; path: string; role: FolderRole; unread: number; total: number };
+type Folder = {
+  id: string; accountId: string; name: string; path: string; role: FolderRole; unread: number; total: number;
+  delimiter: string | null;  // hierarchy separator; nest folders by splitting `path` on it. A parent that
+                             // isn't itself a folder (server container) is shown as a plain label.
+};
 
 type Mailbox = { name: string | null; address: string };
 
@@ -41,7 +45,7 @@ type MessageDetail = MessageListItem & {
   text: string | null;
   blockedRemoteImages: number;
   attachments: AttachmentMeta[];
-  messageIdHeader: string | null; references: string[];
+  messageIdHeader: string | null; inReplyTo: string | null; references: string[];
 };
 
 type ListQuery = {
@@ -61,6 +65,8 @@ type Draft = {
   inReplyTo: string | null; references: string[];
   attachments: DraftAttachment[];
   replyToMessageId: string | null;   // marks original \Answered after send
+  draftMessageId: string | null;     // Message-ID of the saved draft this replaces (from save_draft, or
+                                     // MessageDetail.messageIdHeader when continuing a draft from Drafts)
 };
 
 type OutboxState =
@@ -98,8 +104,9 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `save_attachment` | `{ messageId, index }` | `string \| null` (shows a save dialog; null if cancelled) |
 | `pick_attachments` | | `DraftAttachment[]` (open-file dialog) |
 | `check_draft` | `{ draft }` | `{ estimatedBytes: number; limitBytes: number }` or rejects `invalid`/`too_large` |
-| `send_message` | `{ draft }` | `OutboxEntry` (validated, queued; outbox worker sends) |
-| `save_draft` | `{ draft }` | `void` (stored in the account's Drafts folder) |
+| `send_message` | `{ draft }` | `OutboxEntry` (validated, queued; outbox worker sends; removes the saved draft `draft.draftMessageId` if set) |
+| `attachments_for_draft` | `{ messageId }` | `DraftAttachment[]` (copies of a message's attachments, usable in a Draft: forwarding, continuing a draft) |
+| `save_draft` | `{ draft }` | `{ draftMessageId: string }` (stored in Drafts; replaces `draft.draftMessageId` if set; pass the returned id on the next save) |
 | `list_outbox` | | `OutboxEntry[]` |
 | `outbox_send_now` | `{ id }` | `void` |
 | `outbox_cancel` | `{ id }` | `void` |

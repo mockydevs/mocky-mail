@@ -43,25 +43,36 @@ const ROLE_FOLDERS: [FolderRole, string][] = [
 ];
 
 /** Folders without counts; the mock computes unread and total from messages. */
-export function foldersFor(accountId: string, extra: [string, string][] = []): Omit<Folder, 'unread' | 'total'>[] {
+export function foldersFor(
+  accountId: string,
+  extra: [string, string][] = [],
+  delimiter: string | null = '/',
+): Omit<Folder, 'unread' | 'total'>[] {
   return [
-    ...ROLE_FOLDERS.map(([role, name]) => ({ id: `${accountId}:${role}`, accountId, name, path: name, role })),
+    ...ROLE_FOLDERS.map(([role, name]) => ({ id: `${accountId}:${role}`, accountId, name, path: name, role, delimiter })),
     ...extra.map(([name, path]) => ({
       id: `${accountId}:${path}`,
       accountId,
       name,
       path,
       role: 'other' as const,
+      delimiter,
     })),
   ];
 }
 
+/**
+ * Work uses "/" and Personal uses "." as the hierarchy separator. "Projects"
+ * is a server container that is not itself a folder.
+ */
 export const MOCK_FOLDERS = [
   ...foldersFor('work', [
     ['Clients', 'Clients'],
+    ['Acme', 'Clients/Acme'],
+    ['2026', 'Projects/2026'],
     ['Résumés', 'R&AMk-sum&AOk-s'],
   ]),
-  ...foldersFor('personal', [['Travel', 'Travel']]),
+  ...foldersFor('personal', [['Travel', 'Travel'], ['Kenya', 'Travel.Kenya']], '.'),
 ];
 
 const me = (accountId: string) => ({
@@ -174,6 +185,8 @@ export const MOCK_MESSAGES: MockMessage[] = [
     from: { name: null, address: 'you@personal.example' },
     subject: 'Re: Lunch on Friday?', preview: 'Friday works. 1pm at',
     date: at('2026-11-13T07:14:00Z'), text: 'Friday works. 1pm at',
+    references: ['<lunch-1@personal.example>'],
+    attachments: [{ index: 0, fileName: 'Menu.pdf', mimeType: 'application/pdf', size: 220 * 1024 }],
   }),
   message({
     id: 's1', accountId: 'work', folderId: 'work:sent',

@@ -53,6 +53,8 @@ export interface Folder {
   role: FolderRole;
   unread: number;
   total: number;
+  /** Hierarchy separator: nest folders by splitting `path` on it. */
+  delimiter: string | null;
 }
 
 export interface Mailbox {
@@ -133,6 +135,15 @@ export interface Draft {
   attachments: DraftAttachment[];
   /** Marks the original \Answered after sending. */
   replyToMessageId: string | null;
+  /**
+   * Message-ID of the saved draft this replaces: from save_draft, or the
+   * message's messageIdHeader when continuing a draft from Drafts.
+   */
+  draftMessageId: string | null;
+}
+
+export interface DraftSaved {
+  draftMessageId: string;
 }
 
 /** Tags come from mail-core's serde output, hence snake_case. */
@@ -239,7 +250,10 @@ export interface MailApi {
   pickAttachments(): Promise<DraftAttachment[]>;
   checkDraft(draft: Draft): Promise<DraftCheck>;
   sendMessage(draft: Draft): Promise<OutboxEntry>;
-  saveDraft(draft: Draft): Promise<void>;
+  /** Stores the draft in Drafts, replacing `draft.draftMessageId` if set. */
+  saveDraft(draft: Draft): Promise<DraftSaved>;
+  /** Copies of a message's attachments, usable in a Draft (forwarding, continuing a draft). */
+  attachmentsForDraft(messageId: string): Promise<DraftAttachment[]>;
   listOutbox(): Promise<OutboxEntry[]>;
   outboxSendNow(id: string): Promise<void>;
   outboxCancel(id: string): Promise<void>;

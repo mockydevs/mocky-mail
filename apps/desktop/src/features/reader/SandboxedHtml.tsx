@@ -14,8 +14,10 @@ export function emailDocument(sanitizedHtml: string): string {
     '<!doctype html><html><head><meta charset="utf-8">',
     `<meta http-equiv="Content-Security-Policy" content="${EMAIL_CSP}">`,
     '<meta name="referrer" content="no-referrer">',
+    // Emails are designed for a light page; never let a dark app theme leak in.
+    '<meta name="color-scheme" content="light">',
     '<base target="_blank">',
-    '<style>html,body{margin:0;font:15px/1.6 Inter,system-ui,sans-serif;color:#2b2b28;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style>',
+    '<style>:root{color-scheme:light}html,body{margin:0;background:#fff;color:#2b2b28}body{padding:16px 24px;font:15px/1.6 Inter,system-ui,sans-serif;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style>',
     '</head><body>',
     sanitizedHtml,
     '</body></html>',
@@ -29,5 +31,15 @@ export function emailDocument(sanitizedHtml: string): string {
  * same-origin access to the app stay blocked.
  */
 export function SandboxedHtml({ html, title }: { html: string; title: string }) {
-  return <iframe className="email-frame" title={title} sandbox="allow-popups" referrerPolicy="no-referrer" srcDoc={emailDocument(html)} />;
+  return (
+    <iframe
+      className="email-frame"
+      title={title}
+      sandbox="allow-popups"
+      referrerPolicy="no-referrer"
+      srcDoc={emailDocument(html)}
+      // Fill the reading pane: grow into the space left below the header; the frame scrolls itself.
+      style={{ flex: '1 1 auto', width: '100%', minHeight: 0, border: 0 }}
+    />
+  );
 }

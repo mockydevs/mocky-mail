@@ -23,6 +23,7 @@ export function blankDraft(accountId: string): Draft {
     references: [],
     attachments: [],
     replyToMessageId: null,
+    draftMessageId: null,
   };
 }
 

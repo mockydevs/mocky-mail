@@ -33,6 +33,7 @@ export function createTauriMailApi(): MailApi {
     checkDraft: (draft) => call('check_draft', { draft }),
     sendMessage: (draft) => call('send_message', { draft }),
     saveDraft: (draft) => call('save_draft', { draft }),
+    attachmentsForDraft: (messageId) => call('attachments_for_draft', { messageId }),
     listOutbox: () => call('list_outbox'),
     outboxSendNow: (id) => call('outbox_send_now', { id }),
     outboxCancel: (id) => call('outbox_cancel', { id }),

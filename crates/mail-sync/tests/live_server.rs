@@ -207,6 +207,24 @@ async fn full_mailbox_round_trip() {
         copy[0].summary.subject
     );
 
+    // Replacing a saved draft: find the old copy by Message-ID and remove it.
+    let drafts = format!("Drafts{}", std::process::id());
+    bob.create_folder(&drafts).await.unwrap();
+    bob.append(&drafts, &raw, "(\\Draft \\Seen)").await.unwrap();
+    wait_for(&mut bob, &drafts, 1).await;
+    let old_copy = bob
+        .uids_with_message_id(&drafts, &message_id)
+        .await
+        .unwrap();
+    assert_eq!(old_copy.len(), 1);
+    bob.delete_forever(&drafts, &old_copy).await.unwrap();
+    assert!(
+        bob.uids_with_message_id(&drafts, &message_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     drop(uids);
     bob.logout().await;
 }

@@ -133,6 +133,7 @@ pub fn run() {
             outbox::check_draft,
             outbox::send_message,
             outbox::save_draft,
+            outbox::attachments_for_draft,
             outbox::list_outbox,
             outbox::outbox_send_now,
             outbox::outbox_cancel,

@@ -463,6 +463,26 @@ impl ImapConnection {
             .map_err(SyncError::from)
     }
 
+    /// UIDs of messages in the folder with this Message-ID (usually one).
+    ///
+    /// # Errors
+    /// Invalid IDs, network or server errors.
+    pub async fn uids_with_message_id(
+        &mut self,
+        path: &str,
+        message_id: &str,
+    ) -> Result<Vec<u32>, SyncError> {
+        let query = format!("HEADER Message-ID {}", quote_search(message_id)?);
+        self.ensure_selected(path).await?;
+        let host = self.host.clone();
+        let mut uids: Vec<u32> = within(&host, self.session.uid_search(query))
+            .await??
+            .into_iter()
+            .collect();
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
     /// Whether a message with this Message-ID is in the folder (checks Sent
     /// before resending after a crash).
     ///
@@ -473,11 +493,9 @@ impl ImapConnection {
         path: &str,
         message_id: &str,
     ) -> Result<bool, SyncError> {
-        let query = format!("HEADER Message-ID {}", quote_search(message_id)?);
-        self.ensure_selected(path).await?;
-        let host = self.host.clone();
-        Ok(!within(&host, self.session.uid_search(query))
-            .await??
+        Ok(!self
+            .uids_with_message_id(path, message_id)
+            .await?
             .is_empty())
     }
 

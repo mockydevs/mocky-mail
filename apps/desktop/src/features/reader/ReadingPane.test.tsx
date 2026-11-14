@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 
+import { MOCK_MESSAGES } from '../../api/mock/mockData';
 import { reader, renderApp, rows } from '../../test/renderApp';
 
 describe('reading pane', () => {
@@ -16,6 +17,32 @@ describe('reading pane', () => {
       expect(shown.getAttribute('srcdoc')).toContain('https://ci.example/badge.svg');
     });
     expect(within(reader()).queryByRole('button', { name: /Show images/ })).not.toBeInTheDocument();
+  });
+
+  it('gives HTML mail the rest of the pane, with attachments above and quick reply below', async () => {
+    const { user } = renderApp({
+      messages: MOCK_MESSAGES.map((m) =>
+        m.id === 'm1' ? { ...m, html: '<p>Quote</p>', text: null } : m,
+      ),
+    });
+    await rows();
+    const frame = await within(reader()).findByTitle(/Message: Revised quotation/);
+    const holder = frame.parentElement;
+    if (!holder) throw new Error('frame has no container');
+    expect(holder).toHaveStyle({ display: 'flex', flexDirection: 'column', minHeight: '0px' });
+    expect(holder.style.flexGrow).toBe('1');
+    expect(holder.parentElement).toBe(reader());
+    expect(frame.style.flexGrow).toBe('1');
+    expect(frame.style.height).toBe('');
+
+    const attachments = within(reader()).getByRole('list', { name: 'Attachments' });
+    const quickReply = within(reader()).getByLabelText('Quick reply to Wanjiru');
+    // Attachments come before the frame; quick reply after it.
+    expect(attachments.compareDocumentPosition(frame) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(frame.compareDocumentPosition(quickReply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.type(quickReply, 'Signed, see attached.');
+    await user.click(within(reader()).getByRole('button', { name: 'Send' }));
+    expect(await within(reader()).findByText('Reply queued in the Outbox.')).toBeInTheDocument();
   });
 
   it('opens links in plain text mail through the system browser', async () => {

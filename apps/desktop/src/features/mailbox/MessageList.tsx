@@ -1,4 +1,4 @@
-import { useEffect, useRef, type UIEvent } from 'react';
+import { useEffect, useRef } from 'react';
 
 import type { Account, AppError, FolderRole, MessageListItem, ReadFilter } from '../../api/types';
 import { formatListTime } from '../../lib/format';
@@ -61,12 +61,29 @@ export function MessageList(props: Props) {
     row?.scrollIntoView?.({ block: 'nearest' });
   }, [selectedId]);
 
-  const onScroll = (event: UIEvent<HTMLDivElement>) => {
-    const el = event.currentTarget;
-    if (props.hasMore && !props.loadingMore && el.scrollTop + el.clientHeight >= el.scrollHeight - PREFETCH_PX) {
-      props.onLoadMore();
-    }
-  };
+  // Infinite scroll: watch a marker at the end of the list, relative to the
+  // list's own scroll container (the window never scrolls).
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const loadMoreRef = useRef(props.onLoadMore);
+  useEffect(() => {
+    loadMoreRef.current = props.onLoadMore;
+  });
+  const canLoadMore = props.status === 'ready' && props.hasMore && !props.loadingMore;
+  useEffect(() => {
+    const root = listRef.current;
+    const sentinel = sentinelRef.current;
+    if (!canLoadMore || !root || !sentinel || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadMoreRef.current();
+      },
+      { root, rootMargin: `0px 0px ${String(PREFETCH_PX)}px 0px` },
+    );
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+    };
+  }, [canLoadMore, items.length]);
 
   return (
     <section className="list" aria-labelledby="list-title">
@@ -97,7 +114,7 @@ export function MessageList(props: Props) {
         </div>
       </div>
 
-      <div className="list__scroll" ref={listRef} onScroll={onScroll}>
+      <div className="list__scroll" ref={listRef} data-testid="list-scroll">
         {props.status === 'loading' && (
           <div aria-busy="true" aria-label="Loading messages">
             {[0, 1, 2, 3, 4].map((i) => (
@@ -191,7 +208,7 @@ export function MessageList(props: Props) {
         )}
 
         {props.status === 'ready' && props.hasMore && (
-          <div className="list__more">
+          <div className="list__more" ref={sentinelRef}>
             <button type="button" className="btn btn--secondary" disabled={props.loadingMore} onClick={props.onLoadMore}>
               {props.loadingMore ? 'Loading' : `Load more (${String(props.total - items.length)} left)`}
             </button>

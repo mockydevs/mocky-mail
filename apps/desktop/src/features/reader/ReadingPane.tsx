@@ -1,13 +1,13 @@
-import { forwardRef, useState } from 'react';
+import { forwardRef, useState, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
-import { toAppError } from '../../api/errors';
+import { errorTitle, toAppError } from '../../api/errors';
 import type { Account, AppError, FolderRole, MessageDetail, MessageListItem } from '../../api/types';
 import { formatBytes, formatLongDate } from '../../lib/format';
 import { useLoad } from '../../lib/useLoad';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
-import { formatMailbox, formatMailboxes, toolbarActions } from '../compose/seed';
+import { formatMailbox, formatMailboxes, replyDraft, toolbarActions } from '../compose/seed';
 import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
 
@@ -80,6 +80,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
   }
 
   const message = loaded.value;
+  const isHtml = message.html !== null;
   const actions = toolbarActions(role);
   const sender = message.from;
   const outgoing = account !== undefined && sender?.address.toLowerCase() === account.email.toLowerCase();
@@ -195,7 +196,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
         )}
       </div>
 
-      <div className="reader__scroll">
+      <div className={isHtml ? 'reader__head' : 'reader__scroll'}>
         <h2 className="reader__subject">{message.subject || '(no subject)'}</h2>
         <header className="reader__header">
           <Avatar name={sender?.name ?? sender?.address ?? '?'} address={sender?.address ?? ''} size={44} />
@@ -248,31 +249,6 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
           </div>
         )}
 
-        <div className="reader__body">
-          {message.html !== null ? (
-            <SandboxedHtml title={`Message: ${message.subject}`} html={message.html} />
-          ) : (
-            <div className="reader__text">
-              {linkify(message.text ?? '').map((part, i) =>
-                part.kind === 'text' ? (
-                  <span key={i}>{part.text}</span>
-                ) : (
-                  <a
-                    key={i}
-                    href={part.url}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      open(part.url);
-                    }}
-                  >
-                    {part.text}
-                  </a>
-                ),
-              )}
-            </div>
-          )}
-        </div>
-
         {message.attachments.length > 0 && (
           <ul className="attachments" aria-label="Attachments">
             {message.attachments.map((file) => (
@@ -309,10 +285,111 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
             {notice.error.message}
           </p>
         )}
+
+        {!isHtml && (
+          <div className="reader__body">
+              <div className="reader__text">
+                {linkify(message.text ?? '').map((part, i) =>
+                  part.kind === 'text' ? (
+                    <span key={i}>{part.text}</span>
+                  ) : (
+                    <a
+                      key={i}
+                      href={part.url}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        open(part.url);
+                      }}
+                    >
+                      {part.text}
+                    </a>
+                  ),
+                )}
+              </div>
+          </div>
+        )}
       </div>
+
+      {isHtml && (
+        <div
+          className="reader__frame"
+          style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }}
+        >
+          <SandboxedHtml title={`Message: ${message.subject}`} html={message.html ?? ''} />
+        </div>
+      )}
+
+      {actions.includes('reply') && account && <QuickReply message={message} account={account} />}
     </article>
   );
 });
+
+/** A short reply without leaving the reader; it goes through the same checks and Outbox as compose. */
+function QuickReply({ message, account }: { message: MessageDetail; account: Account }) {
+  const api = useMailApi();
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<AppError | null>(null);
+  const [sent, setSent] = useState(false);
+  const firstName = (message.from?.name ?? message.from?.address ?? '').split(' ')[0] ?? '';
+
+  const submit = (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!text.trim() || busy) return;
+    const base = replyDraft(message, account, false);
+    const draft = { ...base, bodyText: `${text.trim()}${base.bodyText}` };
+    setBusy(true);
+    setError(null);
+    setSent(false);
+    api
+      .checkDraft(draft)
+      .then(() => api.sendMessage(draft))
+      .then(
+        () => {
+          setText('');
+          setSent(true);
+        },
+        (e: unknown) => {
+          setError(toAppError(e));
+        },
+      )
+      .finally(() => {
+        setBusy(false);
+      });
+  };
+
+  return (
+    <form className="quick-reply" onSubmit={submit}>
+      <label className="quick-reply__label">
+        Quick reply to {firstName || 'sender'}
+        <textarea
+          className="field"
+          rows={2}
+          value={text}
+          placeholder="Write a reply"
+          onChange={(e) => {
+            setText(e.target.value);
+            setSent(false);
+          }}
+        />
+      </label>
+      <button type="submit" className="btn btn--primary btn--large" disabled={busy || !text.trim()}>
+        <Icon name="sent" size={16} />
+        Send
+      </button>
+      {sent && (
+        <p className="quick-reply__status form-hint" role="status">
+          Reply queued in the Outbox.
+        </p>
+      )}
+      {error && (
+        <p className="quick-reply__status form-error" role="alert">
+          {errorTitle(error.kind)}: {error.message}
+        </p>
+      )}
+    </form>
+  );
+}
 
 function fileBadge(name: string): string {
   const dot = name.lastIndexOf('.');

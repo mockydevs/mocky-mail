@@ -30,6 +30,7 @@ describe('createTauriMailApi', () => {
     await api.saveAttachment('m1', 2);
     await api.syncNow(null);
     await api.listFolders('acc');
+    await api.attachmentsForDraft('m9');
     await api.setSettings({ theme: 'dark', remoteImages: 'block', notifications: true });
     expect(invoke.mock.calls).toEqual([
       ['get_message', { id: 'm1', allowRemote: true }],
@@ -38,6 +39,7 @@ describe('createTauriMailApi', () => {
       ['save_attachment', { messageId: 'm1', index: 2 }],
       ['sync_now', { accountId: null }],
       ['list_folders', { accountId: 'acc' }],
+      ['attachments_for_draft', { messageId: 'm9' }],
       ['set_settings', { settings: { theme: 'dark', remoteImages: 'block', notifications: true } }],
     ]);
   });

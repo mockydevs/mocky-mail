@@ -36,6 +36,10 @@ const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_IDLE: Duration = Duration::from_secs(30);
 
 /// A message as written in compose (`Draft` in `docs/ipc.md`).
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names mirror the IPC contract"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Draft {
@@ -49,6 +53,9 @@ pub struct Draft {
     references: Vec<String>,
     attachments: Vec<DraftAttachment>,
     reply_to_message_id: Option<String>,
+    /// Message-ID of the saved draft this replaces.
+    #[serde(default)]
+    draft_message_id: Option<String>,
 }
 
 /// An outbox row for the interface (`OutboxEntry` in `docs/ipc.md`).
@@ -221,17 +228,66 @@ pub async fn send_message(
         sent_folder_hint: folder_path(&state, &account.id, FolderRole::Sent)?,
         item: OutboxItem::new(created_at),
     })?;
+    if let Some(old) = draft.draft_message_id.as_deref() {
+        remove_saved_draft(&app, &state, &account.id, old)?;
+    }
     state.outbox_wake.notify_one();
     events::outbox_changed(&app, &state);
     Ok(dto(&state.store.get_outbox(&id)?.entry))
 }
 
-/// `save_draft`: stores it in the account's Drafts folder on the server.
+/// Forget a saved draft locally at once and remove it on the server (now,
+/// or when back online).
+fn remove_saved_draft(
+    app: &AppHandle,
+    state: &AppState,
+    account_id: &str,
+    message_id: &str,
+) -> AppResult<()> {
+    let Some(drafts) = state
+        .store
+        .list_folders(account_id)?
+        .into_iter()
+        .find(|f| f.role == FolderRole::Drafts)
+    else {
+        return Ok(());
+    };
+    if let Some(local) = state
+        .store
+        .find_by_message_id_header(account_id, &drafts.id, message_id)?
+    {
+        state.store.delete_messages(&[local])?;
+        events::changed(app, account_id, std::slice::from_ref(&drafts.id));
+    }
+    sync::enqueue(
+        state,
+        account_id,
+        &Op::DeleteByMessageId {
+            folder: drafts.path,
+            message_id: message_id.to_owned(),
+        },
+    )
+}
+
+/// Result of `save_draft`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftSaved {
+    draft_message_id: String,
+}
+
+/// `save_draft`: stores it in the account's Drafts folder on the server,
+/// replacing the earlier saved copy, so there is only ever one.
 #[tauri::command]
-pub async fn save_draft(state: State<'_, Arc<AppState>>, draft: Draft) -> AppResult<()> {
+pub async fn save_draft(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    draft: Draft,
+) -> AppResult<DraftSaved> {
     let (account, mut message) = prepare(&state, &draft).await?;
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
-        // Drafts may have no recipients yet; address it to yourself for building only.
+        // Drafts may have no recipients yet; the builder needs one, and Bcc
+        // never reaches the stored headers.
         message.bcc.push(message.from.clone());
     }
     let built = build(&message)?;
@@ -241,8 +297,17 @@ pub async fn save_draft(state: State<'_, Arc<AppState>>, draft: Draft) -> AppRes
     let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
     conn.append(&path, &built.raw, "(\\Draft \\Seen)").await?;
     conn.logout().await;
+    if let Some(old) = draft
+        .draft_message_id
+        .as_deref()
+        .filter(|old| *old != built.message_id)
+    {
+        remove_saved_draft(&app, &state, &account.id, old)?;
+    }
     state.wake_sync(Some(&account.id));
-    Ok(())
+    Ok(DraftSaved {
+        draft_message_id: built.message_id,
+    })
 }
 
 /// `list_outbox`.
@@ -308,21 +373,7 @@ pub async fn outbox_edit(
     transition(item.cancel())?;
     let summary = parse_summary(&message.raw)?;
     let body = parse_body(&message.raw)?;
-    let dir = state.cache_dir.join("outbox-edit").join(&id);
-    tokio::fs::create_dir_all(&dir).await?;
-    let mut attachments = Vec::new();
-    for index in 0..body.attachments.len() {
-        if let Some((info, bytes)) = attachment_bytes(&message.raw, index)? {
-            let path = dir.join(&info.file_name);
-            tokio::fs::write(&path, &bytes).await?;
-            lock(&state.picked_files).insert(path.clone());
-            attachments.push(DraftAttachment {
-                path: path.display().to_string(),
-                file_name: info.file_name,
-                size: info.size,
-            });
-        }
-    }
+    let attachments = copy_attachments(&state, &message.raw, &format!("outbox-{id}")).await?;
     state.store.delete_outbox(&id)?;
     events::outbox_changed(&app, &state);
     Ok(Draft {
@@ -336,7 +387,48 @@ pub async fn outbox_edit(
         references: summary.references,
         attachments,
         reply_to_message_id: message.entry.reply_to_message_id,
+        draft_message_id: None,
     })
+}
+
+/// Write a message's attachments to the app's cache as files the user may
+/// attach (forwarding, editing a queued message, continuing a draft).
+async fn copy_attachments(
+    state: &AppState,
+    raw: &[u8],
+    label: &str,
+) -> AppResult<Vec<DraftAttachment>> {
+    let body = parse_body(raw)?;
+    let dir = state
+        .cache_dir
+        .join("attachments")
+        .join(safe_file_name(label));
+    tokio::fs::create_dir_all(&dir).await?;
+    let mut out = Vec::new();
+    for index in 0..body.attachments.len() {
+        if let Some((info, bytes)) = attachment_bytes(raw, index)? {
+            // Prefix with the index so two attachments with one name don't collide.
+            let path = dir.join(format!("{index}-{}", info.file_name));
+            tokio::fs::write(&path, &bytes).await?;
+            lock(&state.picked_files).insert(path.clone());
+            out.push(DraftAttachment {
+                path: path.display().to_string(),
+                file_name: info.file_name,
+                size: info.size,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// `attachments_for_draft`: a message's attachments, ready to attach.
+#[tauri::command]
+pub async fn attachments_for_draft(
+    state: State<'_, Arc<AppState>>,
+    message_id: String,
+) -> AppResult<Vec<DraftAttachment>> {
+    let raw = sync::body_now(&state, &message_id).await?;
+    copy_attachments(&state, &raw, &message_id).await
 }
 
 /// The worker: runs for the life of the app.

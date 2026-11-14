@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from '@testing-library/react';
+import { act, screen, within } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import { MOCK_ACCOUNTS, MOCK_NOW } from '../api/mock/mockData';
@@ -23,7 +23,7 @@ describe('mailbox', () => {
     const names = accountFolders('Work')
       .getAllByRole('button')
       .map((b) => b.textContent);
-    expect(names).toEqual(['Inbox 3 unread', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', 'Clients', 'Résumés']);
+    expect(names).toEqual(['Inbox 3 unread', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', '2026', 'Acme', 'Clients', 'Résumés']);
   });
 
   it('marks a message read only when the user opens it', async () => {
@@ -75,27 +75,81 @@ describe('mailbox', () => {
     expect(searches).toEqual(['naivasha']);
   });
 
-  it('pages through long folders with infinite scroll and a Load more button', async () => {
-    const many: MockMessage[] = Array.from({ length: 120 }, (_, i) => ({
+  const bulk = (count: number): MockMessage[] =>
+    Array.from({ length: count }, (_, i) => ({
       id: `bulk${String(i)}`, accountId: 'work', folderId: 'work:inbox',
       from: { name: `Sender ${String(i)}`, address: `s${String(i)}@x.example` }, to: [],
       subject: `Message ${String(i)}`, preview: '', date: MOCK_NOW - i * 60, unread: false, flagged: false,
       answered: false, hasAttachments: false, cc: [], replyTo: [], html: null, text: 'x',
       blockedRemoteImages: 0, attachments: [], messageIdHeader: null, references: [],
     }));
-    const { user } = renderApp({ messages: many });
+
+  it('pages through long folders with a Load more button', async () => {
+    const { user } = renderApp({ messages: bulk(120) });
     expect((await rows()).getAllByRole('button')).toHaveLength(50);
     await user.click(screen.getByRole('button', { name: 'Load more (70 left)' }));
     await vi.waitFor(async () => {
       expect((await rows()).getAllByRole('button')).toHaveLength(100);
     });
-    const scroller = (await rows()).getAllByRole('button')[0]?.closest('.list__scroll');
-    if (!scroller) throw new Error('no scroller');
-    fireEvent.scroll(scroller);
+    await user.click(screen.getByRole('button', { name: 'Load more (20 left)' }));
     await vi.waitFor(async () => {
       expect((await rows()).getAllByRole('button')).toHaveLength(120);
     });
     expect(screen.queryByRole('button', { name: /Load more/ })).not.toBeInTheDocument();
+  });
+
+  it('loads more as the list scrolls, observing the list container, not the window', async () => {
+    const observers: { root: Element | Document | null | undefined; fire: () => void; live: boolean }[] = [];
+    class FakeObserver {
+      private record: (typeof observers)[number];
+      constructor(cb: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        this.record = {
+          root: options?.root,
+          live: true,
+          fire: () => {
+            cb([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+          },
+        };
+        observers.push(this.record);
+      }
+      observe() {
+        return undefined;
+      }
+      disconnect() {
+        this.record.live = false;
+      }
+    }
+    vi.stubGlobal('IntersectionObserver', FakeObserver);
+    try {
+      renderApp({ messages: bulk(120) });
+      expect((await rows()).getAllByRole('button')).toHaveLength(50);
+      const live = () => {
+        const found = observers.filter((o) => o.live).at(-1);
+        if (!found) throw new Error('no live observer');
+        return found;
+      };
+      await vi.waitFor(() => {
+        expect(live().root).toBe(screen.getByTestId('list-scroll'));
+      });
+      act(() => {
+        live().fire();
+      });
+      await vi.waitFor(async () => {
+        expect((await rows()).getAllByRole('button')).toHaveLength(100);
+      });
+      await vi.waitFor(() => {
+        expect(live().root).toBe(screen.getByTestId('list-scroll'));
+      });
+      act(() => {
+        live().fire();
+      });
+      await vi.waitFor(async () => {
+        expect((await rows()).getAllByRole('button')).toHaveLength(120);
+      });
+      expect(observers.every((o) => o.root === screen.getByTestId('list-scroll'))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('refetches when the backend says mail changed', async () => {

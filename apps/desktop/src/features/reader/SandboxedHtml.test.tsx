@@ -16,6 +16,29 @@ describe('SandboxedHtml', () => {
     expect(doc).toContain('<p>Hello</p>');
   });
 
+  it('grows to fill a flex container instead of using a fixed size', () => {
+    render(
+      <div data-testid="pane" style={{ display: 'flex', flexDirection: 'column' }}>
+        <SandboxedHtml title="Body" html="<p>x</p>" />
+      </div>,
+    );
+    const frame = screen.getByTitle('Body');
+    const parent = frame.parentElement;
+    expect(parent).toHaveStyle({ display: 'flex', flexDirection: 'column' });
+    expect(frame.style.flexGrow).toBe('1');
+    expect(frame.style.minHeight).toBe('0px');
+    expect(frame.style.height).toBe('');
+    expect(frame).not.toHaveAttribute('height');
+    expect(frame.style.width).toBe('100%');
+  });
+
+  it('renders the email on a white, light-scheme page', () => {
+    const doc = emailDocument('<p>x</p>');
+    expect(doc).toContain('<meta name="color-scheme" content="light">');
+    expect(doc).toContain(':root{color-scheme:light}');
+    expect(doc).toContain('background:#fff');
+  });
+
   it('puts the CSP before any message content', () => {
     const doc = emailDocument('<p>x</p>');
     expect(doc.indexOf('Content-Security-Policy')).toBeLessThan(doc.indexOf('<p>x</p>'));

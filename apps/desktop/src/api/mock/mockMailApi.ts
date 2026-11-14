@@ -110,6 +110,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   let outbox = clone(options.outbox ?? MOCK_OUTBOX).filter(known);
   let settings = clone(options.settings ?? MOCK_SETTINGS);
   const outboxDrafts = new Map<string, Draft>();
+  /** Attachments of drafts saved in this session, by message id. */
+  const draftFiles = new Map<string, DraftAttachment[]>();
   const now = options.now ?? (() => MOCK_NOW);
   type Handler = (payload: never) => void;
   const handlers = new Map<MailEventName, Set<Handler>>();
@@ -155,6 +157,14 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     const found = messages.find((m) => m.id === id);
     if (!found) throw appError('not_found', 'That message is no longer available.');
     return found;
+  };
+
+  /** Remove the saved draft with this Message-ID, as save_draft and send_message do. */
+  const removeDraft = (draftMessageId: string | null) => {
+    if (!draftMessageId) return;
+    messages = messages.filter(
+      (m) => !(m.messageIdHeader === draftMessageId && folderOf(m.folderId)?.role === 'drafts'),
+    );
   };
 
   const check = (draft: Draft): DraftCheck => {
@@ -369,8 +379,12 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           status: { state: 'queued', next_attempt_at: now(), maybe_sent: false },
           progress: null,
         };
-        outboxDrafts.set(entry.id, clone(draft));
+        outboxDrafts.set(entry.id, clone({ ...draft, draftMessageId: null }));
         outbox = [...outbox, entry];
+        if (draft.draftMessageId) {
+          removeDraft(draft.draftMessageId);
+          changed(draft.accountId, []);
+        }
         if (draft.replyToMessageId) {
           messages = messages.map((m) => (m.id === draft.replyToMessageId ? { ...m, answered: true } : m));
         }
@@ -383,7 +397,9 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         const acc = account(draft.accountId);
         const folder = folders.find((f) => f.accountId === acc.id && f.role === 'drafts');
         if (!folder) throw appError('not_found', 'This account has no Drafts folder.');
+        removeDraft(draft.draftMessageId);
         const id = `d${String(seq++)}`;
+        const draftMessageId = `<draft-${id}@mock.example>`;
         messages = [
           ...messages,
           {
@@ -399,17 +415,39 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
             flagged: false,
             answered: false,
             hasAttachments: draft.attachments.length > 0,
-            cc: [],
+            cc: parseRecipients(draft.cc).valid.map((address) => ({ name: null, address })),
             replyTo: [],
             html: null,
             text: draft.bodyText,
             blockedRemoteImages: 0,
-            attachments: [],
-            messageIdHeader: null,
-            references: draft.references,
+            attachments: draft.attachments.map((a, index) => ({
+              index,
+              fileName: a.fileName,
+              mimeType: 'application/octet-stream',
+              size: a.size,
+            })),
+            messageIdHeader: draftMessageId,
+            references: draft.inReplyTo && !draft.references.includes(draft.inReplyTo)
+              ? [...draft.references, draft.inReplyTo]
+              : draft.references,
           },
         ];
+        draftFiles.set(id, clone(draft.attachments));
         changed(acc.id, [folder.id]);
+        return { draftMessageId };
+      }),
+
+    attachmentsForDraft: (messageId) =>
+      run('attachmentsForDraft', () => {
+        const m = stored(messageId);
+        return (
+          draftFiles.get(messageId) ??
+          m.attachments.map((a) => ({
+            path: `/tmp/mocky-mail/${m.id}/${String(a.index)}-${a.fileName}`,
+            fileName: a.fileName,
+            size: a.size,
+          }))
+        );
       }),
 
     listOutbox: () => run('listOutbox', () => outbox),
@@ -454,6 +492,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
             references: [],
             attachments: [],
             replyToMessageId: null,
+            draftMessageId: null,
           }
         );
       }),

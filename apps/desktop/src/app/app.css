@@ -4,11 +4,16 @@
   box-sizing: border-box;
 }
 
+/* The window never scrolls: the shell is pinned to the viewport and each
+   pane scrolls on its own. */
 html,
 body,
 #root {
   height: 100%;
+  margin: 0;
+  overflow: hidden;
 }
+
 
 body {
   margin: 0;
@@ -106,28 +111,35 @@ button:disabled {
   flex: none;
 }
 
-/* Layout */
+/* Layout: top bar / main row / status bar, exactly one viewport tall. */
 .app {
   display: flex;
   flex-direction: column;
-  min-height: 100%;
-  height: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.topbar,
+.statusbar {
+  flex: none;
 }
 
 .workspace {
   display: flex;
-  flex-wrap: wrap;
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .panes {
   display: flex;
-  flex-wrap: wrap;
-  flex: 999 1 760px;
+  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
+
 
 /* Top bar */
 .topbar {
@@ -290,14 +302,15 @@ button:disabled {
 
 /* Sidebar */
 .sidebar {
-  flex: 1 0 220px;
+  flex: 0 0 248px;
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 22px;
   padding: 16px 12px;
   background: var(--chrome);
   border-right: 1px solid var(--border);
-  overflow-y: auto;
 }
 
 .nav {
@@ -407,14 +420,15 @@ button:disabled {
 
 /* Message list */
 .list {
-  flex: 1 1 360px;
-  min-width: 0;
+  flex: 0 1 380px;
+  min-width: 280px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--list);
   border-right: 1px solid var(--border);
-  max-height: 100%;
 }
+
 
 .list__head {
   display: flex;
@@ -474,9 +488,11 @@ button:disabled {
 }
 
 .list__scroll {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
+
 
 .row {
   display: flex;
@@ -646,13 +662,15 @@ button:disabled {
 
 /* Reading pane */
 .reader {
-  flex: 999 1 440px;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: var(--surface);
-  max-height: 100%;
 }
+
 
 .toolbar {
   display: flex;
@@ -671,10 +689,12 @@ button:disabled {
 }
 
 .reader__scroll {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 28px 40px 32px;
 }
+
 
 .reader__subject {
   margin-bottom: 20px;
@@ -729,11 +749,11 @@ button:disabled {
 }
 
 .reader__body {
-  max-width: 680px;
   padding-top: 20px;
 }
 
 .reader__text {
+  max-width: 80ch;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 15px;
@@ -741,12 +761,30 @@ button:disabled {
   color: var(--text-2);
 }
 
-.email-frame {
-  width: 100%;
-  min-height: 360px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+.reader__head {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 55%;
+  overflow-y: auto;
+  padding: 28px 40px 16px;
+}
+
+/* The HTML email takes all the space left below the header. */
+.reader__frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  border-top: 1px solid var(--border);
   background: #fff;
+}
+
+.email-frame {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+  color-scheme: light;
 }
 
 .attachments {
@@ -902,11 +940,14 @@ button:disabled {
 /* Compose */
 .compose {
   display: flex;
-  flex: 1 1 100%;
+  flex: 1 1 auto;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
   background: var(--surface);
 }
+
 
 .compose__head {
   display: flex;
@@ -1042,23 +1083,61 @@ button:disabled {
 
 /* Narrow windows: panes stack and the page scrolls. */
 @media (max-width: 760px) {
-  .app {
-    height: auto;
+  /* One column. The top bar and status bar stay put; everything between
+     them scrolls as a single page. */
+  .workspace {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .sidebar,
+  .panes,
+  .list,
+  .reader {
+    flex: none;
+    min-height: auto;
+    overflow: visible;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar__scroll,
+  .list__scroll,
+  .reader__scroll,
+  .reader__head {
+    overflow: visible;
+  }
+
+  .panes {
+    flex-direction: column;
+  }
+
+  .list {
+    min-width: 0;
+    border-right: 0;
   }
 
   .brand {
     width: auto;
   }
 
-  .list,
-  .reader {
-    max-height: none;
-  }
-
   .reader__scroll,
+  .reader__head,
   .quick-reply {
     padding-left: 16px;
     padding-right: 16px;
+  }
+
+  .reader__head {
+    max-height: none;
+  }
+
+  /* Stacked panes have no fixed height to fill; give the email a screenful. */
+  .reader__frame {
+    min-height: 70vh;
   }
 
   .compose__row--copies {
@@ -1190,10 +1269,14 @@ kbd {
   gap: 48px;
   align-items: flex-start;
   justify-content: center;
-  min-height: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow-y: auto;
   padding: 64px 24px;
   background: var(--chrome);
 }
+
 
 .welcome__intro {
   flex: 1 1 280px;
@@ -1216,11 +1299,13 @@ kbd {
 }
 
 .panel {
-  flex: 1 1 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 32px 24px;
   background: var(--chrome);
 }
+
 
 .account-form {
   flex: 1 1 420px;
@@ -1308,12 +1393,14 @@ kbd {
 
 /* Settings */
 .settings {
-  flex: 1 1 100%;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: var(--surface);
 }
+
 
 .settings__head {
   display: flex;
@@ -1329,10 +1416,13 @@ kbd {
 }
 
 .settings__body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 8px 24px 32px;
   max-width: 760px;
 }
+
 
 .settings__group {
   margin: 0;
@@ -1615,4 +1705,23 @@ kbd {
 
 .dot--conn-info {
   background: var(--info-bar);
+}
+
+.quick-reply__status {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.reader__head .attachments {
+  margin-top: 16px;
+}
+
+/* Folders scroll under the fixed New message button. */
+.sidebar__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
 }

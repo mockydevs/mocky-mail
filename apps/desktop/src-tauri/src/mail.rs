@@ -64,6 +64,7 @@ pub struct MessageDetail {
     blocked_remote_images: usize,
     attachments: Vec<AttachmentMeta>,
     message_id_header: Option<String>,
+    in_reply_to: Option<String>,
     references: Vec<String>,
 }
 
@@ -112,6 +113,7 @@ pub async fn get_message(
             })
             .collect(),
         message_id_header: stored.message_id_header,
+        in_reply_to: stored.in_reply_to,
         references: stored.references,
     })
 }
