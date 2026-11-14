@@ -142,6 +142,7 @@ CREATE TABLE outbox (
     subject             TEXT NOT NULL,
     preview             TEXT NOT NULL,
     raw                 BLOB NOT NULL,
+    recipients_json     TEXT NOT NULL DEFAULT '[]',
     message_id_header   TEXT,
     reply_to_message_id TEXT,
     sent_folder_hint    TEXT,

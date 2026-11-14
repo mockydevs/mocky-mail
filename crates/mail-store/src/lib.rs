@@ -19,6 +19,7 @@ mod outbox;
 mod schema;
 mod search;
 mod settings;
+mod sync_support;
 #[cfg(test)]
 mod test_support;
 

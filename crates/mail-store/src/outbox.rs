@@ -23,6 +23,9 @@ pub struct NewOutbox {
     pub preview: String,
     /// The exact RFC 822 bytes to send.
     pub raw: Vec<u8>,
+    /// Every envelope recipient, Bcc included. Bcc never appears in `raw`,
+    /// so this list is the only record of who to deliver to.
+    pub recipients: Vec<String>,
     /// Its Message-ID, used to check Sent before resending.
     pub message_id_header: Option<String>,
     /// The message being replied to, marked answered after sending.
@@ -65,6 +68,8 @@ pub struct OutboxMessage {
     pub entry: OutboxEntry,
     /// The RFC 822 message.
     pub raw: Vec<u8>,
+    /// Envelope recipients, Bcc included.
+    pub recipients: Vec<String>,
 }
 
 macro_rules! entry_columns {
@@ -128,8 +133,8 @@ impl Store {
         let id = new_id()?;
         self.conn().execute(
             "INSERT INTO outbox (id, account_id, created_at, to_json, subject, preview, raw,
-                 message_id_header, reply_to_message_id, sent_folder_hint, item)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 message_id_header, reply_to_message_id, sent_folder_hint, item, recipients_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 new.account_id,
@@ -142,6 +147,7 @@ impl Store {
                 new.reply_to_message_id,
                 new.sent_folder_hint,
                 serde_json::to_string(&new.item)?,
+                serde_json::to_string(&new.recipients)?,
             ],
         )?;
         Ok(id)
@@ -168,22 +174,29 @@ impl Store {
     /// # Errors
     /// [`StoreError::NotFound`] if there is no such entry.
     pub fn get_outbox(&self, id: &str) -> Result<OutboxMessage> {
-        let (row, raw) = self
+        let (row, raw, recipients_json) = self
             .conn()
             .query_row(
                 concat!(
                     "SELECT ",
                     entry_columns!(),
-                    ", raw FROM outbox WHERE id = ?1"
+                    ", raw, recipients_json FROM outbox WHERE id = ?1"
                 ),
                 params![id],
-                |row| Ok((EntryRow::read(row)?, row.get::<_, Vec<u8>>(10)?)),
+                |row| {
+                    Ok((
+                        EntryRow::read(row)?,
+                        row.get::<_, Vec<u8>>(10)?,
+                        row.get::<_, String>(11)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or(StoreError::NotFound("outbox item"))?;
         Ok(OutboxMessage {
             entry: row.into_entry()?,
             raw,
+            recipients: serde_json::from_str(&recipients_json)?,
         })
     }
 
@@ -251,6 +264,20 @@ mod tests {
     use super::*;
     use crate::test_support::{add_account, new_outbox};
     use mail_core::outbox::OutboxState;
+
+    #[test]
+    fn envelope_recipients_including_bcc_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        let account = crate::test_support::add_account(&store, "a@x.co");
+        let id = store
+            .insert_outbox(&crate::test_support::new_outbox(&account))
+            .unwrap();
+        let message = store.get_outbox(&id).unwrap();
+        assert_eq!(
+            message.recipients,
+            vec!["to@x.co".to_owned(), "hidden@x.co".to_owned()]
+        );
+    }
 
     #[test]
     fn insert_get_round_trip() {

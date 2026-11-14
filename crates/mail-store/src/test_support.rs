@@ -104,6 +104,7 @@ pub(crate) fn new_outbox(account_id: &str) -> NewOutbox {
         subject: "Quote".to_owned(),
         preview: "Here is the quote".to_owned(),
         raw: b"Subject: Quote\r\n\r\nHere is the quote\r\n".to_vec(),
+        recipients: vec!["to@x.co".into(), "hidden@x.co".into()],
         message_id_header: Some("<q1@example.com>".to_owned()),
         reply_to_message_id: None,
         sent_folder_hint: Some("Sent".to_owned()),

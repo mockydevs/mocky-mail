@@ -16,7 +16,7 @@ type ServerConfig = { host: string; port: number; security: Security };
 type AuthKind = "password" | "google" | "microsoft";
 
 type Account = {
-  id: string; email: string; displayName: string; auth: AuthKind;
+  id: string; email: string; displayName: string; auth: AuthKind; createdAt: number;
   color: string;            // hex, assigned by backend from a fixed palette
   imap: ServerConfig; smtp: ServerConfig; sizeLimitBytes: number | null;
 };
@@ -97,7 +97,7 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `delete_forever` | `{ ids }` | `void` (only allowed for messages in Trash or Junk) |
 | `save_attachment` | `{ messageId, index }` | `string \| null` (shows a save dialog; null if cancelled) |
 | `pick_attachments` | | `DraftAttachment[]` (open-file dialog) |
-| `check_draft` | `{ draft }` | `{ estimatedBytes: number; limitBytes: number \| null }` or rejects `invalid`/`too_large` |
+| `check_draft` | `{ draft }` | `{ estimatedBytes: number; limitBytes: number }` or rejects `invalid`/`too_large` |
 | `send_message` | `{ draft }` | `OutboxEntry` (validated, queued; outbox worker sends) |
 | `save_draft` | `{ draft }` | `void` (stored in the account's Drafts folder) |
 | `list_outbox` | | `OutboxEntry[]` |
@@ -115,4 +115,5 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `mail://sync-status` | `SyncStatus` |
 | `mail://changed` | `{ accountId: string; folderIds: string[] }` (refetch lists and counts) |
 | `mail://outbox-changed` | `{ entries: OutboxEntry[] }` |
-| `mail://new-mail` | `{ accountId: string; count: number }` |
+| `mail://new-mail` | `{ accountId: string; count: number }` (the backend also shows the desktop notification when enabled) |
+| `mail://accounts-changed` | `{}` (refetch accounts) |
