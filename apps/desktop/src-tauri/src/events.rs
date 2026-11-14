@@ -120,6 +120,22 @@ fn newest_unread(state: &AppState, account: &Account) -> Option<MessageListItem>
     }
 }
 
+/// The application id in `packaging/msix/AppxManifest.xml.in`.
+#[cfg(windows)]
+const STORE_APPLICATION_ID: &str = "MockyMail";
+
+/// When running from the Microsoft Store package, the id Windows shows
+/// notifications under (`<package family>!MockyMail`). `None` for the
+/// regular installer, where the notification plugin already works.
+#[cfg(windows)]
+fn store_app_id() -> Option<String> {
+    let family = windows::ApplicationModel::Package::Current()
+        .and_then(|package| package.Id())
+        .and_then(|id| id.FamilyName())
+        .ok()?;
+    Some(format!("{family}!{STORE_APPLICATION_ID}"))
+}
+
 /// New unread mail arrived in an inbox.
 pub fn new_mail(app: &AppHandle, state: &AppState, account: &Account, count: u32) {
     emit(
@@ -134,6 +150,17 @@ pub fn new_mail(app: &AppHandle, state: &AppState, account: &Account, count: u32
             None
         };
         let (title, body) = notification_text(account, count, newest.as_ref());
+        #[cfg(windows)]
+        if let Some(app_id) = store_app_id() {
+            if let Err(error) = tauri_winrt_notification::Toast::new(&app_id)
+                .title(&title)
+                .text1(&body)
+                .show()
+            {
+                eprintln!("couldn't show notification: {error}");
+            }
+            return;
+        }
         if let Err(error) = app
             .notification()
             .builder()

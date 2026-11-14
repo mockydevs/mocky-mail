@@ -33,6 +33,8 @@ icons="$root/apps/desktop/src-tauri/icons"
 for a in StoreLogo Square44x44Logo Square150x150Logo Square310x310Logo; do
   cp "$icons/$a.png" "$stage/Assets/"
 done
+# Store-only tiles that Tauri doesn't generate.
+cp "$root/packaging/msix/Assets/"*.png "$stage/Assets/"
 
 escape() { python3 -c 'import sys,html; print(html.escape(sys.argv[1], quote=True))' "$1"; }
 sed -e "s|@IDENTITY_NAME@|$(escape "$MSIX_IDENTITY_NAME")|" \

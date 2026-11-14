@@ -31,3 +31,9 @@ tauri-plugin-notification = "2.8.1"
 tauri-plugin-opener = "2.7.3"
 tauri-plugin-single-instance = "2.5.5"
 tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs"] }
+
+# Windows only: notifications from the Microsoft Store (MSIX) package must use
+# the package's own app id, which the notification plugin can't do.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["ApplicationModel"] }
+tauri-winrt-notification = "0.8.1"
