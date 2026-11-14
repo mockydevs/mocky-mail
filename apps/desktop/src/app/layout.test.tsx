@@ -78,7 +78,10 @@ describe('shell layout', () => {
   it('lets the HTML email fill the rest of the reading pane', () => {
     const frame = rule('.reader__frame');
     expect(frame['flex']).toEqual(['1 1 auto']);
-    expect(frame['min-height']).toEqual(['0']);
+    // Never squeezed below half the pane by the header or quick reply; in a
+    // short window the header scrolls instead.
+    expect(frame['min-height']).toEqual(['50%']);
+    expect(rule('.quick-reply')['flex']).toEqual(['none']);
     const iframe = rule('.email-frame');
     expect(iframe['height']).toBeUndefined();
     expect(iframe['max-width']).toBeUndefined();
