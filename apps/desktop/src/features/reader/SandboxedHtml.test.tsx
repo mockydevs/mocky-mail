@@ -16,6 +16,19 @@ describe('SandboxedHtml', () => {
     expect(doc).toContain('<p>Hello</p>');
   });
 
+  it('on a phone grows to the email height, still without scripts', () => {
+    render(<SandboxedHtml title="Message body" html="<p>Hello</p>" fitContent />);
+    const frame = screen.getByTitle('Message body');
+    // Same-origin only so the app can measure the email; scripts stay off,
+    // and the CSP inside still blocks them too.
+    const flags = (frame.getAttribute('sandbox') ?? '').split(' ').sort();
+    expect(flags).toEqual(['allow-popups', 'allow-same-origin']);
+    expect(frame.getAttribute('srcdoc')).toContain(`content="${EMAIL_CSP}"`);
+    // A fixed pixel height (measured once loaded), not a flex fill, so the page scrolls.
+    expect(frame.style.height).toMatch(/^\d+px$/);
+    expect(frame.style.flexGrow).toBe('0');
+  });
+
   it('grows to fill a flex container instead of using a fixed size', () => {
     render(
       <div data-testid="pane" style={{ display: 'flex', flexDirection: 'column' }}>

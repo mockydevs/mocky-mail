@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from 'react';
+
 import type { Theme } from '../../theme/useTheme';
 
 /**
@@ -51,32 +53,81 @@ export function emailDocument(sanitizedHtml: string, theme: Theme = 'light', all
   ].join('');
 }
 
+/** Before the email has been measured: about a screenful, so nothing jumps much. */
+const UNMEASURED_HEIGHT = 480;
+
 /**
- * Renders an HTML email in a sandboxed iframe. The only permission is
- * `allow-popups`, so link clicks become new-window requests that the app
- * hands to the system browser; scripts, forms, top navigation and
- * same-origin access to the app stay blocked.
+ * Renders an HTML email in a sandboxed iframe. Scripts, forms and top
+ * navigation are always blocked; `allow-popups` lets link clicks become
+ * new-window requests that the app hands to the system browser.
+ *
+ * Normally the frame fills the space it is given and scrolls itself, with no
+ * same-origin access. With `fitContent` (the phone layout) it grows to the
+ * email's full height so the message scrolls as one page. Measuring needs
+ * `allow-same-origin`; scripts stay blocked by the sandbox and the CSP, so the
+ * email still cannot run code or reach the app.
  */
 export function SandboxedHtml({
   html,
   title,
   theme = 'light',
   allowRemoteImages = false,
+  fitContent = false,
 }: {
   html: string;
   title: string;
   theme?: Theme;
   allowRemoteImages?: boolean;
+  fitContent?: boolean;
 }) {
+  const frame = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    const element = frame.current;
+    if (!fitContent || !element) return;
+    let observer: ResizeObserver | null = null;
+    const measure = () => {
+      const doc = element.contentDocument;
+      if (!doc?.documentElement) return;
+      setHeight(Math.ceil(doc.documentElement.scrollHeight));
+    };
+    const onLoad = () => {
+      measure();
+      observer?.disconnect();
+      // The frame's own ResizeObserver: it watches the email's layout, which
+      // also changes when images arrive.
+      const view = element.contentWindow as (Window & typeof globalThis) | null;
+      const body = element.contentDocument?.body;
+      if (view?.ResizeObserver && body) {
+        const next = new view.ResizeObserver(measure);
+        next.observe(body);
+        observer = next;
+      }
+    };
+    element.addEventListener('load', onLoad);
+    onLoad();
+    return () => {
+      element.removeEventListener('load', onLoad);
+      observer?.disconnect();
+    };
+  }, [fitContent, html, theme, allowRemoteImages]);
+
   return (
     <iframe
+      ref={frame}
       className="email-frame"
       title={title}
-      sandbox="allow-popups"
+      sandbox={fitContent ? 'allow-popups allow-same-origin' : 'allow-popups'}
       referrerPolicy="no-referrer"
       srcDoc={emailDocument(html, theme, allowRemoteImages)}
-      // Fill the reading pane: grow into the space left below the header; the frame scrolls itself.
-      style={{ flex: '1 1 auto', width: '100%', minHeight: 0, border: 0 }}
+      style={
+        fitContent
+          ? // As tall as the email; the page around it scrolls.
+            { width: '100%', height: `${String(height ?? UNMEASURED_HEIGHT)}px`, border: 0, flex: 'none' }
+          : // Fill the reading pane: grow into the space left below the header; the frame scrolls itself.
+            { flex: '1 1 auto', width: '100%', minHeight: 0, border: 0 }
+      }
     />
   );
 }
