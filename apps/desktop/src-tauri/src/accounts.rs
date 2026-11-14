@@ -116,10 +116,11 @@ fn save(
     Ok(account)
 }
 
-/// `suggest_servers`: settings to pre-fill for an address.
+/// `suggest_servers`: settings to pre-fill for an address. Known providers
+/// first, then the domain's DNS (SRV and MX records), then a guess.
 #[tauri::command]
-pub fn suggest_servers(email: &str) -> Option<ServerSuggestion> {
-    mail_sync::suggest_servers(email)
+pub async fn suggest_servers(email: String) -> Option<ServerSuggestion> {
+    mail_sync::discover_servers(&email).await
 }
 
 /// `list_accounts`.

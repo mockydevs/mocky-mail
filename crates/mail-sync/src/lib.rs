@@ -8,6 +8,7 @@
 //! errors, logs or `Debug` output.
 
 pub mod config;
+pub mod discover;
 pub mod error;
 pub mod imap;
 pub mod outgoing;
@@ -18,4 +19,5 @@ mod tls;
 pub use config::{
     AuthKind, Credentials, Security, ServerConfig, ServerSuggestion, suggest_servers,
 };
+pub use discover::discover_servers;
 pub use error::{ErrorKind, SyncError};
