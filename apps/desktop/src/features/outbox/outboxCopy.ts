@@ -14,6 +14,8 @@ export interface OutboxCopy {
   /** 0 to 100 while sending; null when not sending or unknown. */
   progress: number | null;
   canSendNow: boolean;
+  /** Text on the send button when `canSendNow`. */
+  sendLabel: string;
   canEdit: boolean;
   canCancel: boolean;
 }
@@ -37,7 +39,7 @@ function when(nextAt: number, now: number, timeZone?: string): { short: string; 
 
 /** What the list pill and the reading-pane banner say about an Outbox entry. */
 export function outboxCopy(entry: OutboxEntry, accountLabel: string, now: number, timeZone?: string): OutboxCopy {
-  const base = { detail: null, progress: null, canSendNow: false, canEdit: false, canCancel: false };
+  const base = { detail: null, progress: null, canSendNow: false, sendLabel: 'Send now', canEdit: false, canCancel: false };
   const { status } = entry;
   switch (status.state) {
     case 'queued': {
@@ -110,6 +112,19 @@ export function outboxCopy(entry: OutboxEntry, accountLabel: string, now: number
             text: 'Check the addresses, then edit and send again.',
             detail: status.message,
             canSendNow: true,
+            canEdit: true,
+            canCancel: true,
+          };
+        case 'unconfirmed':
+          return {
+            ...base,
+            tone: 'error',
+            pill: 'May have been sent',
+            title: 'This message may already have been sent',
+            text: 'Mocky Mail couldn\u2019t confirm whether it went out. Check your Sent folder on the web or ask the recipient. Send it again only if it didn\u2019t arrive.',
+            detail: status.message,
+            canSendNow: true,
+            sendLabel: 'Send again',
             canEdit: true,
             canCancel: true,
           };

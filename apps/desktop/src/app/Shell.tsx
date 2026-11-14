@@ -31,6 +31,7 @@ import { shortcutFor, type ShortcutAction } from '../features/shortcuts/shortcut
 import { nowSeconds } from '../lib/format';
 import { useDebounced } from '../lib/useDebounced';
 import { useMailEvent } from '../lib/useEvent';
+import { useNarrow } from '../lib/useNarrow';
 import { useLoad } from '../lib/useLoad';
 import { useTheme } from '../theme/useTheme';
 import { ConfirmDialog } from '../ui/Modal';
@@ -156,6 +157,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   /** Phones: the folder menu slid in over the list. */
   const [drawer, setDrawer] = useState(false);
   const [confirmForever, setConfirmForever] = useState<MessageListItem | null>(null);
+  // Phone layout: the list and an open message take turns on the screen.
+  const narrow = useNarrow();
+  const [reading, setReading] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const readerRef = useRef<HTMLElement>(null);
   const versionRef = useRef(page.version);
@@ -222,6 +226,31 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     );
   };
 
+  // The phone's back button (and browser Back) closes the open message.
+  useEffect(() => {
+    const onPop = () => {
+      setReading(false);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+    };
+  }, []);
+
+  /** Phone layout: show the message full screen, with a history entry for Back. */
+  const startReading = () => {
+    if (!narrow || reading) return;
+    window.history.pushState({ mockyReading: true }, '');
+    setReading(true);
+  };
+
+  /** Phone layout: back to the list. */
+  const stopReading = () => {
+    if (!reading) return;
+    if ((window.history.state as { mockyReading?: boolean } | null)?.mockyReading) window.history.back();
+    else setReading(false);
+  };
+
   /** The user opened a message: select it and mark it read. */
   const open = (id: string) => {
     setSelectedId(id);
@@ -234,6 +263,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
 
   const goTo = (next: MailView) => {
+    stopReading();
     setView(next);
     setFilter('all');
     setSelectedId(null);
@@ -247,6 +277,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
 
   const remove = (item: MessageListItem, target: 'archive' | 'trash') => {
+    // On a phone, archiving or deleting the open message returns to the list.
+    stopReading();
     setSelectedId(neighbourAfterRemoval(items, item.id));
     setPinned(null);
     optimistic(
@@ -259,6 +291,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
 
   const deleteForever = (item: MessageListItem) => {
+    stopReading();
     setSelectedId(neighbourAfterRemoval(items, item.id));
     setPinned(null);
     optimistic([item.id], { removed: true }, () => api.deleteForever([item.id]), 'Could not delete', restore(item));
@@ -497,7 +530,10 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
                 setSelectedId(null);
                 setPinned(null);
               }}
-              onSelect={open}
+              onSelect={(id) => {
+                open(id);
+                startReading();
+              }}
               onLoadMore={page.loadMore}
               onRetry={refresh}
             />
@@ -515,6 +551,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               alwaysLoadImages={settings?.remoteImages === 'allow'}
               theme={theme}
               onLoaded={setLoaded}
+              narrow={narrow}
+              onBack={stopReading}
               onReply={reply}
               onForward={forward}
               onEdit={continueDraft}
@@ -540,7 +578,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   }
 
   return (
-    <div className="app">
+    <div className={narrow && reading && screen.kind === 'mail' ? 'app app--reading' : 'app'}>
       <TopBar
         search={searchInput}
         searchField={searchRef}

@@ -771,10 +771,11 @@ button:disabled {
   padding: 28px 40px 16px;
 }
 
-/* The HTML email takes all the space left below the header. */
+/* The HTML email takes all the space left below the header, and never less
+   than half the pane: in a short window the header scrolls instead. */
 .reader__frame {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 50%;
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
@@ -841,16 +842,18 @@ button:disabled {
 
 .quick-reply {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 12px;
-  padding: 14px 40px 16px;
+  gap: 8px 12px;
+  padding: 10px 40px;
   border-top: 1px solid var(--border);
 }
 
 .quick-reply__label {
   display: flex;
-  flex: 1 1 320px;
+  flex: 1 1 0;
+  min-width: 0;
   flex-direction: column;
   gap: 6px;
   font-size: 12px;
@@ -1228,6 +1231,277 @@ button:disabled {
   .reader__frame {
     min-height: 70vh;
   }
+
+  /* The list and an open message take turns on the screen. */
+  .app:not(.app--reading) .reader {
+    display: none;
+  }
+
+  .app--reading .topbar,
+  .app--reading .sidebar,
+  .app--reading .list,
+  .app--reading .statusbar {
+    display: none;
+  }
+
+  .app--reading .workspace,
+  .app--reading .panes {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app--reading .reader {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+}
+
+/* Phone message view: one bar on top, the message scrolling as one page,
+   and reply actions within thumb reach at the bottom. */
+.phone-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  height: 56px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.phone-bar .icon-btn,
+.phone-sender .icon-btn {
+  width: 44px;
+  height: 44px;
+}
+
+.phone-bar__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phone-menu {
+  position: relative;
+}
+
+.phone-menu__list {
+  position: absolute;
+  top: 46px;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 30%);
+}
+
+.phone-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+}
+
+.phone-menu__item:hover {
+  background: var(--row-hover);
+}
+
+.phone-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.phone-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 12px;
+}
+
+.reader--phone .reader__subject {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.3;
+}
+
+.phone-sender {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.phone-sender__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.phone-sender__name {
+  margin: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phone-sender__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+}
+
+.phone-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.phone-details .reader__meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.phone-details__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.images-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 2px 0 10px;
+  border-radius: 8px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: 12px;
+}
+
+.images-strip span {
+  flex: 1;
+}
+
+.images-strip__show {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.reader--phone .attachments {
+  margin: 0;
+}
+
+.reader--phone .email-frame {
+  border-top: 1px solid var(--border);
+}
+
+.phone-text {
+  padding: 4px 16px 24px;
+  border-top: 1px solid var(--border);
+}
+
+.phone-text .reader__text {
+  padding-top: 16px;
+}
+
+.phone-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.phone-actions__main {
+  flex: 1;
+  justify-content: center;
+  min-height: 44px;
+  border-radius: 22px;
+}
+
+.phone-actions__round {
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+}
+
+/* Quick reply as a panel over the bottom of the message (phone). */
+.quick-reply--sheet {
+  padding: 8px 14px calc(14px + env(safe-area-inset-bottom));
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -8px 24px rgb(0 0 0 / 25%);
+}
+
+.quick-reply__top {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  gap: 4px;
+}
+
+.quick-reply__to {
+  flex: 1;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.quick-reply__to strong {
+  color: var(--text);
+}
+
+.quick-reply--sheet .quick-reply__label {
+  flex: 1 1 100%;
+}
+
+.quick-reply--sheet button[type='submit'] {
+  min-height: 44px;
+  margin-left: auto;
+  border-radius: 22px;
 }
 
 /* Desktop: the sidebar wrapper takes no space of its own. */

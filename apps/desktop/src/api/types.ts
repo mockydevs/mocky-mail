@@ -153,7 +153,7 @@ export type OutboxState =
   | { state: 'queued'; next_attempt_at: number; maybe_sent: boolean }
   | { state: 'sending'; started_at: number }
   | { state: 'sent'; at: number }
-  | { state: 'failed'; reason: 'rejected' | 'gave_up' | 'too_large'; message: string }
+  | { state: 'failed'; reason: 'rejected' | 'gave_up' | 'too_large' | 'unconfirmed'; message: string }
   | { state: 'cancelled' };
 
 export interface OutboxEntry {

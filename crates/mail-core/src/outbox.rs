@@ -14,6 +14,7 @@
 //!    └──────────────────── send_now ────────────────────────┘
 //!  Queued, Failed ── cancel ──▶ Cancelled
 //!  Sending ── app restarted ──▶ Queued (maybe_sent: check before resending)
+//!  Queued (maybe_sent) ── can't check ──▶ Failed (unconfirmed: user decides)
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,10 @@ pub enum FailureReason {
     GaveUp,
     /// The message is bigger than the server accepts.
     TooLarge,
+    /// The app stopped mid-send and there was no way to check whether the
+    /// server got it (no Sent folder to look in, or its saved state was
+    /// damaged). The user decides whether to send it again.
+    Unconfirmed,
 }
 
 /// Where a message is in the outbox.
@@ -310,6 +315,40 @@ impl OutboxItem {
         }
     }
 
+    /// A stand-in for an entry whose saved state can't be read. Nobody knows
+    /// whether it was sent, so it waits for the user instead of sending.
+    #[must_use]
+    pub fn damaged() -> Self {
+        Self {
+            attempts: 0,
+            state: OutboxState::Failed {
+                reason: FailureReason::Unconfirmed,
+                message: "This message's saved delivery state was damaged, so it may or may not have been sent.".to_owned(),
+            },
+        }
+    }
+
+    /// The duplicate check can't be done (no Sent folder, no Message-ID, the
+    /// server won't open the folder). Rather than guess, stop and ask the
+    /// user: sending again might deliver it twice.
+    ///
+    /// # Errors
+    /// Refused unless the message is queued and awaiting that check.
+    pub fn cannot_confirm(&mut self, message: String) -> Result<(), TransitionError> {
+        match self.state {
+            OutboxState::Queued {
+                maybe_sent: true, ..
+            } => {
+                self.state = OutboxState::Failed {
+                    reason: FailureReason::Unconfirmed,
+                    message,
+                };
+                Ok(())
+            }
+            _ => Err(self.refuse("give up checking")),
+        }
+    }
+
     /// Result of checking the server's Sent folder for this message.
     ///
     /// # Errors
@@ -512,6 +551,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn an_uncheckable_message_waits_for_the_user() {
+        let mut item = sending(T0);
+        assert!(item.recover_after_restart(T0 + 5));
+        item.cannot_confirm("no Sent folder".into()).unwrap();
+        assert!(matches!(
+            item.state,
+            OutboxState::Failed {
+                reason: FailureReason::Unconfirmed,
+                ..
+            }
+        ));
+        assert!(!item.is_due(T0 + 1_000));
+        // Retry is the user's explicit choice to send it again.
+        item.send_now(T0 + 10).unwrap();
+        assert!(item.begin_send(T0 + 10).is_ok());
+        // Only a message awaiting the check can give up on it.
+        assert!(OutboxItem::new(T0).cannot_confirm("x".into()).is_err());
+    }
+
+    #[test]
+    fn a_damaged_entry_never_sends_by_itself() {
+        let item = OutboxItem::damaged();
+        assert!(!item.is_due(u64::MAX));
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains(r#""reason":"unconfirmed""#));
     }
 
     #[test]
