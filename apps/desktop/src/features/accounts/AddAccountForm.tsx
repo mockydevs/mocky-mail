@@ -181,6 +181,7 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
         oauth(which);
       }}
     >
+      {busy === which && <span className="spinner" aria-hidden="true" />}
       {busy === which ? `Waiting for ${providerName(which)}` : `Continue with ${providerName(which)}`}
     </button>
   );
@@ -193,6 +194,14 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
         </h2>
         <p className="form-hint">Works with Mocky Mail, Gmail, Outlook and any other IMAP mailbox.</p>
       </header>
+
+      {(busy === 'google' || busy === 'microsoft') && (
+        <p className="signin-progress" role="status">
+          <span className="spinner" aria-hidden="true" />
+          Signing in with {providerName(busy)}. Finish on the {providerName(busy)} screen; this page carries on by
+          itself, then checks your mailbox.
+        </p>
+      )}
 
       {copy && (
         <div className="notice notice--error" role="alert">

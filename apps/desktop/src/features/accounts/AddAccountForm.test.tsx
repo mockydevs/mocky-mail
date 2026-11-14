@@ -115,6 +115,15 @@ describe('adding an account', () => {
     expect(await screen.findByRole('list', { name: 'All accounts' })).toBeInTheDocument();
   });
 
+  it('shows that sign-in is under way until the provider answers', async () => {
+    const { user, api } = renderApp({ accounts: [], oauthConfigured: true });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    vi.spyOn(api, 'addOAuthAccount').mockReturnValue(new Promise(() => undefined));
+    await user.click(within(form()).getByRole('button', { name: 'Continue with Google' }));
+    expect(within(form()).getByRole('status')).toHaveTextContent('Signing in with Google');
+    expect(within(form()).getByRole('button', { name: 'Waiting for Google' })).toBeDisabled();
+  });
+
   it('asks to fix a half-typed address instead of sending it as a hint', async () => {
     const { user, api } = renderApp({ accounts: [], oauthConfigured: true });
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
