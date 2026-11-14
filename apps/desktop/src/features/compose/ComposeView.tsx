@@ -6,6 +6,7 @@ import type { Account, AppError, Draft, DraftAttachment } from '../../api/types'
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
+import { RecipientField } from './RecipientField';
 import { parseRecipients } from './recipients';
 
 interface Props {
@@ -41,7 +42,8 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
   const [baseline, setBaseline] = useState<Draft>(initial);
   const [loadingAttachments, setLoadingAttachments] = useState(attachmentsFrom !== null);
   const [attachError, setAttachError] = useState<AppError | null>(null);
-  const [showCopies, setShowCopies] = useState(initial.cc !== '' || initial.bcc !== '');
+  const [showCc, setShowCc] = useState(initial.cc !== '');
+  const [showBcc, setShowBcc] = useState(initial.bcc !== '');
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<FieldName, string>>>({});
   const [error, setError] = useState<AppError | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -163,6 +165,9 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
     if (event.key === 'Escape' && !confirmClose) {
       event.stopPropagation();
       requestClose();
+    } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && busy === null && !loadingAttachments) {
+      event.preventDefault();
+      (event.currentTarget as HTMLFormElement).requestSubmit();
     }
   };
 
@@ -175,20 +180,17 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
           {label}
         </label>
         <div className="compose__field">
-          <input
+          <RecipientField
             id={fieldId}
-            type="text"
-            inputMode="email"
-            autoComplete="email"
-            className="compose__input"
+            label={label}
             value={draft[name]}
-            aria-invalid={message ? true : undefined}
-            aria-describedby={message ? `${fieldId}-error` : undefined}
+            invalid={message !== undefined}
+            describedBy={message ? `${fieldId}-error` : undefined}
             // The first field of a view the user just opened.
             // eslint-disable-next-line jsx-a11y/no-autofocus
             autoFocus={autoFocus}
-            onChange={(e) => {
-              update({ [name]: e.target.value });
+            onChange={(value) => {
+              update({ [name]: value });
             }}
           />
           {message && (
@@ -197,6 +199,34 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
             </p>
           )}
         </div>
+        {name === 'to' && (!showCc || !showBcc) && (
+          <span className="compose__copies">
+            {!showCc && (
+              <button
+                type="button"
+                className="btn btn--link"
+                aria-label="Add Cc"
+                onClick={() => {
+                  setShowCc(true);
+                }}
+              >
+                Cc
+              </button>
+            )}
+            {!showBcc && (
+              <button
+                type="button"
+                className="btn btn--link"
+                aria-label="Add Bcc"
+                onClick={() => {
+                  setShowBcc(true);
+                }}
+              >
+                Bcc
+              </button>
+            )}
+          </span>
+        )}
       </div>
     );
   };
@@ -205,6 +235,7 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
     // The form handles Esc for its own fields; it is not an interactive control itself.
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <form className="compose" aria-labelledby={`${id}-title`} onSubmit={send} onKeyDown={onKeyDown} noValidate>
+      <div className="compose__card">
       <header className="compose__head">
         <h1 id={`${id}-title`} className="compose__title">
           {title}
@@ -226,7 +257,7 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
           </label>
           <select
             id={`${id}-from`}
-            className="field field--select"
+            className="compose__from"
             value={draft.accountId}
             onChange={(e) => {
               update({ accountId: e.target.value });
@@ -234,27 +265,14 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
           >
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>
-                {a.displayName && a.displayName !== a.email ? `${a.displayName}, ${a.email}` : a.email}
+                {a.displayName && a.displayName !== a.email ? `${a.displayName} <${a.email}>` : a.email}
               </option>
             ))}
           </select>
         </div>
         {field('to', 'To', initial.to === '')}
-        {!showCopies && (
-          <div className="compose__row compose__row--copies">
-            <button
-              type="button"
-              className="btn btn--link"
-              onClick={() => {
-                setShowCopies(true);
-              }}
-            >
-              Add Cc or Bcc
-            </button>
-          </div>
-        )}
-        {showCopies && field('cc', 'Cc', false)}
-        {showCopies && field('bcc', 'Bcc', false)}
+        {showCc && field('cc', 'Cc', false)}
+        {showBcc && field('bcc', 'Bcc', false)}
         <div className="compose__row">
           <label htmlFor={`${id}-subject`} className="compose__label">
             Subject
@@ -276,6 +294,7 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
           <Icon name="paperclip" />
           Attach files
         </button>
+        <span className="compose__hint">Ctrl+Enter to send</span>
       </div>
 
       <label htmlFor={`${id}-body`} className="visually-hidden">
@@ -367,6 +386,7 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
           <Icon name="trash" />
         </button>
       </footer>
+      </div>
 
       {confirmClose && (
         <Modal

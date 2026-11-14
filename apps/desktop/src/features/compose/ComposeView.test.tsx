@@ -132,7 +132,8 @@ describe('compose', () => {
     await user.click(await unified().findByRole('button', { name: 'Drafts 1' }));
     await user.click(await within(reader()).findByRole('button', { name: 'Continue editing' }));
     const form = composeForm('Edit draft');
-    expect(form.getByLabelText('To')).toHaveValue('Brian Otieno <brian@personal.example>');
+    expect(form.getByRole('button', { name: 'Remove Brian Otieno <brian@personal.example>' })).toBeInTheDocument();
+    expect(form.getByText('Brian Otieno')).toBeInTheDocument();
     expect(form.getByLabelText('Subject')).toHaveValue('Re: Lunch on Friday?');
     expect(form.getByLabelText('Message')).toHaveValue('Friday works. 1pm at');
     expect(await form.findByText('Menu.pdf')).toBeInTheDocument();
@@ -236,8 +237,9 @@ describe('compose', () => {
     const send = vi.spyOn(api, 'sendMessage');
     await user.click(await within(reader()).findByRole('button', { name: 'Reply all' }));
     const form = composeForm('Reply all');
-    expect(form.getByLabelText('To')).toHaveValue('Wanjiru Kamau <wanjiru@fitout.example>');
-    expect(form.getByLabelText('Cc')).toHaveValue('Amina Hassan <amina@studio.example>');
+    const row = (label: string) => within(form.getByRole('list', { name: `${label} recipients` }));
+    expect(row('To').getByRole('button', { name: 'Remove Wanjiru Kamau <wanjiru@fitout.example>' })).toBeInTheDocument();
+    expect(row('Cc').getByRole('button', { name: 'Remove Amina Hassan <amina@studio.example>' })).toBeInTheDocument();
     expect(form.getByLabelText('Subject')).toHaveValue('Re: Revised quotation for the Westlands office fit-out');
     expect(form.getByLabelText('Message')).toHaveFocus();
     expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain('> Thanks,\n> Wanjiru');

@@ -64,6 +64,7 @@ button:disabled {
 
 .field:focus-visible,
 .compose__input:focus-visible,
+.compose__from:focus-visible,
 .compose__body:focus-visible,
 .search__input:focus-visible {
   outline: none;
@@ -73,6 +74,7 @@ button:disabled {
   :focus-visible,
   .field:focus-visible,
   .compose__input:focus-visible,
+  .compose__from:focus-visible,
   .compose__body:focus-visible,
   .search__input:focus-visible {
     outline: 2px solid CanvasText;
@@ -948,19 +950,26 @@ button:disabled {
   background: var(--surface);
 }
 
+/* Edge to edge, no frame: the message sits straight on the pane. */
+.compose__card {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  width: 100%;
+}
+
 
 .compose__head {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px 10px 20px;
-  background: var(--chrome);
+  padding: 8px 10px 8px 20px;
   border-bottom: 1px solid var(--border);
 }
 
 .compose__title {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 600;
 }
 
@@ -974,10 +983,10 @@ button:disabled {
 
 .compose__row {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px 12px;
-  min-height: 52px;
+  min-height: 44px;
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -985,14 +994,94 @@ button:disabled {
   border-bottom-color: var(--focus);
 }
 
-.compose__row--copies {
-  padding-left: 64px;
-}
-
 .compose__label {
-  width: 64px;
+  flex: 0 0 auto;
+  width: 56px;
   font-size: 13px;
   color: var(--muted);
+}
+
+.compose__from {
+  max-width: 100%;
+  min-height: 36px;
+  padding: 0 24px 0 4px;
+  border: 0;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.compose__from:hover {
+  background-color: var(--row-hover);
+}
+
+.compose__copies {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.recipients {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.recipients__list {
+  display: contents;
+  list-style: none;
+}
+
+.recipients__input {
+  flex: 1 1 140px;
+  min-height: 32px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px 2px 2px 10px;
+  border-radius: 999px;
+  background: var(--sel-bg);
+  color: var(--sel-text);
+  font-size: 13px;
+}
+
+.chip--bad {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.chip__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip__remove {
+  display: inline-flex;
+  padding: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chip__remove:hover {
+  background: color-mix(in srgb, currentColor 14%, transparent);
 }
 
 .compose__field {
@@ -1005,7 +1094,7 @@ button:disabled {
 .compose__input {
   flex: 1 1 200px;
   min-width: 0;
-  min-height: 40px;
+  min-height: 36px;
   border: 0;
   background: transparent;
   color: var(--text);
@@ -1028,9 +1117,9 @@ button:disabled {
 
 .compose__body {
   flex: 1;
-  min-height: 240px;
+  min-height: 220px;
   margin: 0;
-  padding: 20px 24px;
+  padding: 16px 20px;
   border: 0;
   resize: none;
   background: var(--surface);
@@ -1044,7 +1133,7 @@ button:disabled {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  padding: 14px 20px;
+  padding: 10px 16px;
   border-top: 1px solid var(--border);
   background: var(--list);
 }
@@ -1138,10 +1227,6 @@ button:disabled {
   /* Stacked panes have no fixed height to fill; give the email a screenful. */
   .reader__frame {
     min-height: 70vh;
-  }
-
-  .compose__row--copies {
-    padding-left: 0;
   }
 }
 
@@ -1609,9 +1694,17 @@ kbd {
 
 .compose__tools {
   display: flex;
+  align-items: center;
   gap: 4px;
-  padding: 6px 14px;
+  padding: 4px 10px;
   border-bottom: 1px solid var(--border-soft);
+}
+
+.compose__hint {
+  margin-left: auto;
+  padding-right: 6px;
+  font-size: 12px;
+  color: var(--faint);
 }
 
 .compose__attachments {
