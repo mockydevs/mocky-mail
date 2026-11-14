@@ -88,7 +88,7 @@ impl From<mail_auth::AuthError> for AppError {
             E::NotConfigured(_) => "config",
             E::Denied | E::Reauthorize => "auth",
             E::Timeout | E::Network => "connect",
-            E::Local | E::Protocol => "internal",
+            E::Local | E::Browser | E::Protocol => "internal",
         };
         Self::new(kind, error.to_string())
     }

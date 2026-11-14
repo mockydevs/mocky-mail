@@ -91,7 +91,7 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 |---|---|---|
 | `suggest_servers` | `{ email }` | `{ imap: ServerConfig; smtp: ServerConfig; auth: AuthKind } \| null` |
 | `add_account` | `{ input: { email, displayName, password, imap, smtp } }` | `Account` (logs in to IMAP and SMTP first; nothing saved on failure) |
-| `add_oauth_account` | `{ input: { email, displayName, provider: "google" \| "microsoft" } }` | `Account` (opens system browser; may reject `config` until OAuth is configured) |
+| `add_oauth_account` | `{ input: { email, displayName, provider: "google" \| "microsoft" } }` | `Account` (opens the system browser at the provider's account chooser; `email` may be `""`, and the account picked there is used; may reject `config` until OAuth is configured) |
 | `update_account` | `{ id, patch: { displayName?, password? } }` | `Account` |
 | `remove_account` | `{ id }` | `void` (deletes local mail and keyring entry, not server mail) |
 | `list_accounts` | | `Account[]` |
