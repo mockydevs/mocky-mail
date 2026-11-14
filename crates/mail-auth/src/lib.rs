@@ -130,9 +130,12 @@ pub enum AuthError {
     /// Invalid, expired or revoked grant.
     #[error("Sign in again to renew mailbox access")]
     Reauthorize,
-    /// Local browser or listener unavailable.
-    #[error("Cannot open the sign-in browser or local callback")]
+    /// The local callback listener (or another local step) failed.
+    #[error("Cannot start the local sign-in callback")]
     Local,
+    /// The system browser could not be opened for sign-in.
+    #[error("Cannot open a web browser to sign in")]
+    Browser,
     /// Sign-in timed out.
     #[error("Sign-in timed out")]
     Timeout,
@@ -208,10 +211,27 @@ async fn wait_code(listener: &TcpListener, state: &str) -> Result<String, AuthEr
 }
 /// Open the system browser and exchange its one-time authorization code.
 ///
+/// `open_browser` shows the sign-in page in the user's browser and returns
+/// whether it could. The app passes its own opener, because how to open a
+/// browser differs by platform (on Android it is an intent, not a program).
+///
 /// # Errors
 /// Returns a user-safe error for missing configuration, cancellation or provider failure.
-pub async fn authorize(provider: Provider, login_hint: &str) -> Result<OAuthTokens, AuthError> {
+pub async fn authorize(
+    provider: Provider,
+    login_hint: &str,
+    open_browser: impl FnOnce(&str) -> bool,
+) -> Result<OAuthTokens, AuthError> {
     let cfg = provider.config()?;
+    authorize_with(provider, &cfg, login_hint, open_browser).await
+}
+
+async fn authorize_with(
+    provider: Provider,
+    cfg: &Config<'_>,
+    login_hint: &str,
+    open_browser: impl FnOnce(&str) -> bool,
+) -> Result<OAuthTokens, AuthError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .map_err(|_| AuthError::Local)?;
@@ -242,12 +262,14 @@ pub async fn authorize(provider: Provider, login_hint: &str) -> Result<OAuthToke
                 .append_pair("prompt", "consent");
         }
     }
-    open::that_detached(url.as_str()).map_err(|_| AuthError::Local)?;
+    if !open_browser(url.as_str()) {
+        return Err(AuthError::Browser);
+    }
     let code = timeout(Duration::from_mins(5), wait_code(&listener, &state))
         .await
         .map_err(|_| AuthError::Timeout)??;
     exchange(
-        &cfg,
+        cfg,
         vec![
             ("grant_type", "authorization_code"),
             ("code", &code),
@@ -398,10 +420,14 @@ mod tests {
         assert_eq!(expires(u64::MAX, 1), Err(AuthError::Protocol));
         assert_eq!(expires(0, 0), Err(AuthError::Protocol));
     }
-    async fn mock_exchange(status: &str, body: &str) -> Result<OAuthTokens, AuthError> {
+    /// A one-request token endpoint. Checks the form names `grant` and replies.
+    async fn token_server(
+        grant: &'static str,
+        status: &str,
+        body: &str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let endpoint = format!("http://{address}/token");
         let reply = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -426,20 +452,26 @@ mod tests {
             assert!(
                 String::from_utf8(data)
                     .unwrap()
-                    .contains("grant_type=refresh_token")
+                    .contains(&format!("grant_type={grant}"))
             );
             stream.write_all(reply.as_bytes()).await.unwrap();
         });
-        let config = Config {
+        (format!("http://{address}/token"), server)
+    }
+    fn test_config(token: &str) -> Config<'_> {
+        Config {
             id: "test",
             secret: None,
-            authority: "",
-            token: &endpoint,
-            scope: "",
-            host: "localhost",
-        };
+            authority: "https://sign-in.example/authorize",
+            token,
+            scope: "openid",
+            host: "127.0.0.1",
+        }
+    }
+    async fn mock_exchange(status: &str, body: &str) -> Result<OAuthTokens, AuthError> {
+        let (endpoint, server) = token_server("refresh_token", status, body).await;
         let result = exchange(
-            &config,
+            &test_config(&endpoint),
             vec![
                 ("grant_type", "refresh_token"),
                 ("refresh_token", "fixture"),
@@ -448,6 +480,76 @@ mod tests {
         .await;
         server.await.unwrap();
         result
+    }
+    /// Plays the browser: follows the sign-in URL's redirect back to the
+    /// app's loopback listener with the given state and a fixture code.
+    fn fake_browser_redirect(sign_in_url: &str) {
+        let url = Url::parse(sign_in_url).unwrap();
+        let param = |name: &str| {
+            url.query_pairs()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.into_owned())
+                .unwrap()
+        };
+        let redirect = Url::parse(&param("redirect_uri")).unwrap();
+        assert_eq!(redirect.host_str(), Some("127.0.0.1"));
+        let state = param("state");
+        let port = redirect.port().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                stream,
+                "GET /?state={state}&code=fixture-code HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            )
+            .unwrap();
+            let mut page = String::new();
+            stream.read_to_string(&mut page).unwrap();
+            assert!(page.starts_with("HTTP/1.1 200"));
+        });
+    }
+    #[tokio::test]
+    async fn sign_in_uses_the_app_opener_and_the_loopback_callback() {
+        let (endpoint, server) = token_server(
+            "authorization_code",
+            "200 OK",
+            r#"{"access_token":"test","refresh_token":"kept","expires_in":10,"token_type":"Bearer"}"#,
+        )
+        .await;
+        let mut opened = false;
+        let tokens = authorize_with(
+            Provider::Google,
+            &test_config(&endpoint),
+            "me@gmail.com",
+            |url| {
+                opened = true;
+                fake_browser_redirect(url);
+                true
+            },
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert!(opened);
+        assert_eq!(tokens.refresh_token.as_deref(), Some("kept"));
+    }
+    #[tokio::test]
+    async fn a_browser_that_cannot_open_is_reported_as_such() {
+        let error = authorize_with(
+            Provider::Google,
+            &test_config("http://127.0.0.1:9/token"),
+            "",
+            |_| false,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error, AuthError::Browser);
+        // The message names the step and carries no URL or token.
+        let message = error.to_string();
+        assert!(message.contains("browser"), "{message}");
+        assert!(!message.contains("http"), "{message}");
+        assert_ne!(message, AuthError::Local.to_string());
     }
     #[tokio::test]
     async fn refresh_accepts_rotated_or_omitted_token() {

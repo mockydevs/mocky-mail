@@ -88,7 +88,7 @@ impl From<mail_auth::AuthError> for AppError {
             E::NotConfigured(_) => "config",
             E::Denied | E::Reauthorize => "auth",
             E::Timeout | E::Network => "connect",
-            E::Local | E::Protocol => "internal",
+            E::Local | E::Browser | E::Protocol => "internal",
         };
         Self::new(kind, error.to_string())
     }
@@ -122,6 +122,11 @@ mod tests {
             .kind,
             "config"
         );
+        // Each sign-in step that can fail on this device has its own message.
+        let browser = AppError::from(mail_auth::AuthError::Browser);
+        let callback = AppError::from(mail_auth::AuthError::Local);
+        assert_eq!(browser.kind, "internal");
+        assert_ne!(browser.message, callback.message);
     }
 
     #[test]
