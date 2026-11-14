@@ -771,10 +771,11 @@ button:disabled {
   padding: 28px 40px 16px;
 }
 
-/* The HTML email takes all the space left below the header. */
+/* The HTML email takes all the space left below the header, and never less
+   than half the pane: in a short window the header scrolls instead. */
 .reader__frame {
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 50%;
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
@@ -841,16 +842,18 @@ button:disabled {
 
 .quick-reply {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 12px;
-  padding: 14px 40px 16px;
+  gap: 8px 12px;
+  padding: 10px 40px;
   border-top: 1px solid var(--border);
 }
 
 .quick-reply__label {
   display: flex;
-  flex: 1 1 320px;
+  flex: 1 1 0;
+  min-width: 0;
   flex-direction: column;
   gap: 6px;
   font-size: 12px;
