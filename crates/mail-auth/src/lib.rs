@@ -130,9 +130,12 @@ pub enum AuthError {
     /// Invalid, expired or revoked grant.
     #[error("Sign in again to renew mailbox access")]
     Reauthorize,
-    /// Local browser or listener unavailable.
-    #[error("Cannot open the sign-in browser or local callback")]
+    /// The local callback listener (or another local step) failed.
+    #[error("Cannot start the local sign-in callback")]
     Local,
+    /// The system browser could not be opened for sign-in.
+    #[error("Cannot open a web browser to sign in")]
+    Browser,
     /// Sign-in timed out.
     #[error("Sign-in timed out")]
     Timeout,
@@ -208,10 +211,27 @@ async fn wait_code(listener: &TcpListener, state: &str) -> Result<String, AuthEr
 }
 /// Open the system browser and exchange its one-time authorization code.
 ///
+/// `open_browser` shows the sign-in page in the user's browser and returns
+/// whether it could. The app passes its own opener, because how to open a
+/// browser differs by platform (on Android it is an intent, not a program).
+///
 /// # Errors
 /// Returns a user-safe error for missing configuration, cancellation or provider failure.
-pub async fn authorize(provider: Provider, login_hint: &str) -> Result<OAuthTokens, AuthError> {
+pub async fn authorize(
+    provider: Provider,
+    login_hint: &str,
+    open_browser: impl FnOnce(&str) -> bool,
+) -> Result<OAuthTokens, AuthError> {
     let cfg = provider.config()?;
+    authorize_with(provider, &cfg, login_hint, open_browser).await
+}
+
+async fn authorize_with(
+    provider: Provider,
+    cfg: &Config<'_>,
+    login_hint: &str,
+    open_browser: impl FnOnce(&str) -> bool,
+) -> Result<OAuthTokens, AuthError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .map_err(|_| AuthError::Local)?;
@@ -242,12 +262,14 @@ pub async fn authorize(provider: Provider, login_hint: &str) -> Result<OAuthToke
                 .append_pair("prompt", "consent");
         }
     }
-    open::that_detached(url.as_str()).map_err(|_| AuthError::Local)?;
+    if !open_browser(url.as_str()) {
+        return Err(AuthError::Browser);
+    }
     let code = timeout(Duration::from_mins(5), wait_code(&listener, &state))
         .await
         .map_err(|_| AuthError::Timeout)??;
     exchange(
-        &cfg,
+        cfg,
         vec![
             ("grant_type", "authorization_code"),
             ("code", &code),
@@ -349,8 +371,64 @@ pub fn xoauth2(user: &str, access_token: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn test_config() -> Config<'static> {
+        Config {
+            id: "test-client",
+            secret: None,
+            authority: "https://sign-in.invalid/authorize",
+            token: "https://sign-in.invalid/token",
+            scope: "email",
+            host: "127.0.0.1",
+        }
+    }
+
+    #[tokio::test]
+    async fn a_browser_that_will_not_open_says_so() {
+        let result = authorize_with(Provider::Google, &test_config(), "a@x.co", |_| false).await;
+        assert!(matches!(result, Err(AuthError::Browser)));
+    }
+
+    #[tokio::test]
+    async fn the_page_opened_comes_back_to_the_app() {
+        // Plays the browser: reads the sign-in URL it was asked to open, then
+        // follows the redirect back to the app's local callback, as if the
+        // user had pressed "Cancel" at the provider.
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen = std::sync::Arc::clone(&opened);
+        let result = authorize_with(Provider::Google, &test_config(), "a@x.co", move |url| {
+            *seen.lock().unwrap() = url.to_owned();
+            let page = Url::parse(url).unwrap();
+            let param = |name: &str| {
+                page.query_pairs()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap()
+            };
+            let redirect = Url::parse(&param("redirect_uri")).unwrap();
+            let state = param("state");
+            tokio::spawn(async move {
+                let mut stream = tokio::net::TcpStream::connect((
+                    redirect.host_str().unwrap(),
+                    redirect.port().unwrap(),
+                ))
+                .await
+                .unwrap();
+                let request = format!("GET /?state={state}&error=access_denied HTTP/1.1\r\n\r\n");
+                stream.write_all(request.as_bytes()).await.unwrap();
+            });
+            true
+        })
+        .await;
+        assert!(matches!(result, Err(AuthError::Denied)));
+        let url = opened.lock().unwrap().clone();
+        assert!(url.starts_with("https://sign-in.invalid/authorize?"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("login_hint=a%40x.co"));
+    }
 
     #[test]
     fn pkce_rfc7636_vector() {

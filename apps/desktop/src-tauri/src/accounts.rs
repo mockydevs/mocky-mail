@@ -9,6 +9,7 @@ use mail_sync::imap::ImapConnection;
 use mail_sync::{Credentials, Security, ServerConfig, ServerSuggestion, smtp};
 use serde::Deserialize;
 use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::convert::{to_store, to_sync};
 use crate::credentials::{cache_token, oauth_key, password_key};
@@ -181,7 +182,18 @@ pub async fn add_oauth_account(
         "microsoft" => (Provider::Microsoft, AuthKind::Microsoft),
         _ => return Err(AppError::invalid("Unknown sign-in provider.")),
     };
-    let tokens = mail_auth::authorize(provider, &email).await?;
+    let opener = app.clone();
+    let tokens = mail_auth::authorize(provider, &email, move |url| {
+        // The opener plugin works on every platform, Android included.
+        match opener.opener().open_url(url, None::<&str>) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("couldn't open the browser for sign-in: {error}");
+                false
+            }
+        }
+    })
+    .await?;
     let refresh_token = tokens.refresh_token.clone().ok_or_else(|| {
         AppError::new(
             "auth",
