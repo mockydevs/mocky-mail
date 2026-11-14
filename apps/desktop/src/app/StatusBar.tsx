@@ -1,27 +1,15 @@
-import type { ConnectionStatus, FolderCounts } from '../api/types';
-import { connectionCopy } from './connection';
+import type { SyncSummary } from './sync';
 
-export function StatusBar({
-  connection,
-  counts,
-  accountCount,
-}: {
-  connection: ConnectionStatus | null;
-  counts: FolderCounts | null;
-  accountCount: number;
-}) {
-  const copy = connection ? connectionCopy(connection) : null;
+export function StatusBar({ sync, outbox, accountCount }: { sync: SyncSummary; outbox: number; accountCount: number }) {
   return (
     <footer className="statusbar">
-      {copy && (
-        <span className="statusbar__item">
-          <span className={`dot dot--small dot--conn-${copy.tone}`} aria-hidden="true" />
-          {copy.status}
-        </span>
-      )}
-      {copy?.lastSync && <span className="statusbar__item">{copy.lastSync}</span>}
+      <span className="statusbar__item">
+        <span className={`dot dot--small dot--conn-${sync.tone}`} aria-hidden="true" />
+        {sync.status}
+      </span>
+      {sync.lastSync && <span className="statusbar__item">{sync.lastSync}</span>}
       <span className="statusbar__spacer" />
-      {counts && counts.outbox > 0 && <span className="statusbar__item">{counts.outbox} waiting in Outbox</span>}
+      {outbox > 0 && <span className="statusbar__item">{outbox} waiting in Outbox</span>}
       <span className="statusbar__item">
         {accountCount} {accountCount === 1 ? 'account' : 'accounts'}
       </span>

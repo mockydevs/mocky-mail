@@ -104,6 +104,9 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
         .url_schemes(HashSet::from(["http", "https", "mailto", "tel", "cid"]))
         .url_relative(UrlRelative::Deny)
         .link_rel(Some("noopener noreferrer"))
+        // Links open as popups, which the app hands to the system browser;
+        // the viewer itself never navigates.
+        .set_tag_attribute_value("a", "target", "_blank")
         .add_generic_attributes(["style"])
         .filter_style_properties(ALLOWED_STYLE_PROPERTIES.iter().copied().collect())
         .rm_tag_attributes("img", ["srcset"])
@@ -203,6 +206,13 @@ mod tests {
     fn links_open_without_referrer_or_opener() {
         let out = clean(r#"<a href="https://example.com">x</a>"#);
         assert!(out.contains(r#"rel="noopener noreferrer""#));
+    }
+
+    #[test]
+    fn links_open_in_a_new_window() {
+        let out = clean(r#"<a href="https://example.com" target="_self">x</a>"#);
+        assert!(out.contains(r#"target="_blank""#));
+        assert!(!out.contains("_self"));
     }
 
     #[test]

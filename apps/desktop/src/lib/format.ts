@@ -26,6 +26,12 @@ interface DateParts {
   minute: string;
 }
 
+function toDate(seconds: number | null): Date | null {
+  if (seconds === null || !Number.isFinite(seconds)) return null;
+  const date = new Date(seconds * 1000);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function partsIn(date: Date, timeZone: string | undefined): DateParts {
   const fmt = new Intl.DateTimeFormat('en-GB', {
     timeZone,
@@ -38,8 +44,8 @@ function partsIn(date: Date, timeZone: string | undefined): DateParts {
     hourCycle: 'h23',
   });
   const named = new Intl.DateTimeFormat('en-GB', { timeZone, month: 'short' });
-  const get = (type: Intl.DateTimeFormatPartTypes): string =>
-    fmt.formatToParts(date).find((p) => p.type === type)?.value ?? '';
+  const parts = fmt.formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '';
   return {
     year: Number(get('year')),
     month: Number(get('month')),
@@ -56,14 +62,15 @@ function dayNumber(p: DateParts): number {
 }
 
 /**
- * Message-list time label relative to `now`: "09:42", "Yesterday", "Tue",
- * or "3 Nov". Future dates (clock skew) show the time.
+ * Message-list time label relative to `now` (both Unix seconds): "09:42",
+ * "Yesterday", "Tue", "3 Nov" or "3 Nov 2025". Future dates show the time.
  */
-export function formatListTime(iso: string, now: Date, timeZone?: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
+export function formatListTime(seconds: number | null, now: number, timeZone?: string): string {
+  const date = toDate(seconds);
+  const nowDate = toDate(now);
+  if (!date || !nowDate) return '';
   const d = partsIn(date, timeZone);
-  const n = partsIn(now, timeZone);
+  const n = partsIn(nowDate, timeZone);
   const daysAgo = dayNumber(n) - dayNumber(d);
   if (daysAgo <= 0) return `${d.hour}:${d.minute}`;
   if (daysAgo === 1) return 'Yesterday';
@@ -72,18 +79,23 @@ export function formatListTime(iso: string, now: Date, timeZone?: string): strin
   return `${d.day} ${d.monthName} ${d.year}`;
 }
 
-/** Reading-pane date: "Thu 13 Nov, 09:42". */
-export function formatLongDate(iso: string, timeZone?: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
+/** Reading-pane date: "Fri 13 Nov 2026, 09:42". */
+export function formatLongDate(seconds: number | null, timeZone?: string): string {
+  const date = toDate(seconds);
+  if (!date) return '';
   const d = partsIn(date, timeZone);
-  return `${d.weekday} ${d.day} ${d.monthName}, ${d.hour}:${d.minute}`;
+  return `${d.weekday} ${d.day} ${d.monthName} ${d.year}, ${d.hour}:${d.minute}`;
 }
 
 /** Clock time only: "10:02". */
-export function formatClock(iso: string, timeZone?: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
+export function formatClock(seconds: number | null, timeZone?: string): string {
+  const date = toDate(seconds);
+  if (!date) return '';
   const d = partsIn(date, timeZone);
   return `${d.hour}:${d.minute}`;
+}
+
+/** Current time in Unix seconds. */
+export function nowSeconds(): number {
+  return Math.floor(Date.now() / 1000);
 }

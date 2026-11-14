@@ -7,7 +7,9 @@ describe('SandboxedHtml', () => {
     render(<SandboxedHtml title="Message body" html="<p>Hello</p>" />);
     const frame = screen.getByTitle('Message body');
     expect(frame.tagName).toBe('IFRAME');
-    expect(frame.getAttribute('sandbox')).toBe('');
+    // Only popups are allowed (links open via the backend's new-window guard);
+    // never scripts, same-origin, forms or top navigation.
+    expect(frame.getAttribute('sandbox')).toBe('allow-popups');
     expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
     const doc = frame.getAttribute('srcdoc') ?? '';
     expect(doc).toContain(`<meta http-equiv="Content-Security-Policy" content="${EMAIL_CSP}">`);

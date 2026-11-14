@@ -1,268 +1,208 @@
-import { render, screen, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import { vi } from 'vitest';
 
-import { createMockMailApi } from '../api/mockMailApi';
-import type { MailApi } from '../api/types';
-import { THEME_STORAGE_KEY } from '../theme/theme';
-import { App } from './App';
-
-const NOW = () => new Date('2026-11-13T07:15:00Z');
-
-function setup(api: MailApi = createMockMailApi({ now: NOW })) {
-  const user = userEvent.setup();
-  render(<App api={api} now={NOW} />);
-  return { user, api };
-}
-
-const folders = () => within(screen.getByRole('list', { name: 'Folders' }));
-const rows = async (name = 'Inbox messages') => within(await screen.findByRole('list', { name }));
-const reader = () => screen.getByRole('article', { name: 'Reading pane' });
+import { MOCK_ACCOUNTS, MOCK_NOW } from '../api/mock/mockData';
+import type { MockMessage } from '../api/mock/mockMailApi';
+import { accountFolders, deferred, reader, renderApp, rows, unified } from '../test/renderApp';
 
 describe('mailbox', () => {
-  it('opens the inbox with the newest message shown but not marked read', async () => {
-    setup();
+  it('opens the unified inbox across accounts without marking anything read', async () => {
+    renderApp();
     const list = await rows();
-    expect(list.getAllByRole('button')).toHaveLength(8);
-    expect(
-      await within(reader()).findByRole('heading', { name: 'Revised quotation for the Westlands office fit-out' }),
-    ).toBeInTheDocument();
-    expect(list.getByRole('button', { current: true })).toHaveTextContent('Wanjiru Kamau');
-    expect(folders().getByLabelText('4 unread')).toBeInTheDocument();
+    expect(list.getAllByRole('button').map((b) => b.dataset['id'])).toEqual(['m1', 'm2', 'm3', 'm5', 'm6', 'm7']);
+    expect(await within(reader()).findByRole('heading', { name: /Westlands office fit-out/ })).toBeInTheDocument();
+    expect(await unified().findByRole('button', { name: 'Inbox 4 unread' })).toHaveAttribute('aria-current', 'page');
+    expect(accountFolders('Work').getByRole('button', { name: 'Inbox 3 unread' })).toBeInTheDocument();
+    expect(accountFolders('Personal').getByRole('button', { name: 'Inbox 1 unread' })).toBeInTheDocument();
   });
 
-  it('shows the message the user clicks and marks it read', async () => {
-    const { user } = setup();
+  it('lists each account folder tree with special folders first and decoded names', async () => {
+    renderApp();
+    await rows();
+    await accountFolders('Work').findByRole('button', { name: 'Spam' });
+    const names = accountFolders('Work')
+      .getAllByRole('button')
+      .map((b) => b.textContent);
+    expect(names).toEqual(['Inbox 3 unread', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', 'Clients', 'Résumés']);
+  });
+
+  it('marks a message read only when the user opens it', async () => {
+    const { user } = renderApp();
     const list = await rows();
     await user.click(list.getByRole('button', { name: /Brian Otieno/ }));
     expect(await within(reader()).findByRole('heading', { name: 'Lunch on Friday?' })).toBeInTheDocument();
-    expect(within(reader()).getByText(/new place near Yaya Centre/)).toBeInTheDocument();
-    expect(await folders().findByLabelText('3 unread')).toBeInTheDocument();
+    expect(await unified().findByRole('button', { name: 'Inbox 3 unread' })).toBeInTheDocument();
   });
 
-  it('switches folders', async () => {
-    const { user } = setup();
+  it('opens a single folder of one account', async () => {
+    const { user } = renderApp();
     await rows();
-    await user.click(folders().getByRole('button', { name: /^Sent/ }));
-    expect(screen.getByRole('heading', { level: 1, name: 'Sent' })).toBeInTheDocument();
-    const sent = await rows('Sent messages');
-    expect(sent.getAllByRole('button')).toHaveLength(2);
-    expect(folders().getByRole('button', { name: /^Sent/ })).toHaveAttribute('aria-current', 'page');
+    await user.click(await accountFolders('Work').findByRole('button', { name: /^Clients/ }));
+    const list = await rows('Clients');
+    expect(list.getAllByRole('button')).toHaveLength(1);
+    expect(screen.getByText(/1 message, Work/)).toBeInTheDocument();
   });
 
-  it('shows an empty state for an empty folder and no message selected', async () => {
-    const { user } = setup();
+  it('shows an empty state and no message selected for an empty folder', async () => {
+    const { user } = renderApp();
     await rows();
-    await user.click(folders().getByRole('button', { name: /^Spam/ }));
+    await user.click(await accountFolders('Work').findByRole('button', { name: 'Spam' }));
     expect(await screen.findByText('No spam')).toBeInTheDocument();
     expect(within(reader()).getByText('No message selected')).toBeInTheDocument();
   });
 
-  it('filters by account and toggles back off', async () => {
-    const { user } = setup();
+  it('filters unread and keeps the opened message visible after it is read', async () => {
+    const { user } = renderApp();
     await rows();
-    const personal = screen.getByRole('button', { name: /Personal/ });
-    await user.click(personal);
-    expect(personal).toHaveAttribute('aria-pressed', 'true');
-    expect((await rows()).getAllByRole('button')).toHaveLength(2);
-    expect(screen.getByText('2 messages, Personal')).toBeInTheDocument();
-
-    await user.click(personal);
-    expect(personal).toHaveAttribute('aria-pressed', 'false');
-    expect((await rows()).getAllByRole('button')).toHaveLength(8);
-  });
-
-  it('filters unread and flagged', async () => {
-    const { user } = setup();
-    await rows();
-    await user.click(screen.getByRole('button', { name: 'Flagged' }));
-    const flagged = await rows();
-    expect(flagged.getAllByRole('button')).toHaveLength(1);
-    expect(flagged.getByRole('button')).toHaveTextContent('Amina Hassan');
-
     await user.click(screen.getByRole('button', { name: 'Unread' }));
-    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
     expect((await rows()).getAllByRole('button')).toHaveLength(4);
-  });
-
-  it('does not read every message in turn under the Unread filter', async () => {
-    const { user } = setup();
-    await rows();
-    await user.click(screen.getByRole('button', { name: 'Unread' }));
     await user.click((await rows()).getByRole('button', { name: /Brian Otieno/ }));
-    expect(await folders().findByLabelText('3 unread')).toBeInTheDocument();
-    // The opened message stays listed; nothing else was marked read.
+    expect(await unified().findByRole('button', { name: 'Inbox 3 unread' })).toBeInTheDocument();
     const list = await rows();
     expect(list.getAllByRole('button')).toHaveLength(4);
     expect(list.getByRole('button', { current: true })).toHaveTextContent('Brian Otieno');
   });
 
-  it('searches the current folder', async () => {
-    const { user } = setup();
+  it('debounces search so typing sends one query', async () => {
+    const { user, api } = renderApp();
     await rows();
+    const spy = vi.spyOn(api, 'listMessages');
     await user.type(screen.getByRole('searchbox', { name: 'Search mail' }), 'naivasha');
-    const list = await rows();
-    expect(list.getAllByRole('button')).toHaveLength(1);
-    expect(list.getByRole('button')).toHaveTextContent('Photos from the weekend');
+    await vi.waitFor(async () => {
+      expect((await rows()).getAllByRole('button')).toHaveLength(1);
+    });
+    const searches = spy.mock.calls.map(([q]) => q.search).filter((s) => s !== null);
+    expect(searches).toEqual(['naivasha']);
   });
 
-  it('renders HTML mail only inside the sandboxed frame', async () => {
-    const { user } = setup();
-    await user.click((await rows()).getByRole('button', { name: /Build server/ }));
-    const frame = await within(reader()).findByTitle('Message: Nightly build passed on main');
-    expect(frame).toHaveAttribute('sandbox', '');
-    expect(within(reader()).queryByText(/finished without errors/)).not.toBeInTheDocument();
+  it('pages through long folders with infinite scroll and a Load more button', async () => {
+    const many: MockMessage[] = Array.from({ length: 120 }, (_, i) => ({
+      id: `bulk${String(i)}`, accountId: 'work', folderId: 'work:inbox',
+      from: { name: `Sender ${String(i)}`, address: `s${String(i)}@x.example` }, to: [],
+      subject: `Message ${String(i)}`, preview: '', date: MOCK_NOW - i * 60, unread: false, flagged: false,
+      answered: false, hasAttachments: false, cc: [], replyTo: [], html: null, text: 'x',
+      blockedRemoteImages: 0, attachments: [], messageIdHeader: null, references: [],
+    }));
+    const { user } = renderApp({ messages: many });
+    expect((await rows()).getAllByRole('button')).toHaveLength(50);
+    await user.click(screen.getByRole('button', { name: 'Load more (70 left)' }));
+    await vi.waitFor(async () => {
+      expect((await rows()).getAllByRole('button')).toHaveLength(100);
+    });
+    const scroller = (await rows()).getAllByRole('button')[0]?.closest('.list__scroll');
+    if (!scroller) throw new Error('no scroller');
+    fireEvent.scroll(scroller);
+    await vi.waitFor(async () => {
+      expect((await rows()).getAllByRole('button')).toHaveLength(120);
+    });
+    expect(screen.queryByRole('button', { name: /Load more/ })).not.toBeInTheDocument();
   });
 
-  it('flags a message from the toolbar', async () => {
-    const { user } = setup();
+  it('refetches when the backend says mail changed', async () => {
+    const { api } = renderApp();
     await rows();
+    await api.setFlags(['m2', 'm5'], { seen: true });
+    act(() => {
+      api.emit('mail://changed', { accountId: 'work', folderIds: ['work:inbox'] });
+    });
+    expect(await unified().findByRole('button', { name: 'Inbox 2 unread' })).toBeInTheDocument();
+  });
+
+  it('rolls back an optimistic flag when the backend refuses', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    const pending = deferred();
+    vi.spyOn(api, 'setFlags').mockImplementationOnce(() => pending.promise);
     const flag = await within(reader()).findByRole('button', { name: 'Flag' });
-    expect(flag).toHaveAttribute('aria-pressed', 'false');
     await user.click(flag);
-    expect(await within(reader()).findByRole('button', { name: 'Flag', pressed: true })).toBeInTheDocument();
-  });
-
-  it('queues a quick reply and shows it in the Outbox count', async () => {
-    const { user } = setup();
-    await rows();
-    const send = await within(reader()).findByRole('button', { name: 'Send' });
-    expect(send).toBeDisabled();
-    await user.type(within(reader()).getByLabelText('Quick reply to Wanjiru'), 'Signed, see attached.');
-    await user.click(send);
-    expect(await folders().findByLabelText('4 waiting')).toBeInTheDocument();
-    expect(within(reader()).getByLabelText('Quick reply to Wanjiru')).toHaveValue('');
-  });
-});
-
-describe('outbox', () => {
-  async function openOutbox() {
-    const ctx = setup();
-    await rows();
-    await ctx.user.click(folders().getByRole('button', { name: /^Outbox/ }));
-    return { ...ctx, list: await rows('Outbox messages') };
-  }
-
-  it('selects the newest queued message first', async () => {
-    const { list } = await openOutbox();
-    expect(list.getByRole('button', { current: true })).toHaveTextContent('Client accounts');
-  });
-
-  it('shows the retrying banner with actions', async () => {
-    const { user, list } = await openOutbox();
-    expect(list.getByText('Retrying in 12 s')).toBeInTheDocument();
-    await user.click(list.getByRole('button', { name: /Wanjiru Kamau/ }));
-    const banner = await within(reader()).findByRole('status', { name: 'Delivery status' });
-    expect(banner).toHaveTextContent('Waiting for a better connection');
-    expect(within(banner).getByRole('button', { name: 'Send now' })).toBeInTheDocument();
-    expect(within(banner).getByRole('button', { name: 'Cancel sending' })).toBeInTheDocument();
-    expect(within(reader()).queryByRole('toolbar')).not.toBeInTheDocument();
-  });
-
-  it('shows progress while sending and no cancel', async () => {
-    const { user, list } = await openOutbox();
-    await user.click(list.getByRole('button', { name: /Amina Hassan/ }));
-    const banner = await within(reader()).findByRole('status', { name: 'Delivery status' });
-    await within(banner).findByText('Sending, 64% uploaded');
-    expect(within(banner).getByRole('progressbar', { name: 'Upload progress' })).toHaveAttribute('value', '64');
-    expect(within(banner).queryByRole('button', { name: /Cancel/ })).not.toBeInTheDocument();
-  });
-
-  it('explains a too-large message', async () => {
-    const { user, list } = await openOutbox();
-    await user.click(list.getByRole('button', { name: /Client accounts/ }));
-    const banner = await within(reader()).findByRole('status', { name: 'Delivery status' });
-    await within(banner).findByText(/attachments are too large/);
-    expect(banner).toHaveTextContent('28 MB');
-    expect(banner).toHaveTextContent('25 MB');
-    expect(within(banner).queryByRole('button', { name: 'Send now' })).not.toBeInTheDocument();
-  });
-
-  it('removes a cancelled message', async () => {
-    const { user, list } = await openOutbox();
-    await user.click(list.getByRole('button', { name: /Wanjiru Kamau/ }));
-    const banner = await within(reader()).findByRole('status', { name: 'Delivery status' });
-    await user.click(within(banner).getByRole('button', { name: 'Cancel sending' }));
-    expect(await folders().findByLabelText('2 waiting')).toBeInTheDocument();
-  });
-});
-
-describe('compose', () => {
-  it('labels every field and validates recipients', async () => {
-    const { user } = setup();
-    await rows();
-    await user.click(screen.getByRole('button', { name: 'New message' }));
-    const form = screen.getByRole('form', { name: 'New message' });
-    expect(within(form).getByLabelText('From')).toBeInTheDocument();
-    expect(within(form).getByLabelText('To')).toHaveFocus();
-    expect(within(form).getByLabelText('Subject')).toBeInTheDocument();
-    expect(within(form).getByLabelText('Message')).toBeInTheDocument();
-
-    await user.click(within(form).getByRole('button', { name: 'Send' }));
-    expect(within(form).getByRole('alert')).toHaveTextContent('Add at least one recipient.');
-    expect(within(form).getByLabelText('To')).toHaveAttribute('aria-invalid', 'true');
-
-    await user.type(within(form).getByLabelText('To'), 'peter@client, ok@client.example');
-    await user.click(within(form).getByRole('button', { name: 'Send' }));
-    expect(within(form).getByRole('alert')).toHaveTextContent('Check peter@client.');
-  });
-
-  it('queues a valid message to the Outbox and closes', async () => {
-    const { user } = setup();
-    await rows();
-    await user.click(screen.getByRole('button', { name: 'New message' }));
-    const form = screen.getByRole('form', { name: 'New message' });
-    await user.click(within(form).getByRole('button', { name: 'Add Cc or Bcc' }));
-    expect(within(form).getByLabelText('Cc')).toBeInTheDocument();
-    expect(within(form).getByLabelText('Bcc')).toBeInTheDocument();
-    await user.type(within(form).getByLabelText('To'), 'peter@client.example');
-    await user.type(within(form).getByLabelText('Subject'), 'Invoice INV-0144');
-    await user.click(within(form).getByRole('button', { name: 'Send' }));
-    expect(await folders().findByLabelText('4 waiting')).toBeInTheDocument();
-    expect(screen.queryByRole('form', { name: 'New message' })).not.toBeInTheDocument();
-  });
-
-  it('opens a reply addressed to the sender', async () => {
-    const { user } = setup();
-    await rows();
-    await user.click(await within(reader()).findByRole('button', { name: 'Reply' }));
-    const form = screen.getByRole('form', { name: 'New message' });
-    expect(within(form).getByLabelText('To')).toHaveValue('wanjiru@fitout.example');
-    expect(within(form).getByLabelText('Subject')).toHaveValue(
-      'Re: Revised quotation for the Westlands office fit-out',
-    );
-    expect(within(form).getByLabelText('Message')).toHaveFocus();
-  });
-});
-
-describe('theme', () => {
-  it('toggles and remembers the choice', async () => {
-    const { user } = setup();
-    await rows();
-    expect(document.documentElement.dataset['theme']).toBe('light');
-    await user.click(screen.getByRole('button', { name: 'Switch to dark mode' }));
-    expect(document.documentElement.dataset['theme']).toBe('dark');
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
-    expect(screen.getByRole('button', { name: 'Switch to light mode' })).toBeInTheDocument();
-  });
-
-  it('starts from a saved choice', async () => {
-    window.localStorage.setItem(THEME_STORAGE_KEY, 'dark');
-    setup();
-    await rows();
-    expect(document.documentElement.dataset['theme']).toBe('dark');
-  });
-
-  it('still toggles when storage is blocked', async () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
-      throw new Error('SecurityError');
+    expect(within(reader()).getByRole('button', { name: 'Flag' })).toHaveAttribute('aria-pressed', 'true');
+    await act(async () => {
+      pending.reject({ kind: 'connect', message: 'The server did not answer.' });
+      await Promise.resolve();
     });
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new Error('QuotaExceededError');
-    });
-    const { user } = setup();
+    expect(within(reader()).getByRole('button', { name: 'Flag' })).toHaveAttribute('aria-pressed', 'false');
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not flag: Could not reach the mail server');
+    expect(alert).toHaveTextContent('The server did not answer.');
+  });
+
+  it('removes an archived message at once and brings it back if the move fails', async () => {
+    const { user, api } = renderApp();
     await rows();
-    await user.click(screen.getByRole('button', { name: 'Switch to dark mode' }));
-    expect(document.documentElement.dataset['theme']).toBe('dark');
+    api.failNext('moveMessages', { kind: 'storage', message: 'Disk full.' });
+    await user.click(await within(reader()).findByRole('button', { name: 'Archive' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not archive');
+    expect((await rows()).getAllByRole('button')).toHaveLength(6);
+
+    await user.click(await within(reader()).findByRole('button', { name: 'Archive' }));
+    await vi.waitFor(async () => {
+      expect((await rows()).getAllByRole('button')).toHaveLength(5);
+    });
+    expect(within(reader()).getByRole('heading', { level: 2 })).toHaveTextContent('Nightly build passed on main');
+  });
+
+  it('asks before deleting forever from Trash', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    await api.moveMessages(['m6'], { role: 'trash' });
+    await user.click(await accountFolders('Work').findByRole('button', { name: 'Trash' }));
+    await user.click(await within(reader()).findByRole('button', { name: 'Delete forever' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete forever?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Delete forever' }));
+    expect(await screen.findByText('Trash is empty')).toBeInTheDocument();
+  });
+});
+
+describe('sync status and notifications', () => {
+  it('shows sync problems in the top bar and status bar', async () => {
+    const { api } = renderApp();
+    await rows();
+    act(() => {
+      api.emit('mail://sync-status', { accountId: 'work', state: 'error', lastSyncedAt: MOCK_NOW, message: 'Login failed' });
+    });
+    expect(screen.getByText('Sync problem')).toBeInTheDocument();
+    expect(screen.getByText('Could not sync you@work.example: Login failed')).toBeInTheDocument();
+  });
+
+  it('checks for new mail on request', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    const spy = vi.spyOn(api, 'syncNow');
+    await user.click(screen.getByRole('button', { name: 'Check for new mail' }));
+    expect(spy).toHaveBeenCalledWith(null);
+    expect(await screen.findByText(/Last synced/)).toBeInTheDocument();
+  });
+
+  it('refreshes counts on new mail and leaves desktop notifications to the backend', async () => {
+    const created = vi.fn();
+    vi.stubGlobal('Notification', created);
+    try {
+      const { api } = renderApp();
+      await rows();
+      await api.setFlags(['m6'], { seen: false });
+      act(() => {
+        api.emit('mail://new-mail', { accountId: 'work', count: 1 });
+      });
+      expect(await unified().findByRole('button', { name: 'Inbox 5 unread' })).toBeInTheDocument();
+      expect(created).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('refetches accounts when the backend says they changed', async () => {
+    const { api } = renderApp();
+    await rows();
+    await api.updateAccount('personal', { displayName: 'Home' });
+    expect(await screen.findByRole('list', { name: 'Home' })).toBeInTheDocument();
+  });
+});
+
+describe('first run', () => {
+  it('shows the welcome screen when there are no accounts', async () => {
+    renderApp({ accounts: [] });
+    expect(await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' })).toBeInTheDocument();
+    expect(screen.getByRole('form', { name: 'Add an email account' })).toBeInTheDocument();
+    expect(MOCK_ACCOUNTS).toHaveLength(2);
   });
 });

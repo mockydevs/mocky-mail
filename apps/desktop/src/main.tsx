@@ -11,15 +11,19 @@ import './app/app.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { createMockMailApi } from './api/mockMailApi';
+import { createMockMailApi } from './api/mock/mockMailApi';
+import { createTauriMailApi } from './api/tauriMailApi';
 import { App } from './app/App';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing #root element');
 
-// The Tauri-backed MailApi replaces the mock once the Rust commands land.
+// Inside the desktop app talk to the Rust backend; in a plain browser
+// (vite dev) use the in-memory mock so the interface can be worked on alone.
+const api = '__TAURI_INTERNALS__' in window ? createTauriMailApi() : createMockMailApi({ now: () => Math.floor(Date.now() / 1000) });
+
 createRoot(root).render(
   <StrictMode>
-    <App api={createMockMailApi()} />
+    <App api={api} />
   </StrictMode>,
 );

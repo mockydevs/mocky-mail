@@ -1,0 +1,54 @@
+import { vi } from 'vitest';
+import { screen, within } from '@testing-library/react';
+
+import { reader, renderApp, rows } from '../../test/renderApp';
+
+describe('reading pane', () => {
+  it('blocks remote images until asked, then reloads with them', async () => {
+    const { user } = renderApp();
+    await user.click((await rows()).getByRole('button', { name: /Build server/ }));
+    const frame = await within(reader()).findByTitle('Message: Nightly build passed on main');
+    expect(frame).toHaveAttribute('sandbox', 'allow-popups');
+    expect(frame.getAttribute('srcdoc')).not.toContain('badge.svg');
+    await user.click(within(reader()).getByRole('button', { name: 'Show images (1 blocked)' }));
+    const shown = await within(reader()).findByTitle('Message: Nightly build passed on main');
+    await vi.waitFor(() => {
+      expect(shown.getAttribute('srcdoc')).toContain('https://ci.example/badge.svg');
+    });
+    expect(within(reader()).queryByRole('button', { name: /Show images/ })).not.toBeInTheDocument();
+  });
+
+  it('opens links in plain text mail through the system browser', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    const link = await within(reader()).findByRole('link', { name: 'https://fitout.example/q/2041' });
+    await user.click(link);
+    expect(api.opened).toEqual(['https://fitout.example/q/2041']);
+  });
+
+  it('saves attachments and reports where', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    await user.click(await within(reader()).findByRole('button', { name: 'Save Quotation-Westlands-rev2.pdf' }));
+    expect(await within(reader()).findByText('Saved to /home/you/Downloads/Quotation-Westlands-rev2.pdf')).toBeInTheDocument();
+    api.failNext('saveAttachment', { kind: 'storage', message: 'No space left on the disk.' });
+    await user.click(within(reader()).getByRole('button', { name: 'Save Floor-plan.png' }));
+    expect(await within(reader()).findByRole('alert')).toHaveTextContent('No space left on the disk.');
+  });
+
+  it('shows Cc and Reply-To', async () => {
+    const { user } = renderApp();
+    await rows();
+    expect(await within(reader()).findByText(/Cc Amina Hassan <amina@studio.example>/)).toBeInTheDocument();
+    await user.click((await rows()).getByRole('button', { name: /Brian Otieno/ }));
+    expect(await within(reader()).findByText(/Replies go to Brian \(phone\)/)).toBeInTheDocument();
+  });
+
+  it('marks read and unread from the toolbar', async () => {
+    const { user } = renderApp();
+    await rows();
+    await user.click(await within(reader()).findByRole('button', { name: 'Mark as read' }));
+    expect(await within(reader()).findByRole('button', { name: 'Mark as unread' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Inbox 3 unread/ }).length).toBeGreaterThan(0);
+  });
+});

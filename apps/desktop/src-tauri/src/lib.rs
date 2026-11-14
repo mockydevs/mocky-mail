@@ -21,11 +21,59 @@ mod sync;
 use std::sync::Arc;
 
 use mail_sync::secrets::KeyringStore;
-use tauri::Manager;
+use tauri::webview::NewWindowResponse;
+use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::state::{AppState, now};
 
+/// Whether a URL is the app itself (bundled pages, dev server, iframes).
+fn is_app_url(url: &Url) -> bool {
+    match url.scheme() {
+        "tauri" | "about" => true,
+        "http" | "https" => matches!(
+            url.host_str(),
+            Some("tauri.localhost" | "localhost" | "127.0.0.1")
+        ),
+        _ => false,
+    }
+}
+
+/// Send web and mail links to the user's own apps; drop anything else.
+fn open_outside<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &Url) {
+    if matches!(url.scheme(), "http" | "https" | "mailto")
+        && let Err(error) = app.opener().open_url(url.as_str(), None::<&str>)
+    {
+        eprintln!("couldn't open link: {error}");
+    }
+}
+
+fn create_window(app: &tauri::App) -> tauri::Result<()> {
+    let for_popups = app.handle().clone();
+    let for_navigation = app.handle().clone();
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("Mocky Mail")
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(900.0, 600.0)
+        // Link clicks in email arrive here; nothing opens inside the app.
+        .on_new_window(move |url, _features| {
+            open_outside(&for_popups, &url);
+            NewWindowResponse::Deny
+        })
+        // The app window never leaves the app.
+        .on_navigation(move |url| {
+            if is_app_url(url) {
+                return true;
+            }
+            open_outside(&for_navigation, url);
+            false
+        })
+        .build()?;
+    Ok(())
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    create_window(app)?;
     let data_dir = app.path().app_data_dir()?;
     let cache_dir = app.path().app_cache_dir()?;
     std::fs::create_dir_all(&data_dir)?;
@@ -97,5 +145,31 @@ pub fn run() {
     if let Err(error) = result {
         eprintln!("Mocky Mail could not start: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(s: &str) -> Url {
+        Url::parse(s)
+            .unwrap_or_else(|_| Url::parse("about:invalid").unwrap_or_else(|_| unreachable!()))
+    }
+
+    #[test]
+    fn only_the_app_itself_may_load_in_the_window() {
+        assert!(is_app_url(&url("tauri://localhost/index.html")));
+        assert!(is_app_url(&url("http://tauri.localhost/")));
+        assert!(is_app_url(&url("http://localhost:5173/")));
+        assert!(is_app_url(&url("about:srcdoc")));
+        for outside in [
+            "https://evil.example/",
+            "http://localhost.evil.example/",
+            "file:///etc/passwd",
+            "mailto:a@b.co",
+        ] {
+            assert!(!is_app_url(&url(outside)), "{outside}");
+        }
     }
 }

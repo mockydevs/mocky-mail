@@ -37,7 +37,7 @@ type AttachmentMeta = { index: number; fileName: string; mimeType: string; size:
 
 type MessageDetail = MessageListItem & {
   cc: Mailbox[]; replyTo: Mailbox[];
-  html: string | null;      // already sanitized, inline images embedded; render only in <iframe sandbox="">
+  html: string | null;      // already sanitized, inline images embedded; render only in <iframe sandbox="allow-popups">; link popups are routed to the system browser by the backend
   text: string | null;
   blockedRemoteImages: number;
   attachments: AttachmentMeta[];

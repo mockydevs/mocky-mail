@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 
-import { readStoredTheme, resolveTheme, safeLocalStorage, writeStoredTheme, type Theme } from './theme';
+import type { ThemeSetting } from '../api/types';
+
+export type Theme = 'light' | 'dark';
 
 const QUERY = '(prefers-color-scheme: dark)';
 
@@ -16,21 +18,17 @@ function subscribe(onChange: () => void): () => void {
 
 const systemPrefersDark = (): boolean => media()?.matches ?? false;
 
-/** Follow the operating system until the user picks a theme, then remember it. */
-export function useTheme(): { theme: Theme; toggle: () => void } {
-  const [stored, setStored] = useState<Theme | null>(() => readStoredTheme(safeLocalStorage()));
-  const systemDark = useSyncExternalStore(subscribe, systemPrefersDark, () => false);
-  const theme = resolveTheme(stored, systemDark);
+export function resolveTheme(setting: ThemeSetting, systemDark: boolean): Theme {
+  if (setting === 'system') return systemDark ? 'dark' : 'light';
+  return setting;
+}
 
+/** Apply the theme from Settings, following the system when it says "system". */
+export function useTheme(setting: ThemeSetting): Theme {
+  const systemDark = useSyncExternalStore(subscribe, systemPrefersDark, () => false);
+  const theme = resolveTheme(setting, systemDark);
   useEffect(() => {
     document.documentElement.dataset['theme'] = theme;
   }, [theme]);
-
-  const toggle = useCallback(() => {
-    const next: Theme = theme === 'dark' ? 'light' : 'dark';
-    writeStoredTheme(safeLocalStorage(), next);
-    setStored(next);
-  }, [theme]);
-
-  return { theme, toggle };
+  return theme;
 }

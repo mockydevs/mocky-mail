@@ -23,10 +23,11 @@ export function emailDocument(sanitizedHtml: string): string {
 }
 
 /**
- * Renders an HTML email in a fully sandboxed iframe: an empty `sandbox`
- * attribute blocks scripts, forms, popups, top navigation and same-origin
- * access to the app.
+ * Renders an HTML email in a sandboxed iframe. The only permission is
+ * `allow-popups`, so link clicks become new-window requests that the app
+ * hands to the system browser; scripts, forms, top navigation and
+ * same-origin access to the app stay blocked.
  */
 export function SandboxedHtml({ html, title }: { html: string; title: string }) {
-  return <iframe className="email-frame" title={title} sandbox="" referrerPolicy="no-referrer" srcDoc={emailDocument(html)} />;
+  return <iframe className="email-frame" title={title} sandbox="allow-popups" referrerPolicy="no-referrer" srcDoc={emailDocument(html)} />;
 }

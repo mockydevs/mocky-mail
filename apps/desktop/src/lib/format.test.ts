@@ -1,5 +1,7 @@
 import { formatBytes, formatClock, formatListTime, formatLongDate } from './format';
 
+const s = (iso: string) => Date.parse(iso) / 1000;
+
 describe('formatBytes', () => {
   it.each([
     [0, '0 B'],
@@ -19,39 +21,40 @@ describe('formatBytes', () => {
 });
 
 describe('formatListTime', () => {
-  const now = new Date('2026-11-13T10:15:00Z');
+  const now = s('2026-11-13T10:15:00Z');
 
   it('shows the time for today', () => {
-    expect(formatListTime('2026-11-13T06:42:00Z', now, 'UTC')).toBe('06:42');
+    expect(formatListTime(s('2026-11-13T06:42:00Z'), now, 'UTC')).toBe('06:42');
   });
 
   it('shows Yesterday, then the weekday, then the date', () => {
-    expect(formatListTime('2026-11-12T23:59:00Z', now, 'UTC')).toBe('Yesterday');
-    expect(formatListTime('2026-11-10T12:00:00Z', now, 'UTC')).toBe('Tue');
-    expect(formatListTime('2026-11-03T08:00:00Z', now, 'UTC')).toBe('3 Nov');
-    expect(formatListTime('2025-11-03T08:00:00Z', now, 'UTC')).toBe('3 Nov 2025');
+    expect(formatListTime(s('2026-11-12T23:59:00Z'), now, 'UTC')).toBe('Yesterday');
+    expect(formatListTime(s('2026-11-10T12:00:00Z'), now, 'UTC')).toBe('Tue');
+    expect(formatListTime(s('2026-11-03T08:00:00Z'), now, 'UTC')).toBe('3 Nov');
+    expect(formatListTime(s('2025-11-03T08:00:00Z'), now, 'UTC')).toBe('3 Nov 2025');
   });
 
   it('uses the calendar day of the given time zone', () => {
     // 22:30 UTC on the 12th is already the 13th in Nairobi (UTC+3).
-    expect(formatListTime('2026-11-12T22:30:00Z', now, 'Africa/Nairobi')).toBe('01:30');
-    expect(formatListTime('2026-11-12T22:30:00Z', now, 'UTC')).toBe('Yesterday');
+    expect(formatListTime(s('2026-11-12T22:30:00Z'), now, 'Africa/Nairobi')).toBe('01:30');
+    expect(formatListTime(s('2026-11-12T22:30:00Z'), now, 'UTC')).toBe('Yesterday');
   });
 
-  it('shows the time for future dates and nothing for garbage', () => {
-    expect(formatListTime('2026-11-14T09:00:00Z', now, 'UTC')).toBe('09:00');
-    expect(formatListTime('not a date', now, 'UTC')).toBe('');
+  it('handles future, missing and invalid dates', () => {
+    expect(formatListTime(s('2026-11-14T09:00:00Z'), now, 'UTC')).toBe('09:00');
+    expect(formatListTime(null, now, 'UTC')).toBe('');
+    expect(formatListTime(Number.NaN, now, 'UTC')).toBe('');
   });
 });
 
 describe('formatLongDate and formatClock', () => {
   it('formats in the given zone', () => {
-    expect(formatLongDate('2026-11-13T06:42:00Z', 'Africa/Nairobi')).toBe('Fri 13 Nov, 09:42');
-    expect(formatClock('2026-11-13T07:02:00Z', 'Africa/Nairobi')).toBe('10:02');
+    expect(formatLongDate(s('2026-11-13T06:42:00Z'), 'Africa/Nairobi')).toBe('Fri 13 Nov 2026, 09:42');
+    expect(formatClock(s('2026-11-13T07:02:00Z'), 'Africa/Nairobi')).toBe('10:02');
   });
 
-  it('returns nothing for garbage', () => {
-    expect(formatLongDate('nope')).toBe('');
-    expect(formatClock('nope')).toBe('');
+  it('returns nothing for missing dates', () => {
+    expect(formatLongDate(null)).toBe('');
+    expect(formatClock(null)).toBe('');
   });
 });
