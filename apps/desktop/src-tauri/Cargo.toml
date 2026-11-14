@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
+android-bridge = { version = "0.1.0", path = "../../../crates/android-bridge" }
 futures = "0.3.34"
 mail-auth = { version = "0.1.0", path = "../../../crates/mail-auth" }
 mail-core = { path = "../../../crates/mail-core" }
@@ -29,8 +30,11 @@ tauri = { version = "2.12.5", features = [] }
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-notification = "2.8.1"
 tauri-plugin-opener = "2.7.3"
-tauri-plugin-single-instance = "2.5.5"
 tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs"] }
+
+# Desktop only: one running copy at a time. Android runs one copy anyway.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2.5.5"
 
 # Windows only: notifications from the Microsoft Store (MSIX) package must use
 # the package's own app id, which the notification plugin can't do.

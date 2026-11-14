@@ -51,10 +51,14 @@ fn open_outside<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &Url) {
 fn create_window(app: &tauri::App) -> tauri::Result<()> {
     let for_popups = app.handle().clone();
     let for_navigation = app.handle().clone();
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default());
+    // Phones have one full-screen window; sizes and titles are desktop ideas.
+    #[cfg(desktop)]
+    let builder = builder
         .title("Mocky Mail")
         .inner_size(1280.0, 820.0)
-        .min_inner_size(900.0, 600.0)
+        .min_inner_size(900.0, 600.0);
+    builder
         // Link clicks in email arrive here; nothing opens inside the app.
         .on_new_window(move |url, _features| {
             open_outside(&for_popups, &url);
@@ -73,6 +77,9 @@ fn create_window(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // Android: certificate checks use the phone's trust store. Must run
+    // before any connection.
+    android_bridge::init_tls()?;
     create_window(app)?;
     let data_dir = app.path().app_data_dir()?;
     let cache_dir = app.path().app_cache_dir()?;
@@ -100,15 +107,18 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Tauri reports a failed start (for example, no display available) by
 /// returning an error; we print it and exit non-zero instead of panicking.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let result = tauri::Builder::default()
-        // Must be first: a second copy would sync and send in parallel.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-        }))
+    let builder = tauri::Builder::default();
+    // Must be first: a second copy would sync and send in parallel.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }));
+    let result = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())

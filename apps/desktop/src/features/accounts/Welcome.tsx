@@ -12,7 +12,7 @@ export function Welcome({ onAdded }: { onAdded: (account: Account) => void }) {
         </div>
         <h1 className="welcome__title">Welcome to Mocky Mail</h1>
         <p className="welcome__text">
-          Add your first email account to get started. Your mail is kept on this computer, so you can read and write
+          Add your first email account to get started. Your mail is kept on this device, so you can read and write
           even without a connection.
         </p>
       </div>

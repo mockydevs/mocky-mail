@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions for the main window only. Keep this list as short as possible.",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": ["core:default", "opener:default", "notification:default"]
 }

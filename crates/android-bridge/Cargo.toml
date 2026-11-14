@@ -1,0 +1,26 @@
+[package]
+name = "android-bridge"
+version = "0.1.0"
+description = "Mocky Mail on Android: hands the Java VM to Rust libraries that need it. The only crate allowed `unsafe`."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Not the workspace lints: those forbid `unsafe`, and turning raw JNI
+# pointers into handles needs it. Everything else stays strict.
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.22.4", default-features = false }
+ndk-context = "0.1.1"
+rustls-platform-verifier = "0.7.1"

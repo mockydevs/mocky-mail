@@ -37,6 +37,7 @@ import { ConfirmDialog } from '../ui/Modal';
 import { Icon } from '../ui/Icon';
 import { StatusBar } from './StatusBar';
 import { syncSummary } from './sync';
+import { usePhone, usePhoneBack } from './usePhone';
 import { TopBar } from './TopBar';
 
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -58,6 +59,18 @@ function errorNotice(error: AppError, what: string): Notice {
 }
 
 const DEFAULT_SETTINGS: Settings = { theme: 'system', remoteImages: 'block', notifications: false, sound: false };
+
+/**
+ * Back in compose behaves like Esc: it closes an untouched message, and asks
+ * before throwing away changes. The key goes to whatever has focus inside
+ * compose (or its discard dialog), else to the form itself.
+ */
+function pressEscape(form: Element | null): void {
+  if (!form) return;
+  const focused = document.activeElement;
+  const target = focused && focused !== document.body ? focused : form;
+  target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+}
 
 export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const api = useMailApi();
@@ -139,6 +152,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [pinned, setPinned] = useState<MessageListItem | null>(null);
   const [loaded, setLoaded] = useState<MessageDetail | null>(null);
   const [help, setHelp] = useState(false);
+  const phone = usePhone();
+  /** Phones: the folder menu slid in over the list. */
+  const [drawer, setDrawer] = useState(false);
   const [confirmForever, setConfirmForever] = useState<MessageListItem | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const readerRef = useRef<HTMLElement>(null);
@@ -158,6 +174,19 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const summary = syncSummary(Object.values(sync), accounts);
   const offline = summary.tone === 'warn' || summary.tone === 'error';
   const message = loaded?.id === activeId ? loaded : null;
+  /** Phones show one pane: the list, or the message the user opened. */
+  const reading = selectedId !== null && activeId === selectedId;
+
+  const closeMessage = () => {
+    setSelectedId(null);
+    setPinned(null);
+  };
+  usePhoneBack(phone ? Number(drawer) + Number(screen.kind !== 'mail') + Number(reading) : 0, () => {
+    if (drawer) setDrawer(false);
+    else if (screen.kind === 'compose') pressEscape(document.querySelector('form.compose'));
+    else if (screen.kind !== 'mail') setScreen({ kind: 'mail' });
+    else closeMessage();
+  });
 
   /** Apply a change at once; undo it and explain if the backend refuses. */
   const optimistic = (
@@ -472,6 +501,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               onLoadMore={page.loadMore}
               onRetry={refresh}
             />
+            {phone && reading && (
+              <button type="button" className="phone-back" onClick={closeMessage}>
+                <Icon name="back" size={18} />
+                {info.title}
+              </button>
+            )}
             <ReadingPane
               ref={readerRef}
               item={active}
@@ -523,23 +558,59 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         onHelp={() => {
           setHelp(true);
         }}
+        onMenu={
+          phone
+            ? () => {
+                setDrawer(true);
+              }
+            : undefined
+        }
       />
       <div className="workspace">
-        <Sidebar
-          view={view}
-          accounts={accounts}
-          folders={foldersByAccount}
-          outboxCount={outboxActive}
-          onView={goTo}
-          onCompose={newMessage}
-          onSettings={() => {
-            setScreen({ kind: 'settings' });
-          }}
-          onAddAccount={() => {
-            setScreen({ kind: 'addAccount' });
-          }}
-        />
-        <main className="panes">{main}</main>
+        {(!phone || drawer) && (
+          <div className={phone ? 'drawer' : 'sidebar-slot'}>
+            <Sidebar
+              view={view}
+              accounts={accounts}
+              folders={foldersByAccount}
+              outboxCount={outboxActive}
+              onView={(next) => {
+                setDrawer(false);
+                goTo(next);
+              }}
+              onCompose={() => {
+                setDrawer(false);
+                newMessage();
+              }}
+              onSettings={() => {
+                setDrawer(false);
+                setScreen({ kind: 'settings' });
+              }}
+              onAddAccount={() => {
+                setDrawer(false);
+                setScreen({ kind: 'addAccount' });
+              }}
+            />
+            {phone && (
+              <button
+                type="button"
+                className="drawer__scrim"
+                aria-label="Close menu"
+                onClick={() => {
+                  setDrawer(false);
+                }}
+              />
+            )}
+          </div>
+        )}
+        <main className={phone ? `panes panes--phone ${reading ? 'panes--reading' : 'panes--listing'}` : 'panes'}>
+          {main}
+        </main>
+        {phone && screen.kind === 'mail' && !reading && view.type !== 'outbox' && accounts.length > 0 && (
+          <button type="button" className="fab" aria-label="New message" onClick={newMessage}>
+            <Icon name="pen" />
+          </button>
+        )}
       </div>
       <StatusBar sync={summary} outbox={outboxActive} accountCount={accounts.length} />
 

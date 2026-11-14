@@ -13,8 +13,7 @@ base64 = "0.23.1"
 futures = "0.3.34"
 getrandom = "0.4.3"
 hickory-resolver = "0.26.3"
-keyring = "4.2.0"
-lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "ring"] }
+keyring-core = "1.0.1"
 mail-core = { version = "0.1.0", path = "../mail-core" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
@@ -23,6 +22,19 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time", "macros", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-util = "0.7.20"
+
+# The desktop keyrings (Secret Service, Credential Manager, Keychain).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+keyring = "4.2.0"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "ring"] }
+
+# Android: secrets encrypted with a key held in the Android Keystore.
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "1.0.0"
+# lettre's platform-verifier path doesn't build on Android (it needs an API
+# that only exists on desktop), so sending checks certificates against
+# Mozilla's root list there. IMAP still uses Android's own trust store.
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "webpki-roots", "ring"] }
 
 [features]
 # Allows unencrypted connections. Only for integration tests against a

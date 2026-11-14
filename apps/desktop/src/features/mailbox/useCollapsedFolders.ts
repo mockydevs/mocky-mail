@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 
 import { readCollapsed, safeLocalStorage, writeCollapsed } from './folderTree';
 
-/** Which folder-tree nodes are collapsed, remembered on this computer. */
+/** Which folder-tree nodes are collapsed, remembered on this device. */
 export function useCollapsedFolders(): { isCollapsed: (key: string) => boolean; toggle: (key: string) => void } {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => readCollapsed(safeLocalStorage()));
   const toggle = useCallback((key: string) => {

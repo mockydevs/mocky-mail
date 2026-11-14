@@ -39,7 +39,7 @@ export function syncSummary(
     return {
       pill: 'Offline',
       tone: 'warn',
-      status: 'Offline. Working from mail saved on this computer; new mail waits in the Outbox.',
+      status: 'Offline. Working from mail saved on this device; new mail waits in the Outbox.',
       lastSync,
     };
   }

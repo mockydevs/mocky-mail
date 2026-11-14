@@ -179,6 +179,8 @@ const PATHS = {
     </>
   ),
   close: <path d="M18 6 6 18M6 6l12 12" />,
+  menu: <path d="M4 6h16M4 12h16M4 18h16" />,
+  back: <path d="M19 12H5m6-6-6 6 6 6" />,
   eye: (
     <>
       <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" />

@@ -1230,6 +1230,169 @@ button:disabled {
   }
 }
 
+/* Desktop: the sidebar wrapper takes no space of its own. */
+.sidebar-slot {
+  display: contents;
+}
+
+/* Phones: one pane at a time, folders in a slide-out menu, Back closes
+   layers. The page itself never scrolls; each pane scrolls on its own. */
+@media (max-width: 640px) {
+  .topbar {
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 8px 8px;
+  }
+
+  .brand__name,
+  .search__key,
+  .topbar__help,
+  .conn {
+    display: none;
+  }
+
+  .search {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .topbar__actions {
+    gap: 0;
+  }
+
+  .statusbar {
+    display: none;
+  }
+
+  .workspace {
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .panes {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .panes--listing .reader,
+  .panes--reading .list {
+    display: none;
+  }
+
+  .panes--phone .list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .panes--phone .list__scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .panes--phone .reader {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .phone-back {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 0 12px;
+    border: 0;
+    border-bottom: 1px solid var(--border-soft);
+    background: var(--surface);
+    color: var(--primary);
+    font: inherit;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .drawer {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+  }
+
+  .drawer .sidebar {
+    flex: none;
+    width: min(300px, 85vw);
+    min-height: 0;
+    padding-top: calc(16px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+  }
+
+  .drawer .sidebar__scroll {
+    overflow: visible;
+  }
+
+  .drawer__scrim {
+    flex: 1 1 auto;
+    border: 0;
+    background: rgb(0 0 0 / 40%);
+    cursor: pointer;
+  }
+
+  .fab {
+    position: fixed;
+    right: 16px;
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    border: 0;
+    border-radius: 16px;
+    background: var(--primary);
+    color: #fff;
+    box-shadow: 0 4px 12px rgb(0 0 0 / 25%);
+    cursor: pointer;
+  }
+
+  .fab:active {
+    background: var(--primary-pressed);
+  }
+
+  .compose__label {
+    width: 52px;
+  }
+
+  .compose__hint {
+    display: none;
+  }
+
+  .compose__foot {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .toast {
+    right: 12px;
+    left: 12px;
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+    max-width: none;
+  }
+
+  .icon-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
 /* Shared form pieces */
 .form-field {
   display: flex;

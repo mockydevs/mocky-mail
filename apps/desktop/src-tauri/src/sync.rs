@@ -171,22 +171,23 @@ async fn session(
             refresh_folders(state, account, &mut conn).await?;
         }
         let folders = state.store.list_folders(&account.id)?;
-        let mut touched = Vec::new();
         let mut new_unseen: u32 = 0;
-        for folder in folders
+        // Inbox first, and the interface hears about each folder as soon as
+        // it is done: a first sync of a big mailbox takes minutes, and the
+        // inbox shouldn't stay empty while Sent and Trash download.
+        let mut due: Vec<_> = folders
             .iter()
             .filter(|f| should_sync(f) && (!full_done || f.role == FolderRole::Inbox))
-        {
+            .collect();
+        due.sort_by_key(|f| f.role != FolderRole::Inbox);
+        for folder in due {
             let report = sync_folder(state, &mut conn, folder).await?;
             if report.changed {
-                touched.push(folder.id.clone());
+                events::changed(app, &account.id, std::slice::from_ref(&folder.id));
             }
             new_unseen = new_unseen.saturating_add(report.new_unseen);
         }
         full_done = true;
-        if !touched.is_empty() {
-            events::changed(app, &account.id, &touched);
-        }
         if new_unseen > 0 {
             events::new_mail(app, state, account, new_unseen);
         }

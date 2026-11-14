@@ -1,9 +1,11 @@
 //! Passwords and tokens, kept in the operating system's keyring (GNOME
 //! Keyring or `KWallet` via Secret Service, Windows Credential Manager, macOS
-//! Keychain). Nothing secret is ever written to the app's own files.
+//! Keychain, or on Android an encrypted store whose key lives in the Android
+//! Keystore). Nothing secret is ever written to the app's own files in the
+//! clear.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use crate::SyncError;
 
@@ -33,30 +35,54 @@ pub trait SecretStore: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KeyringStore;
 
-fn keyring_error(error: &keyring::Error) -> SyncError {
+fn keyring_error(error: &keyring_core::Error) -> SyncError {
     SyncError::Keyring(error.to_string())
+}
+
+/// Pick this platform's store once. Errors are kept as text so every later
+/// call reports the same reason.
+static STORE_READY: LazyLock<Result<(), String>> = LazyLock::new(|| {
+    #[cfg(target_os = "android")]
+    {
+        let store = android_native_keyring_store::Store::new().map_err(|e| e.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        // Sets the desktop default store as a side effect.
+        keyring::Entry::store_status()
+            .as_ref()
+            .map(|&()| ())
+            .map_err(ToString::to_string)
+    }
+});
+
+fn entry(key: &str) -> Result<keyring_core::Entry, SyncError> {
+    STORE_READY
+        .as_ref()
+        .map_err(|e| SyncError::Keyring(e.clone()))?;
+    keyring_core::Entry::new(SERVICE, key).map_err(|e| keyring_error(&e))
 }
 
 impl SecretStore for KeyringStore {
     fn set(&self, key: &str, secret: &str) -> Result<(), SyncError> {
-        keyring::Entry::new(SERVICE, key)
-            .and_then(|entry| entry.set_password(secret))
+        entry(key)?
+            .set_password(secret)
             .map_err(|e| keyring_error(&e))
     }
 
     fn get(&self, key: &str) -> Result<Option<String>, SyncError> {
-        let entry = keyring::Entry::new(SERVICE, key).map_err(|e| keyring_error(&e))?;
-        match entry.get_password() {
+        match entry(key)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(keyring_error(&e)),
         }
     }
 
     fn delete(&self, key: &str) -> Result<(), SyncError> {
-        let entry = keyring::Entry::new(SERVICE, key).map_err(|e| keyring_error(&e))?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        match entry(key)?.delete_credential() {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(keyring_error(&e)),
         }
     }

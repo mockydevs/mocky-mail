@@ -40,7 +40,7 @@ describe('folder tree', () => {
     expect((await rows('Acme')).getAllByRole('button')).toHaveLength(1);
   });
 
-  it('collapses and expands, and remembers it on this computer', async () => {
+  it('collapses and expands, and remembers it on this device', async () => {
     const { user } = renderApp();
     await rows();
     const toggle = (await work()).getByRole('button', { name: 'Collapse Clients' });

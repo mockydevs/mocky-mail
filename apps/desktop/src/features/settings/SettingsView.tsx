@@ -271,7 +271,7 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
       {confirming && (
         <ConfirmDialog
           title={`Remove ${account.email}?`}
-          description="Mail saved on this computer and the stored password are deleted. Your mail on the server is not touched; you can add the account again later."
+          description="Mail saved on this device and the stored password are deleted. Your mail on the server is not touched; you can add the account again later."
           confirmLabel="Remove account"
           danger
           onCancel={() => {

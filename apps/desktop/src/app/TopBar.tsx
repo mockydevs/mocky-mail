@@ -14,6 +14,8 @@ interface Props {
   onSync: () => Promise<void>;
   onToggleTheme: () => void;
   onHelp: () => void;
+  /** Phones: opens the folder menu. Desktop has the sidebar instead. */
+  onMenu?: (() => void) | undefined;
 }
 
 export function TopBar({ searchField, ...props }: Props) {
@@ -32,6 +34,11 @@ export function TopBar({ searchField, ...props }: Props) {
 
   return (
     <header className="topbar">
+      {props.onMenu && (
+        <button type="button" className="icon-btn topbar__menu" aria-label="Folders and accounts" onClick={props.onMenu}>
+          <Icon name="menu" />
+        </button>
+      )}
       <div className="brand">
         <Logo />
         <span className="brand__name">Mocky Mail</span>
@@ -76,7 +83,7 @@ export function TopBar({ searchField, ...props }: Props) {
         <button type="button" className="icon-btn" aria-label={themeLabel} title={themeLabel} onClick={props.onToggleTheme}>
           <Icon name={props.theme === 'dark' ? 'sun' : 'moon'} />
         </button>
-        <button type="button" className="icon-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={props.onHelp}>
+        <button type="button" className="icon-btn topbar__help" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" onClick={props.onHelp}>
           <Icon name="keyboard" />
         </button>
       </div>

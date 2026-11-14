@@ -39,7 +39,7 @@ export function OutboxView({ entries, accounts, now, onEdit }: Props) {
         </div>
         <p className="list__note">
           <Icon name="clock" />
-          Messages here are saved on this computer and send automatically when the connection is good.
+          Messages here are saved on this device and send automatically when the connection is good.
         </p>
         <div className="list__scroll">
           {entries === null && (

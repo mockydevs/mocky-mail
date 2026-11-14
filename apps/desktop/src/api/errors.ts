@@ -57,7 +57,7 @@ export function errorTitle(kind: AppErrorKind): string {
     case 'too_large':
       return 'Too large to send';
     case 'storage':
-      return 'Could not save on this computer';
+      return 'Could not save on this device';
     case 'keyring':
       return 'Could not use the system password store';
     case 'internal':
