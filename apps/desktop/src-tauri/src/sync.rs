@@ -274,11 +274,30 @@ async fn replay_ops(
         match result {
             Ok(()) => {}
             Err(error) if error.is_transient() => return Err(error.into()),
-            Err(error) => eprintln!("dropping a change the server refused: {error}"),
+            Err(error) => {
+                let refusals = state.store.record_op_refusal(&pending.id)?;
+                if !give_up_after(refusals) {
+                    // Stop here, keeping the order of changes, and let the
+                    // session back off and try again: some servers refuse
+                    // briefly ("mailbox in use") without saying it's temporary.
+                    return Err(AppError::internal(format!(
+                        "The mail server refused a change ({error}). Trying again shortly."
+                    )));
+                }
+                eprintln!("giving up on a change the server refused {refusals} times: {error}");
+            }
         }
         state.store.delete_op(&pending.id)?;
     }
     Ok(())
+}
+
+/// How many times the server may refuse one queued change before it is
+/// given up. Giving up is safe: the next sync shows the server's real state.
+const MAX_OP_REFUSALS: u32 = 3;
+
+const fn give_up_after(refusals: u32) -> bool {
+    refusals >= MAX_OP_REFUSALS
 }
 
 fn leaf_name(path: &str, delimiter: Option<&str>) -> String {
@@ -574,6 +593,13 @@ mod tests {
         let value = serde_json::to_value(&op).unwrap_or_default();
         assert_eq!(value["op"], "move");
         assert_eq!(serde_json::from_value::<Op>(value).ok(), Some(op));
+    }
+
+    #[test]
+    fn a_refused_change_gets_more_than_one_chance() {
+        assert!(!give_up_after(1));
+        assert!(!give_up_after(MAX_OP_REFUSALS - 1));
+        assert!(give_up_after(MAX_OP_REFUSALS));
     }
 
     #[test]

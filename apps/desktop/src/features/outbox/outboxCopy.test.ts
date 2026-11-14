@@ -30,6 +30,19 @@ describe('outboxCopy', () => {
     expect(copy.canSendNow).toBe(false);
   });
 
+  it('asks the user before resending a message that may already have gone', () => {
+    const copy = outboxCopy(
+      entry({ state: 'failed', reason: 'unconfirmed', message: 'no Sent folder' }),
+      'Work',
+      NOW,
+    );
+    expect(copy.pill).toBe('May have been sent');
+    expect(copy.sendLabel).toBe('Send again');
+    expect(copy.detail).toBe('no Sent folder');
+    expect(copy.canSendNow && copy.canEdit && copy.canCancel).toBe(true);
+    expect(isActive(entry({ state: 'failed', reason: 'unconfirmed', message: '' }))).toBe(true);
+  });
+
   it('shows sending progress from a 0..1 fraction and allows no changes', () => {
     const copy = outboxCopy(entry({ state: 'sending', started_at: NOW }, { progress: 0.64 }), 'Work', NOW);
     expect(copy.pill).toBe('Sending 64%');

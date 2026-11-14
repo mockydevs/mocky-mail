@@ -108,19 +108,24 @@ impl EntryRow {
         })
     }
 
-    fn into_entry(self) -> Result<OutboxEntry> {
-        Ok(OutboxEntry {
+    /// Never fails: one damaged row must not hide the rest of the Outbox or
+    /// stop the app. Unreadable fields get safe stand-ins, and an unreadable
+    /// delivery state becomes [`OutboxItem::damaged`], which never sends by
+    /// itself.
+    fn into_entry(self) -> OutboxEntry {
+        let item = read_item(&self.item);
+        OutboxEntry {
             id: self.id,
             account_id: self.account_id,
-            created_at: to_u64(self.created_at, "outbox created_at")?,
-            to: serde_json::from_str(&self.to_json)?,
+            created_at: to_u64(self.created_at, "outbox created_at").unwrap_or(0),
+            to: serde_json::from_str(&self.to_json).unwrap_or_default(),
             subject: self.subject,
             preview: self.preview,
             message_id_header: self.message_id_header,
             reply_to_message_id: self.reply_to_message_id,
             sent_folder_hint: self.sent_folder_hint,
-            item: serde_json::from_str(&self.item)?,
-        })
+            item,
+        }
     }
 }
 
@@ -131,32 +136,39 @@ impl Store {
     /// Fails on a database error, for example an unknown account.
     pub fn insert_outbox(&self, new: &NewOutbox) -> Result<String> {
         let id = new_id()?;
-        self.conn().execute(
-            "INSERT INTO outbox (id, account_id, created_at, to_json, subject, preview, raw,
+        let created_at = to_i64(new.created_at, "created_at")?;
+        let to_json = serde_json::to_string(&new.to)?;
+        let item = serde_json::to_string(&new.item)?;
+        let recipients = serde_json::to_string(&new.recipients)?;
+        durably(&self.conn(), |conn| {
+            conn.execute(
+                "INSERT INTO outbox (id, account_id, created_at, to_json, subject, preview, raw,
                  message_id_header, reply_to_message_id, sent_folder_hint, item, recipients_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                id,
-                new.account_id,
-                to_i64(new.created_at, "created_at")?,
-                serde_json::to_string(&new.to)?,
-                new.subject,
-                new.preview,
-                new.raw,
-                new.message_id_header,
-                new.reply_to_message_id,
-                new.sent_folder_hint,
-                serde_json::to_string(&new.item)?,
-                serde_json::to_string(&new.recipients)?,
-            ],
-        )?;
+                params![
+                    id,
+                    new.account_id,
+                    created_at,
+                    to_json,
+                    new.subject,
+                    new.preview,
+                    new.raw,
+                    new.message_id_header,
+                    new.reply_to_message_id,
+                    new.sent_folder_hint,
+                    item,
+                    recipients,
+                ],
+            )
+        })?;
         Ok(id)
     }
 
     /// Every outbox entry, oldest first, without the raw bytes.
     ///
     /// # Errors
-    /// Fails on a database error or an unreadable row.
+    /// Fails on a database error. A damaged row is listed with stand-ins
+    /// (see `EntryRow::into_entry`), never an error.
     pub fn list_outbox(&self) -> Result<Vec<OutboxEntry>> {
         let conn = self.conn();
         let mut stmt = conn.prepare_cached(concat!(
@@ -165,7 +177,7 @@ impl Store {
             " FROM outbox ORDER BY created_at, seq"
         ))?;
         stmt.query_map([], EntryRow::read)?
-            .map(|row| row?.into_entry())
+            .map(|row| Ok(row?.into_entry()))
             .collect()
     }
 
@@ -194,7 +206,7 @@ impl Store {
             .optional()?
             .ok_or(StoreError::NotFound("outbox item"))?;
         Ok(OutboxMessage {
-            entry: row.into_entry()?,
+            entry: row.into_entry(),
             raw,
             recipients: serde_json::from_str(&recipients_json)?,
         })
@@ -205,10 +217,13 @@ impl Store {
     /// # Errors
     /// [`StoreError::NotFound`] if there is no such entry.
     pub fn update_outbox_item(&self, id: &str, item: &OutboxItem) -> Result<()> {
-        let changed = self.conn().execute(
-            "UPDATE outbox SET item = ?2 WHERE id = ?1",
-            params![id, serde_json::to_string(item)?],
-        )?;
+        let json = serde_json::to_string(item)?;
+        let changed = durably(&self.conn(), |conn| {
+            conn.execute(
+                "UPDATE outbox SET item = ?2 WHERE id = ?1",
+                params![id, json],
+            )
+        })?;
         if changed == 0 {
             return Err(StoreError::NotFound("outbox item"));
         }
@@ -234,10 +249,13 @@ impl Store {
         if !outbox_item_is(&conn, id, expected)? {
             return Ok(false);
         }
-        conn.execute(
-            "UPDATE outbox SET item = ?2 WHERE id = ?1",
-            params![id, serde_json::to_string(new)?],
-        )?;
+        let json = serde_json::to_string(new)?;
+        durably(&conn, |conn| {
+            conn.execute(
+                "UPDATE outbox SET item = ?2 WHERE id = ?1",
+                params![id, json],
+            )
+        })?;
         Ok(true)
     }
 
@@ -252,7 +270,9 @@ impl Store {
         if !outbox_item_is(&conn, id, expected)? {
             return Ok(false);
         }
-        conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+        durably(&conn, |conn| {
+            conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])
+        })?;
         Ok(true)
     }
 
@@ -261,43 +281,78 @@ impl Store {
     /// # Errors
     /// Fails on a database error.
     pub fn delete_outbox(&self, id: &str) -> Result<bool> {
-        Ok(self
-            .conn()
-            .execute("DELETE FROM outbox WHERE id = ?1", params![id])?
-            > 0)
+        let deleted = durably(&self.conn(), |conn| {
+            conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])
+        })?;
+        Ok(deleted > 0)
     }
 
     /// Call once at startup: every entry that was mid-send when the app
     /// stopped goes back to the queue, marked "maybe sent" so it is checked
-    /// against Sent before any resend. All entries change in one
-    /// transaction. Returns how many were recovered.
+    /// against Sent before any resend. An entry whose state can't be read is
+    /// rewritten as [`OutboxItem::damaged`], so it shows in the Outbox for
+    /// the user to decide on and can't stop the app from starting. All
+    /// entries change in one transaction. Returns how many changed.
     ///
     /// # Errors
-    /// Fails on a database error or an unreadable entry; nothing changes.
+    /// Fails on a database error; nothing changes.
     pub fn recover_outbox_after_restart(&self, now: UnixSeconds) -> Result<usize> {
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let rows = {
-            let mut stmt = tx.prepare("SELECT id, item FROM outbox")?;
-            stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let mut recovered = 0usize;
-        {
-            let mut update = tx.prepare("UPDATE outbox SET item = ?2 WHERE id = ?1")?;
-            for (id, json) in rows {
-                let mut item: OutboxItem = serde_json::from_str(&json)?;
-                if item.recover_after_restart(now) {
-                    update.execute(params![id, serde_json::to_string(&item)?])?;
-                    recovered = recovered.saturating_add(1);
-                }
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let result = recover_all(&mut conn, now);
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        result
+    }
+}
+
+fn recover_all(conn: &mut rusqlite::Connection, now: UnixSeconds) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let rows = {
+        let mut stmt = tx.prepare("SELECT id, item FROM outbox")?;
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut recovered = 0usize;
+    {
+        let mut update = tx.prepare("UPDATE outbox SET item = ?2 WHERE id = ?1")?;
+        for (id, json) in rows {
+            let (mut item, damaged) = match serde_json::from_str::<OutboxItem>(&json) {
+                Ok(item) => (item, false),
+                Err(_) => (OutboxItem::damaged(), true),
+            };
+            if item.recover_after_restart(now) || damaged {
+                update.execute(params![id, serde_json::to_string(&item)?])?;
+                recovered = recovered.saturating_add(1);
             }
         }
-        tx.commit()?;
-        Ok(recovered)
     }
+    tx.commit()?;
+    Ok(recovered)
+}
+
+/// A stored delivery state, or [`OutboxItem::damaged`] if it can't be read.
+fn read_item(json: &str) -> OutboxItem {
+    serde_json::from_str(json).unwrap_or_else(|_| OutboxItem::damaged())
+}
+
+/// Run one Outbox write with a full sync to disk.
+///
+/// The database normally runs with `synchronous=NORMAL`: fast, and safe
+/// against the app crashing, but a power cut can lose the last few commits.
+/// For the Outbox that could mean a queued message vanishing, a cancel
+/// being forgotten, or a send that was claimed being forgotten and sent
+/// twice. These writes are rare, so they pay for an fsync. The caller holds
+/// the connection lock, so nothing else runs with the stricter setting.
+fn durably<T>(
+    conn: &rusqlite::Connection,
+    write: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+) -> Result<T> {
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    let result = write(conn);
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(result?)
 }
 
 /// Whether the stored item for `id` exists and equals `expected`. The caller
@@ -312,7 +367,7 @@ fn outbox_item_is(conn: &rusqlite::Connection, id: &str, expected: &OutboxItem) 
         .optional()?;
     match stored {
         None => Ok(false),
-        Some(json) => Ok(serde_json::from_str::<OutboxItem>(&json)? == *expected),
+        Some(json) => Ok(read_item(&json) == *expected),
     }
 }
 
@@ -429,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_is_all_or_nothing() {
+    fn a_damaged_entry_does_not_stop_startup_or_hide_the_others() {
         let store = Store::open_in_memory().unwrap();
         let account = add_account(&store, "a@example.com");
         let sending = store.insert_outbox(&new_outbox(&account)).unwrap();
@@ -440,15 +495,57 @@ mod tests {
         store
             .conn()
             .execute(
-                "UPDATE outbox SET item = 'not json' WHERE id = ?1",
+                "UPDATE outbox SET item = 'not json', to_json = '{' WHERE id = ?1",
                 params![broken],
             )
             .unwrap();
+
+        // Listing works before recovery too: the bad row reads as damaged.
+        let listed = store.list_outbox().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(
+            listed.iter().find(|e| e.id == broken).unwrap().item,
+            OutboxItem::damaged()
+        );
+
+        // Startup recovery succeeds, fixes the mid-send one and saves the
+        // damaged one as "unconfirmed" so the user can retry or delete it.
+        assert_eq!(store.recover_outbox_after_restart(500).unwrap(), 2);
         assert!(matches!(
-            store.recover_outbox_after_restart(500),
-            Err(StoreError::Json(_))
+            store.get_outbox(&sending).unwrap().entry.item.state,
+            OutboxState::Queued {
+                maybe_sent: true,
+                ..
+            }
         ));
-        assert_eq!(store.get_outbox(&sending).unwrap().entry.item, item);
+        let damaged = store.get_outbox(&broken).unwrap().entry;
+        assert_eq!(damaged.item, OutboxItem::damaged());
+        assert!(damaged.to.is_empty());
+        assert!(!damaged.item.is_due(u64::MAX));
+        // The saved copy is now readable, so cancel/retry can compare it.
+        let mut retry = damaged.item.clone();
+        retry.send_now(600).unwrap();
+        assert!(
+            store
+                .replace_outbox_item(&broken, &damaged.item, &retry)
+                .unwrap()
+        );
+        assert_eq!(store.recover_outbox_after_restart(700).unwrap(), 0);
+    }
+
+    #[test]
+    fn outbox_writes_leave_normal_sync_mode_afterwards() {
+        let store = Store::open_in_memory().unwrap();
+        let account = add_account(&store, "a@example.com");
+        let id = store.insert_outbox(&new_outbox(&account)).unwrap();
+        store.delete_outbox(&id).unwrap();
+        store.recover_outbox_after_restart(1).unwrap();
+        // 1 = NORMAL. Only the Outbox write itself runs with FULL.
+        let mode: i64 = store
+            .conn()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, 1);
     }
 
     #[test]

@@ -29,12 +29,21 @@ use crate::state::{AppState, now};
 
 /// Whether a URL is the app itself (bundled pages, dev server, iframes).
 fn is_app_url(url: &Url) -> bool {
+    is_app_url_in(url, cfg!(debug_assertions))
+}
+
+/// `dev_server`: also allow the Vite dev server on this computer. Only
+/// debug builds use it; a release build must not navigate to whatever
+/// happens to be listening on a local port.
+fn is_app_url_in(url: &Url, dev_server: bool) -> bool {
     match url.scheme() {
         "tauri" | "about" => true,
-        "http" | "https" => matches!(
-            url.host_str(),
-            Some("tauri.localhost" | "localhost" | "127.0.0.1")
-        ),
+        "http" | "https" => match url.host_str() {
+            // The bundled pages on Windows (WebView2).
+            Some("tauri.localhost") => true,
+            Some("localhost" | "127.0.0.1") => dev_server,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -162,7 +171,7 @@ mod tests {
     fn only_the_app_itself_may_load_in_the_window() {
         assert!(is_app_url(&url("tauri://localhost/index.html")));
         assert!(is_app_url(&url("http://tauri.localhost/")));
-        assert!(is_app_url(&url("http://localhost:5173/")));
+        assert!(is_app_url_in(&url("http://localhost:5173/"), true));
         assert!(is_app_url(&url("about:srcdoc")));
         for outside in [
             "https://evil.example/",
@@ -172,5 +181,15 @@ mod tests {
         ] {
             assert!(!is_app_url(&url(outside)), "{outside}");
         }
+    }
+
+    #[test]
+    fn a_release_build_does_not_open_local_web_servers() {
+        for local in ["http://localhost:5173/", "http://127.0.0.1:8080/x"] {
+            assert!(!is_app_url_in(&url(local), false), "{local}");
+        }
+        assert!(is_app_url_in(&url("tauri://localhost/index.html"), false));
+        assert!(is_app_url_in(&url("http://tauri.localhost/"), false));
+        assert!(is_app_url_in(&url("https://tauri.localhost/"), false));
     }
 }

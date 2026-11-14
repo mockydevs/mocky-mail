@@ -1,7 +1,7 @@
 //! Offline actions waiting to be replayed on the server by the sync engine.
 
 use mail_core::outbox::UnixSeconds;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::Store;
@@ -114,6 +114,24 @@ impl Store {
         .collect()
     }
 
+    /// Count one more refusal from the server for this action and return
+    /// the new total. Returns 0 when the action no longer exists.
+    ///
+    /// # Errors
+    /// Fails on a database error.
+    pub fn record_op_refusal(&self, id: &str) -> Result<u32> {
+        let refusals: Option<i64> = self
+            .conn()
+            .query_row(
+                "UPDATE pending_ops SET refusals = refusals + 1 WHERE id = ?1
+                 RETURNING refusals",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(refusals.map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)))
+    }
+
     /// Remove an action once the server has applied it. Returns whether it
     /// existed.
     ///
@@ -168,6 +186,19 @@ mod tests {
         assert!(store.delete_op(&first).unwrap());
         assert!(!store.delete_op(&first).unwrap());
         assert_eq!(store.list_ops(&a).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn refusals_are_counted_per_change() {
+        let store = Store::open_in_memory().unwrap();
+        let a = add_account(&store, "a@example.com");
+        let first = store.enqueue_op(&a, OpKind::Move, &json!(1), 1).unwrap();
+        let second = store.enqueue_op(&a, OpKind::Move, &json!(2), 2).unwrap();
+        assert_eq!(store.record_op_refusal(&first).unwrap(), 1);
+        assert_eq!(store.record_op_refusal(&first).unwrap(), 2);
+        assert_eq!(store.record_op_refusal(&second).unwrap(), 1);
+        store.delete_op(&first).unwrap();
+        assert_eq!(store.record_op_refusal(&first).unwrap(), 0);
     }
 
     #[test]

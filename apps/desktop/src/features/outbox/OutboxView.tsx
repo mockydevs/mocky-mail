@@ -159,7 +159,7 @@ function OutboxDetail({
                     run(() => api.outboxSendNow(entry.id));
                   }}
                 >
-                  Send now
+                  {copy.sendLabel}
                 </button>
               )}
               {copy.canEdit && (

@@ -1,5 +1,12 @@
 import type { Folder } from '../../api/types';
-import { buildFolderTree, COLLAPSED_STORAGE_KEY, readCollapsed, writeCollapsed, type FolderNode } from './folderTree';
+import {
+  buildFolderTree,
+  COLLAPSED_STORAGE_KEY,
+  decodeImapUtf7,
+  readCollapsed,
+  writeCollapsed,
+  type FolderNode,
+} from './folderTree';
 
 function folder(path: string, name: string, role: Folder['role'] = 'other', delimiter: string | null = '/'): Folder {
   return { id: `a:${path}`, accountId: 'a', name, path, role, unread: 0, total: 0, delimiter };
@@ -46,9 +53,30 @@ describe('buildFolderTree', () => {
     expect(shape(buildFolderTree([folder('R&AOk-sum&AOk-s', 'Résumés')]))).toBe('Résumés');
   });
 
+  it('decodes a container that only exists as a parent path', () => {
+    const tree = buildFolderTree([folder('&BB4EQgRHBDUEQgRL-/2026', '2026'), folder('Caf&AOk-/Menu', 'Menu')]);
+    expect(shape(tree)).toBe('*Café(Menu),*Отчеты(2026)');
+    // The key keeps the raw path so collapsed state survives.
+    expect(tree.find((n) => n.label === 'Café')?.key).toBe('a:Caf&AOk-');
+  });
+
   it('treats a folder without a delimiter as flat, and ignores empty segments', () => {
     expect(shape(buildFolderTree([folder('A/B', 'A/B', 'other', null)]))).toBe('A/B');
     expect(shape(buildFolderTree([folder('/Lead/', 'Lead')]))).toBe('Lead');
+  });
+});
+
+describe('decodeImapUtf7', () => {
+  it('decodes accents, non-Latin scripts, emoji and a literal ampersand', () => {
+    expect(decodeImapUtf7('R&AOk-sum&AOk-s')).toBe('Résumés');
+    expect(decodeImapUtf7('&ZeVnLIqe-')).toBe('日本語');
+    expect(decodeImapUtf7('&2D3eAA-')).toBe('\u{1F600}');
+    expect(decodeImapUtf7('Tom &- Jerry')).toBe('Tom & Jerry');
+    expect(decodeImapUtf7('Plain')).toBe('Plain');
+  });
+
+  it('leaves malformed names as they are', () => {
+    for (const bad of ['&AOk', '&!!!-', '&A-']) expect(decodeImapUtf7(bad)).toBe(bad);
   });
 });
 

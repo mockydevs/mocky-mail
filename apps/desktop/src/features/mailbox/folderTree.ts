@@ -4,11 +4,50 @@ import { folderLabel, sortFolders } from './selectors';
 export interface FolderNode {
   /** Stable across sessions: account id plus the raw server path. */
   key: string;
-  /** The folder's decoded name, or the raw path segment for a container. */
+  /** The folder's decoded name, or the decoded path segment for a container. */
   label: string;
   /** null for a server container that is not itself a folder. */
   folder: Folder | null;
   children: FolderNode[];
+}
+
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,';
+
+/**
+ * Decode an IMAP folder-name segment from modified UTF-7 (RFC 3501 5.1.3),
+ * the same way the backend decodes folder names. Returns the input unchanged
+ * when it isn't valid, so a label is never lost.
+ */
+export function decodeImapUtf7(encoded: string): string {
+  let out = '';
+  let rest = encoded;
+  for (let start = rest.indexOf('&'); start !== -1; start = rest.indexOf('&')) {
+    out += rest.slice(0, start);
+    const end = rest.indexOf('-', start + 1);
+    if (end === -1) return encoded;
+    const chunk = rest.slice(start + 1, end);
+    if (chunk === '') {
+      out += '&';
+    } else {
+      let bits = 0;
+      let count = 0;
+      const units: number[] = [];
+      for (const c of chunk) {
+        const value = BASE64.indexOf(c);
+        if (value === -1) return encoded;
+        bits = ((bits << 6) | value) & 0xffffff;
+        count += 6;
+        if (count >= 16) {
+          count -= 16;
+          units.push((bits >> count) & 0xffff);
+        }
+      }
+      if (units.length === 0) return encoded;
+      out += String.fromCharCode(...units);
+    }
+    rest = rest.slice(end + 1);
+  }
+  return out + rest;
 }
 
 const ROLE_RANK = ['inbox', 'drafts', 'sent', 'archive', 'flagged', 'all', 'junk', 'trash', 'other'] as const;
@@ -40,7 +79,7 @@ export function buildFolderTree(folders: readonly Folder[]): FolderNode[] {
       prefix = i === 0 ? segment : `${prefix}${folder.delimiter ?? ''}${segment}`;
       let node = byPath.get(prefix);
       if (!node) {
-        node = { key: `${folder.accountId}:${prefix}`, label: segment, folder: null, children: [] };
+        node = { key: `${folder.accountId}:${prefix}`, label: decodeImapUtf7(segment), folder: null, children: [] };
         byPath.set(prefix, node);
         siblings.push(node);
       }

@@ -156,8 +156,14 @@ CREATE TABLE settings (
 );
 ";
 
+/// Version 2: count how often the server has refused each queued change, so
+/// a refusal is retried a few times before the change is given up.
+const V2: &str = r"
+ALTER TABLE pending_ops ADD COLUMN refusals INTEGER NOT NULL DEFAULT 0;
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -232,6 +238,30 @@ mod tests {
             migrate(&mut conn),
             Err(StoreError::SchemaTooNew { .. })
         ));
+    }
+
+    #[test]
+    fn a_version_one_database_keeps_its_queued_changes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO accounts VALUES ('a', 'a@x.co', 'A', 'password', '#000',
+                 'imap.x.co', 993, 'tls', 'smtp.x.co', 465, 'tls', NULL, 0);
+             INSERT INTO pending_ops (id, account_id, created_at, kind, payload)
+                 VALUES ('op', 'a', 1, 'move', '{}');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        let refusals: i64 = conn
+            .query_row(
+                "SELECT refusals FROM pending_ops WHERE id = 'op'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(refusals, 0);
     }
 
     #[test]
