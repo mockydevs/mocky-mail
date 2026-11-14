@@ -21,7 +21,8 @@
     "targets": "all",
     "category": "Productivity",
     "publisher": "Mocky Digital",
-    "homepage": "https://github.com/mockydevs/mocky-mail",
+    "homepage": "https://mailer.co.ke",
+    "copyright": "Copyright © 2026 Mocky Digital",
     "shortDescription": "Fast, private email for Windows, macOS and Linux.",
     "longDescription": "Mocky Mail is a fast, private desktop email client by Mocky Digital. Mail is kept on your computer, messages wait in the Outbox until the connection returns, and remote images are blocked until you allow them.",
     "icon": [

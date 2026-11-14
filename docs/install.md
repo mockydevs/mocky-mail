@@ -97,3 +97,22 @@ npx @tauri-apps/cli@2.12.4 build --target x86_64-pc-windows-gnu --bundles nsis
 
 It lands in `target/x86_64-pc-windows-gnu/release/bundle/nsis/` and includes
 `WebView2Loader.dll`. The `.msi` can only be built on Windows.
+
+### Signing the Windows installer
+
+Unsigned installers trigger "Windows protected your PC" and some antivirus
+warnings. Signing them with Mocky Digital's code-signing certificate shows
+"Mocky Digital" as the verified publisher. Once the certificate is set up
+(see the variables at the top of `scripts/sign-windows.sh`), build with:
+
+```bash
+cd apps/desktop
+npx @tauri-apps/cli@2.12.4 build --target x86_64-pc-windows-gnu --bundles nsis \
+  --config src-tauri/tauri.sign.conf.json
+```
+
+This signs the app, the installer and the uninstaller, and stops with an
+error if no certificate is configured, so an unsigned file is never shipped
+as a signed release by mistake. Needs `sudo apt install osslsigncode` for the
+certificate-file method.
+
