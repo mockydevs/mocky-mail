@@ -97,13 +97,32 @@ describe('adding an account', () => {
     const { user } = renderApp({ accounts: [] });
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
     await user.click(within(form()).getByRole('button', { name: 'Continue with Google' }));
-    expect(within(form()).getByRole('alert')).toHaveTextContent('Enter your email address first.');
-    await user.type(field('Email address'), 'don@gmail.com');
-    await user.click(within(form()).getByRole('button', { name: 'Continue with Google' }));
     const alert = await within(form()).findByRole('alert');
     expect(alert).toHaveTextContent('Not set up yet');
     expect(alert).toHaveTextContent('Google sign-in is not configured in this build yet.');
     expect(alert).toHaveTextContent('Use your email and an app password instead for now.');
+  });
+
+  it('signs in with Google without typing an address first', async () => {
+    const { user, api } = renderApp({ accounts: [], oauthConfigured: true });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    const spy = vi.spyOn(api, 'addOAuthAccount');
+    // Sign-in comes before the email field, so it's the first thing offered.
+    const google = within(form()).getByRole('button', { name: 'Continue with Google' });
+    expect(google.compareDocumentPosition(field('Email address')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.click(google);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ email: '', provider: 'google' }));
+    expect(await screen.findByRole('list', { name: 'All accounts' })).toBeInTheDocument();
+  });
+
+  it('asks to fix a half-typed address instead of sending it as a hint', async () => {
+    const { user, api } = renderApp({ accounts: [], oauthConfigured: true });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    const spy = vi.spyOn(api, 'addOAuthAccount');
+    await user.type(field('Email address'), 'don@');
+    await user.click(within(form()).getByRole('button', { name: 'Continue with Google' }));
+    expect(within(form()).getByRole('alert')).toHaveTextContent('clear it to choose an account');
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('signs in with Microsoft when OAuth is configured', async () => {

@@ -257,9 +257,13 @@ async fn authorize_with(
         if !login_hint.is_empty() {
             q.append_pair("login_hint", login_hint);
         }
+        // Show the provider's account chooser, so the user picks one of the
+        // accounts already on the device instead of typing an address.
         if provider == Provider::Google {
             q.append_pair("access_type", "offline")
-                .append_pair("prompt", "consent");
+                .append_pair("prompt", "select_account consent");
+        } else {
+            q.append_pair("prompt", "select_account");
         }
     }
     if !open_browser(url.as_str()) {
@@ -299,6 +303,32 @@ struct TokenResponse {
     refresh_token: Option<String>,
     expires_in: u64,
     token_type: String,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+#[derive(Deserialize)]
+struct IdClaims {
+    email: Option<String>,
+    email_verified: Option<bool>,
+    preferred_username: Option<String>,
+}
+/// The mailbox address the user chose, from the ID token's claims.
+///
+/// The token comes straight from the provider's token endpoint over TLS, so
+/// its signature isn't checked here (`OpenID` Connect 3.1.3.7). It only
+/// names the account; the app then logs in to that mailbox with the access
+/// token, which is what proves the grant really covers it.
+fn email_from_id_token(id_token: &str) -> Option<String> {
+    let payload = id_token.split('.').nth(1)?;
+    let claims: IdClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+    let email = match claims.email {
+        Some(email) if claims.email_verified != Some(false) => Some(email),
+        // Microsoft work accounts often leave out `email`; their sign-in
+        // name is the mailbox address.
+        _ => claims.preferred_username,
+    }?;
+    let email = email.trim();
+    (email.contains('@') && !email.contains(char::is_whitespace)).then(|| email.to_owned())
 }
 #[derive(Deserialize)]
 struct TokenError {
@@ -360,7 +390,7 @@ async fn exchange(
         access_token: token.access_token,
         refresh_token: token.refresh_token.filter(|v| !v.is_empty()),
         expires_at_unix: expires(now, token.expires_in)?,
-        granted_email: None,
+        granted_email: token.id_token.as_deref().and_then(email_from_id_token),
     })
 }
 /// Base64-encoded SASL XOAUTH2 initial response, ready for a wire protocol.
@@ -428,6 +458,33 @@ mod tests {
         assert!(url.starts_with("https://sign-in.invalid/authorize?"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("login_hint=a%40x.co"));
+    }
+
+    fn id_token(claims: &str) -> String {
+        format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(claims))
+    }
+
+    #[test]
+    fn the_chosen_address_comes_from_the_id_token() {
+        let google = id_token(r#"{"email":"don@gmail.com","email_verified":true}"#);
+        assert_eq!(
+            email_from_id_token(&google).as_deref(),
+            Some("don@gmail.com")
+        );
+        // Microsoft work accounts: no email claim, the sign-in name instead.
+        let work = id_token(r#"{"preferred_username":"don@mocky.co.ke"}"#);
+        assert_eq!(
+            email_from_id_token(&work).as_deref(),
+            Some("don@mocky.co.ke")
+        );
+        // An unverified email is not used; nor is junk.
+        let unverified = id_token(r#"{"email":"x@y.co","email_verified":false}"#);
+        assert_eq!(email_from_id_token(&unverified), None);
+        assert_eq!(email_from_id_token("not-a-token"), None);
+        assert_eq!(
+            email_from_id_token(&id_token(r#"{"email":"no at sign"}"#)),
+            None
+        );
     }
 
     #[test]

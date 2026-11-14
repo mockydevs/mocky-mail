@@ -76,9 +76,10 @@ function ServerFields({
 }
 
 /**
- * One path from top to bottom: email, password, name, then Add account.
- * Google and Microsoft sign-in sit below as alternatives, or move up under
- * the email when the address belongs to one of them. The password is read from
+ * Google and Microsoft sign-in come first: one tap opens the provider's
+ * account chooser, with nothing to type. Below, any other mailbox: email,
+ * password, name, then Add account. Typing a Gmail or Outlook address moves
+ * that provider's sign-in under the email instead. The password is read from
  * the field on submit and the field is cleared at once; it is never kept in
  * component state.
  */
@@ -158,8 +159,10 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
 
   const oauth = (provider: 'google' | 'microsoft') => {
     setError(null);
-    if (!emailValid) {
-      setFieldError('Enter your email address first.');
+    // No address needed: the provider shows its own account chooser. One
+    // that was typed is passed on as a hint, so it must be valid.
+    if (email.trim() !== '' && !emailValid) {
+      setFieldError('Check the email address, or clear it to choose an account.');
       return;
     }
     setFieldError(null);
@@ -197,6 +200,16 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
           <p>{copy.message}</p>
           {copy.hint && <p className="notice__hint">{copy.hint}</p>}
         </div>
+      )}
+
+      {!suggestedOAuth && (
+        <>
+          <div className="oauth">
+            {oauthButton('google')}
+            {oauthButton('microsoft')}
+          </div>
+          <p className="divider">or add any email account</p>
+        </>
       )}
 
       <label className="form-field" htmlFor={`${id}-email`}>
@@ -302,15 +315,6 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
         </button>
       </div>
 
-      {!suggestedOAuth && (
-        <>
-          <p className="divider">or sign in with</p>
-          <div className="oauth">
-            {oauthButton('google')}
-            {oauthButton('microsoft')}
-          </div>
-        </>
-      )}
     </form>
   );
 }

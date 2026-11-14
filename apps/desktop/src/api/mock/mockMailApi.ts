@@ -232,10 +232,13 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           throw appError('config', `${name} sign-in is not configured in this build yet.`);
         }
         const id = `acc${String(seq++)}`;
+        // Like the real flow: with no address typed, the account picked in
+        // the provider's chooser is used.
+        const email = input.email || (input.provider === 'google' ? 'you@gmail.com' : 'you@outlook.com');
         const created: Account = {
           id,
-          email: input.email,
-          displayName: input.displayName || input.email,
+          email,
+          displayName: input.displayName || email,
           auth: input.provider,
           createdAt: now(),
           color: PALETTE[accounts.length % PALETTE.length] ?? '#2450C8',
