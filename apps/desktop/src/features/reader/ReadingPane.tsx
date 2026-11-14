@@ -330,10 +330,9 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
       </div>
 
       {isHtml && (
-        <div
-          className="reader__frame"
-          style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }}
-        >
+        // No inline min-height: the stylesheet guarantees the email its share
+        // of the pane (half on desktop, most of the screen on a phone).
+        <div className="reader__frame" style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto' }}>
           <SandboxedHtml
             title={`Message: ${message.subject}`}
             html={message.html ?? ''}
@@ -355,6 +354,7 @@ function QuickReply({ message, account }: { message: MessageDetail; account: Acc
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [sent, setSent] = useState(false);
+  const [focused, setFocused] = useState(false);
   const firstName = (message.from?.name ?? message.from?.address ?? '').split(' ')[0] ?? '';
 
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
@@ -383,21 +383,28 @@ function QuickReply({ message, account }: { message: MessageDetail; account: Acc
   };
 
   return (
+    // One line until used, so it never crowds out the message above it.
     <form className="quick-reply" onSubmit={submit}>
       <label className="quick-reply__label">
-        Quick reply to {firstName || 'sender'}
+        <span className="visually-hidden">Quick reply to {firstName || 'sender'}</span>
         <textarea
           className="field"
-          rows={2}
+          rows={focused || text ? 4 : 1}
           value={text}
-          placeholder="Write a reply"
+          placeholder={`Reply to ${firstName || 'sender'}`}
+          onFocus={() => {
+            setFocused(true);
+          }}
+          onBlur={() => {
+            setFocused(false);
+          }}
           onChange={(e) => {
             setText(e.target.value);
             setSent(false);
           }}
         />
       </label>
-      <button type="submit" className="btn btn--primary btn--large" disabled={busy || !text.trim()}>
+      <button type="submit" className="btn btn--primary" disabled={busy || !text.trim()}>
         <Icon name="sent" size={16} />
         Send
       </button>
