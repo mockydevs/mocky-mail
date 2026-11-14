@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mocky Mail privacy policy</title>
+<meta name="description" content="How the Mocky Mail app handles your email, passwords and Google or Microsoft account data.">
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-latin-var.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+:root {
+  color-scheme: light;
+  --bg: #f7f7f5;
+  --band: #ffffff;
+  --card: #ffffff;
+  --text: #1c1c1a;
+  --muted: #5e5e58;
+  --border: #e4e4e0;
+  --primary: #2450c8;
+  --primary-pressed: #1b3e9e;
+  --soft: #eaf0fd;
+  --soft-text: #173a99;
+  --code-bg: #f3f3f1;
+  --shadow: 0 24px 60px -24px rgba(28, 28, 26, 0.35);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #121316;
+    --band: #17181b;
+    --card: #1c1d21;
+    --text: #ececea;
+    --muted: #a3a39d;
+    --border: #2c2e33;
+    --primary: #2f5bd6;
+    --primary-pressed: #2449b0;
+    --soft: #1a2647;
+    --soft-text: #b9cbff;
+    --code-bg: #1f2024;
+    --shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.8);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--primary); }
+a:focus-visible { outline: 3px solid var(--soft-text); outline-offset: 2px; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 16px; }
+.top { border-bottom: 1px solid var(--border); background: var(--band); }
+.top .wrap { display: flex; align-items: center; min-height: 64px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 18px; text-decoration: none; }
+.brand img { width: 32px; height: 32px; border-radius: 8px; }
+main { padding: 40px 0 24px; }
+h1 { font-size: clamp(28px, 6vw, 40px); line-height: 1.15; margin: 0 0 8px; letter-spacing: -0.02em; }
+h2 { font-size: 20px; margin: 36px 0 8px; }
+.updated { color: var(--muted); margin: 0 0 24px; }
+li { margin: 6px 0; }
+footer { padding: 40px 0 56px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--border); }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; }
+footer a { color: inherit; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/icon.png" alt="" width="32" height="32">Mocky Mail</a>
+  </div>
+</header>
+<main>
+  <div class="wrap">
+    <h1>Privacy policy</h1>
+    <p class="updated">Mocky Mail for Android, Windows and Linux. Last updated 14 November 2026.</p>
+
+    <p>Mocky Mail is an email app made by Mocky Digital in Nairobi, Kenya. This policy explains what the app does with your information. In short: your email stays between your device and your own email provider. Mocky Digital does not run a server for the app, and never receives, stores or sees your email, contacts, passwords or account data.</p>
+
+    <h2>What the app handles, and where it goes</h2>
+    <ul>
+      <li><strong>Your email.</strong> The app downloads your messages, folders and attachments from the mail servers of the accounts you add (for example Gmail, Outlook or your company's mail server) and keeps a copy on your device so you can read it offline. Messages you write are sent through those same servers.</li>
+      <li><strong>Your email address and server settings.</strong> Stored on your device so the app can connect to your accounts.</li>
+      <li><strong>Passwords and sign-in tokens.</strong> Stored in your device's secure storage (Android Keystore, Windows Credential Manager or the Linux keyring), never in plain files. They are sent only to your own email provider, to sign you in.</li>
+      <li><strong>Server lookup.</strong> When you add an account, the app looks up your domain's mail servers through your device's normal DNS service.</li>
+    </ul>
+    <p>All of this stays on your device or goes directly to your email provider. None of it is sent to Mocky Digital or to anyone else. The app has no ads, no analytics, no tracking and no crash reporting.</p>
+
+    <h2>Google accounts (Gmail)</h2>
+    <p>If you sign in with Google, the app asks for access to your Gmail (the <code>https://mail.google.com/</code> permission) and your email address. It uses this access only to read, organise and send your email inside the app, on your device, at your request. The app:</p>
+    <ul>
+      <li>does not send your Gmail data to Mocky Digital or any other server;</li>
+      <li>does not share, sell or transfer it to anyone;</li>
+      <li>does not use it for advertising, and does not use it to develop, improve or train AI or machine-learning models;</li>
+      <li>does not let any person read it, except you.</li>
+    </ul>
+    <p>Mocky Mail's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+
+    <h2>Microsoft accounts (Outlook and Microsoft 365)</h2>
+    <p>If you sign in with Microsoft, the app asks for permission to read and send your mail. The same rules apply: the access is used only to show and send your email on your device, and the data is not sent to Mocky Digital or shared with anyone.</p>
+
+    <h2>Remote images in email</h2>
+    <p>Many emails contain images that tell the sender when you opened the message. Mocky Mail blocks remote images until you choose to show them, so senders cannot track you by default. When you show them, your device loads them from the sender's servers.</p>
+
+    <h2>Notifications</h2>
+    <p>The app can show new-mail notifications. They are created on your device from mail it has already downloaded; no notification service run by Mocky Digital is involved.</p>
+
+    <h2>Deleting your data</h2>
+    <p>Remove an account in the app to delete its stored mail, settings and password from your device. Uninstalling the app deletes everything it stored. To withdraw the app's access to your Google account, visit <a href="https://myaccount.google.com/permissions">your Google account's third-party access page</a>; for Microsoft, visit <a href="https://account.live.com/consent/Manage">Microsoft's app permissions page</a>. Your email itself stays with your email provider, under their own privacy policy.</p>
+
+    <h2>Children</h2>
+    <p>Mocky Mail is a general email app and is not directed at children under 13.</p>
+
+    <h2>Changes and contact</h2>
+    <p>If this policy changes, the new version will be posted on this page with a new date. Questions: <a href="mailto:info@mocky.co.ke">info@mocky.co.ke</a> or +254 741 590 670, Mocky Digital, Nairobi, Kenya.</p>
+  </div>
+</main>
+<footer>
+  <div class="wrap">
+    <span>Mocky Mail by <a href="https://mocky.co.ke/">Mocky Digital</a>, Nairobi.</span>
+    <span>Questions? <a href="mailto:info@mocky.co.ke">info@mocky.co.ke</a> or +254 741 590 670</span>
+  </div>
+</footer>
+</body>
+</html>
