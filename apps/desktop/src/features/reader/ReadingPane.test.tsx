@@ -55,7 +55,9 @@ describe('reading pane', () => {
     const frame = await within(reader()).findByTitle(/Message: Revised quotation/);
     const holder = frame.parentElement;
     if (!holder) throw new Error('frame has no container');
-    expect(holder).toHaveStyle({ display: 'flex', flexDirection: 'column', minHeight: '0px' });
+    expect(holder).toHaveStyle({ display: 'flex', flexDirection: 'column' });
+    // The stylesheet sets the frame's minimum size; an inline value would override it.
+    expect(holder.style.minHeight).toBe('');
     expect(holder.style.flexGrow).toBe('1');
     expect(holder.parentElement).toBe(reader());
     expect(frame.style.flexGrow).toBe('1');
@@ -69,6 +71,22 @@ describe('reading pane', () => {
     await user.type(quickReply, 'Signed, see attached.');
     await user.click(within(reader()).getByRole('button', { name: 'Send' }));
     expect(await within(reader()).findByText('Reply queued in the Outbox.')).toBeInTheDocument();
+  });
+
+  it('keeps quick reply to one line until it is used', async () => {
+    const { user } = renderApp();
+    await rows();
+    const box = await within(reader()).findByLabelText('Quick reply to Wanjiru');
+    expect(box).toHaveAttribute('rows', '1');
+    await user.click(box);
+    expect(box).toHaveAttribute('rows', '4');
+    await user.type(box, 'Thanks');
+    await user.tab();
+    // Still open while it holds a reply.
+    expect(box).toHaveAttribute('rows', '4');
+    await user.clear(box);
+    await user.tab();
+    expect(box).toHaveAttribute('rows', '1');
   });
 
   it('opens links in plain text mail through the system browser', async () => {
