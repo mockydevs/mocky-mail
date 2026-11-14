@@ -1,15 +1,18 @@
-import { useId, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
+import { useEffect, useId, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, Draft } from '../../api/types';
+import type { Account, AppError, Draft, DraftAttachment } from '../../api/types';
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
+import { RecipientField } from './RecipientField';
 import { parseRecipients } from './recipients';
 
 interface Props {
   initial: Draft;
+  /** Load copies of this message's attachments into the draft (forwarding, continuing a draft). */
+  attachmentsFrom?: string | null;
   title: string;
   accounts: readonly Account[];
   offlineNote: boolean;
@@ -31,18 +34,50 @@ function encodedEstimate(bytes: number): number {
   return Math.ceil(bytes / 3) * 4;
 }
 
-export function ComposeView({ initial, title, accounts, offlineNote, onClose, onSent }: Props) {
+export function ComposeView({ initial, attachmentsFrom = null, title, accounts, offlineNote, onClose, onSent }: Props) {
   const api = useMailApi();
   const id = useId();
   const [draft, setDraft] = useState<Draft>(initial);
-  const [showCopies, setShowCopies] = useState(initial.cc !== '' || initial.bcc !== '');
+  /** The last saved (or loaded) state; changes are compared against it. */
+  const [baseline, setBaseline] = useState<Draft>(initial);
+  const [loadingAttachments, setLoadingAttachments] = useState(attachmentsFrom !== null);
+  const [attachError, setAttachError] = useState<AppError | null>(null);
+  const [showCc, setShowCc] = useState(initial.cc !== '');
+  const [showBcc, setShowBcc] = useState(initial.bcc !== '');
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<FieldName, string>>>({});
   const [error, setError] = useState<AppError | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | 'send' | 'save' | 'attach'>(null);
   const [confirmClose, setConfirmClose] = useState(false);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
+  useEffect(() => {
+    if (attachmentsFrom === null) return;
+    let active = true;
+    const merge = (d: Draft, files: DraftAttachment[]): Draft => {
+      const known = new Set(d.attachments.map((a) => a.path));
+      return { ...d, attachments: [...d.attachments, ...files.filter((f) => !known.has(f.path))] };
+    };
+    api
+      .attachmentsForDraft(attachmentsFrom)
+      .then(
+        (files) => {
+          if (!active) return;
+          setDraft((d) => merge(d, files));
+          setBaseline((b) => merge(b, files));
+        },
+        (e: unknown) => {
+          if (active) setAttachError(toAppError(e));
+        },
+      )
+      .finally(() => {
+        if (active) setLoadingAttachments(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, attachmentsFrom]);
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const account = accounts.find((a) => a.id === draft.accountId);
   const attachmentBytes = draft.attachments.reduce((sum, a) => sum + a.size, 0);
   const overLimit =
@@ -79,10 +114,19 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
       });
   };
 
+  /** Save and remember the saved copy's id, so the next save or send replaces it. */
+  const saveNow = (): Promise<void> => {
+    const snapshot = draft;
+    return api.saveDraft(snapshot).then(({ draftMessageId }) => {
+      setDraft((d) => ({ ...d, draftMessageId }));
+      setBaseline({ ...snapshot, draftMessageId });
+    });
+  };
+
   const save = () => {
     setError(null);
     setBusy('save');
-    api.saveDraft(draft).then(
+    saveNow().then(
       () => {
         setBusy(null);
         setStatus('Draft saved.');
@@ -121,6 +165,9 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
     if (event.key === 'Escape' && !confirmClose) {
       event.stopPropagation();
       requestClose();
+    } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && busy === null && !loadingAttachments) {
+      event.preventDefault();
+      (event.currentTarget as HTMLFormElement).requestSubmit();
     }
   };
 
@@ -133,20 +180,17 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
           {label}
         </label>
         <div className="compose__field">
-          <input
+          <RecipientField
             id={fieldId}
-            type="text"
-            inputMode="email"
-            autoComplete="email"
-            className="compose__input"
+            label={label}
             value={draft[name]}
-            aria-invalid={message ? true : undefined}
-            aria-describedby={message ? `${fieldId}-error` : undefined}
+            invalid={message !== undefined}
+            describedBy={message ? `${fieldId}-error` : undefined}
             // The first field of a view the user just opened.
             // eslint-disable-next-line jsx-a11y/no-autofocus
             autoFocus={autoFocus}
-            onChange={(e) => {
-              update({ [name]: e.target.value });
+            onChange={(value) => {
+              update({ [name]: value });
             }}
           />
           {message && (
@@ -155,6 +199,34 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
             </p>
           )}
         </div>
+        {name === 'to' && (!showCc || !showBcc) && (
+          <span className="compose__copies">
+            {!showCc && (
+              <button
+                type="button"
+                className="btn btn--link"
+                aria-label="Add Cc"
+                onClick={() => {
+                  setShowCc(true);
+                }}
+              >
+                Cc
+              </button>
+            )}
+            {!showBcc && (
+              <button
+                type="button"
+                className="btn btn--link"
+                aria-label="Add Bcc"
+                onClick={() => {
+                  setShowBcc(true);
+                }}
+              >
+                Bcc
+              </button>
+            )}
+          </span>
+        )}
       </div>
     );
   };
@@ -163,6 +235,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
     // The form handles Esc for its own fields; it is not an interactive control itself.
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <form className="compose" aria-labelledby={`${id}-title`} onSubmit={send} onKeyDown={onKeyDown} noValidate>
+      <div className="compose__card">
       <header className="compose__head">
         <h1 id={`${id}-title`} className="compose__title">
           {title}
@@ -184,7 +257,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
           </label>
           <select
             id={`${id}-from`}
-            className="field field--select"
+            className="compose__from"
             value={draft.accountId}
             onChange={(e) => {
               update({ accountId: e.target.value });
@@ -192,27 +265,14 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
           >
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>
-                {a.displayName && a.displayName !== a.email ? `${a.displayName}, ${a.email}` : a.email}
+                {a.displayName && a.displayName !== a.email ? `${a.displayName} <${a.email}>` : a.email}
               </option>
             ))}
           </select>
         </div>
         {field('to', 'To', initial.to === '')}
-        {!showCopies && (
-          <div className="compose__row compose__row--copies">
-            <button
-              type="button"
-              className="btn btn--link"
-              onClick={() => {
-                setShowCopies(true);
-              }}
-            >
-              Add Cc or Bcc
-            </button>
-          </div>
-        )}
-        {showCopies && field('cc', 'Cc', false)}
-        {showCopies && field('bcc', 'Bcc', false)}
+        {showCc && field('cc', 'Cc', false)}
+        {showBcc && field('bcc', 'Bcc', false)}
         <div className="compose__row">
           <label htmlFor={`${id}-subject`} className="compose__label">
             Subject
@@ -234,6 +294,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
           <Icon name="paperclip" />
           Attach files
         </button>
+        <span className="compose__hint">Ctrl+Enter to send</span>
       </div>
 
       <label htmlFor={`${id}-body`} className="visually-hidden">
@@ -255,6 +316,18 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
           update({ bodyText: e.target.value });
         }}
       />
+
+      {loadingAttachments && (
+        <p className="compose__loading form-hint" role="status" aria-busy="true">
+          Adding the original attachments
+        </p>
+      )}
+      {attachError && (
+        <div className="notice notice--error compose__attach-error" role="alert">
+          <p className="notice__title">Couldn’t add the original attachments</p>
+          <p>{attachError.message} You can still send the message, or add files with Attach files.</p>
+        </div>
+      )}
 
       {draft.attachments.length > 0 && (
         <div className="compose__attachments">
@@ -295,7 +368,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
       )}
 
       <footer className="compose__foot">
-        <button type="submit" className="btn btn--primary btn--large" disabled={busy !== null}>
+        <button type="submit" className="btn btn--primary btn--large" disabled={busy !== null || loadingAttachments}>
           <Icon name="sent" size={16} />
           {busy === 'send' ? 'Sending' : 'Send'}
         </button>
@@ -313,6 +386,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
           <Icon name="trash" />
         </button>
       </footer>
+      </div>
 
       {confirmClose && (
         <Modal
@@ -338,7 +412,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
               className="btn btn--secondary"
               onClick={() => {
                 setConfirmClose(false);
-                api.saveDraft(draft).then(onClose, (e: unknown) => {
+                saveNow().then(onClose, (e: unknown) => {
                   setError(toAppError(e));
                 });
               }}

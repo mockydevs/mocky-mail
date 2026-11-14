@@ -3,27 +3,62 @@
 A fast, private desktop email client for Windows, macOS and Linux, by
 [Mocky Digital](https://mocky.co.ke). Free and open source under the GPL-3.0.
 
-> Status: early development. The mail engine's rules and the interface are in
-> place; connecting to real mail servers (IMAP, SMTP, OAuth) and the local
-> database come next.
+> Status: version 0.1, in testing. It syncs and sends real mail over IMAP
+> and SMTP, with password sign-in for any provider and browser sign-in for
+> Gmail and Microsoft 365/Outlook.
 
 ## What makes it different
 
-- **Works on bad connections.** Mail is saved on your computer. Messages you
-  send wait in the Outbox and go out by themselves when the connection
-  returns, with sensible retries and no double-sends after a crash.
+- **Works on bad connections.** Mail is saved on your computer, so it opens
+  offline. Messages you send wait in the Outbox and go out by themselves when
+  the connection returns, with sensible retries. After a crash, Mocky Mail
+  checks your Sent folder before resending, and asks you if it can't tell.
+  Moves, deletes and read marks made offline reach the server later.
 - **Private by default.** Remote images (tracking pixels) are blocked until
   you allow them. HTML email is cleaned and then shown in a locked-down
-  sandbox.
+  sandbox. Passwords and sign-in tokens live in your system's keyring, never
+  in the app's files.
 - **Small and light.** Built with Rust and Tauri, not a bundled browser.
+
+## Features
+
+- Several accounts side by side, each with its full folder tree.
+- Gmail and Microsoft 365/Outlook sign-in through your browser, or a
+  password for any IMAP/SMTP provider (server settings are suggested).
+- Fast search across all your mail, even offline.
+- Compose with Cc and Bcc, attachments and saved drafts. Reply, reply all
+  and forward.
+- New-mail alerts with an optional sound.
+- Light and dark themes. In dark mode, email is darkened too, with a
+  "Show original colours" button.
+- Keyboard shortcuts: `j`/`k` next and previous, `r` reply, `e` archive,
+  `#` delete, `c` new message, `/` search.
+
+## Install
+
+Download Mocky Mail from **[mailer.co.ke](https://mailer.co.ke)** (Windows
+`.exe` and Linux `.deb` now; macOS coming soon). Builds are also attached to
+[GitHub releases](https://github.com/mockydevs/mocky-mail/releases/latest).
+On Ubuntu or Debian:
+
+```bash
+sudo apt install ./mocky-mail_0.1.0_amd64.deb
+```
+
+Step-by-step instructions for each system are in [docs/install.md](docs/install.md).
 
 ## Layout
 
 ```
 crates/mail-core/        Pure mail rules: parsing, HTML cleaning, outbox, size limits.
                          No network, disk or clock, so every rule is unit tested.
+crates/mail-store/       Local SQLite database: accounts, folders, messages, search,
+                         the outbox and offline changes waiting for the server.
+crates/mail-sync/        IMAP and SMTP connections, and the system keyring.
+crates/mail-auth/        Browser sign-in (OAuth with PKCE) for Gmail and Microsoft.
 apps/desktop/            React + TypeScript interface (Vite).
-apps/desktop/src-tauri/  Tauri shell: window, permissions, and thin IPC commands.
+apps/desktop/src-tauri/  Tauri shell: window, sync and outbox workers, IPC commands.
+docs/                    IPC contract, install guide, OAuth setup, store release notes.
 ```
 
 ## Develop
@@ -42,6 +77,13 @@ cd apps/desktop && npm ci
 npm run dev                     # interface in the browser with sample data
 npx @tauri-apps/cli@2.12.4 dev  # full desktop app (needs the system libraries)
 ```
+
+Gmail and Microsoft sign-in need OAuth client IDs set when the app is built;
+without them those two options show a configuration error and password
+sign-in still works. See [docs/oauth-setup.md](docs/oauth-setup.md).
+
+The interface and the native side talk through the commands in
+[docs/ipc.md](docs/ipc.md).
 
 Before opening a pull request, all of these must pass:
 

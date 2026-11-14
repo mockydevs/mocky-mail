@@ -29,8 +29,31 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_mins(25);
 /// Messages larger than this are not downloaded in the background.
 pub const MAX_BACKGROUND_BODY_BYTES: u32 = 2 * 1024 * 1024;
 
+/// The slowest link we plan for when a whole message crosses the network
+/// (about 0.5 Mbit/s, a weak mobile signal).
+const SLOW_LINK_BYTES_PER_SEC: u64 = 64 * 1024;
+
+/// Time allowed for a step that moves `bytes` of mail: the usual limit plus
+/// enough for a slow link, so a large email can still open or be filed.
+#[must_use]
+pub fn transfer_timeout(bytes: u64) -> Duration {
+    NETWORK_TIMEOUT.saturating_add(Duration::from_secs(bytes / SLOW_LINK_BYTES_PER_SEC))
+}
+
 async fn within<T>(host: &str, future: impl Future<Output = T>) -> Result<T, SyncError> {
     timeout(NETWORK_TIMEOUT, future)
+        .await
+        .map_err(|_| SyncError::Timeout {
+            host: host.to_owned(),
+        })
+}
+
+async fn within_for<T>(
+    host: &str,
+    limit: Duration,
+    future: impl Future<Output = T>,
+) -> Result<T, SyncError> {
+    timeout(limit, future)
         .await
         .map_err(|_| SyncError::Timeout {
             host: host.to_owned(),
@@ -234,9 +257,10 @@ async fn open_stream(server: &ServerConfig) -> Result<ImapStream, SyncError> {
     let host = server.host.as_str();
     let tcp = within(host, TcpStream::connect((host, server.port)))
         .await?
-        .map_err(|_| SyncError::Connect {
+        .map_err(|e| SyncError::Connect {
             host: host.to_owned(),
             port: server.port,
+            reason: crate::error::connect_reason(&e),
         })?;
     match server.security {
         Security::Tls => Ok(Either::Left(within(host, tls::wrap(tcp, host)).await??)),
@@ -247,6 +271,7 @@ async fn open_stream(server: &ServerConfig) -> Result<ImapStream, SyncError> {
                 .map_err(|_| SyncError::Connect {
                     host: host.to_owned(),
                     port: server.port,
+                    reason: "the server did not send a greeting".to_owned(),
                 })?;
             within(host, client.run_command_and_check_ok("STARTTLS", None))
                 .await?
@@ -295,6 +320,10 @@ impl ImapConnection {
             }
         };
         let mut session = within(&host, login).await?.map_err(|error| match error {
+            // "Try later" (server busy) is not a wrong password.
+            async_imap::error::Error::No(text) if crate::error::is_temporary_refusal(&text) => {
+                SyncError::Protocol(text)
+            }
             async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_) => SyncError::Auth,
             other => SyncError::from(other),
         })?;
@@ -381,9 +410,19 @@ impl ImapConnection {
     }
 
     async fn fetch(&mut self, path: &str, set: &str, query: &str) -> Result<Vec<Fetch>, SyncError> {
+        self.fetch_within(path, set, query, NETWORK_TIMEOUT).await
+    }
+
+    async fn fetch_within(
+        &mut self,
+        path: &str,
+        set: &str,
+        query: &str,
+        limit: Duration,
+    ) -> Result<Vec<Fetch>, SyncError> {
         self.ensure_selected(path).await?;
         let host = self.host.clone();
-        within(&host, async {
+        within_for(&host, limit, async {
             self.session
                 .uid_fetch(set, query)
                 .await?
@@ -437,13 +476,24 @@ impl ImapConnection {
             .collect())
     }
 
-    /// The full raw message, without marking it read.
+    /// The full raw message, without marking it read. `size` is its size as
+    /// last reported by the server; it sets how long the download may take.
     ///
     /// # Errors
     /// Network or server errors. `Ok(None)` when the message is gone.
-    pub async fn fetch_raw(&mut self, path: &str, uid: u32) -> Result<Option<Vec<u8>>, SyncError> {
+    pub async fn fetch_raw(
+        &mut self,
+        path: &str,
+        uid: u32,
+        size: u64,
+    ) -> Result<Option<Vec<u8>>, SyncError> {
         let fetches = self
-            .fetch(path, &uid.to_string(), "(UID BODY.PEEK[])")
+            .fetch_within(
+                path,
+                &uid.to_string(),
+                "(UID BODY.PEEK[])",
+                transfer_timeout(size),
+            )
             .await?;
         Ok(fetches
             .iter()
@@ -613,7 +663,13 @@ impl ImapConnection {
     /// Network or server errors.
     pub async fn append(&mut self, path: &str, raw: &[u8], flags: &str) -> Result<(), SyncError> {
         let host = self.host.clone();
-        within(&host, self.session.append(path, Some(flags), None, raw)).await??;
+        let limit = transfer_timeout(u64::try_from(raw.len()).unwrap_or(u64::MAX));
+        within_for(
+            &host,
+            limit,
+            self.session.append(path, Some(flags), None, raw),
+        )
+        .await??;
         // APPEND to the selected folder changes its contents; force a re-select.
         self.selected = None;
         Ok(())
@@ -674,6 +730,19 @@ mod tests {
         assert_eq!(
             uid_set(&[u32::MAX, u32::MAX - 1]).as_deref(),
             Some("4294967294:4294967295")
+        );
+    }
+
+    #[test]
+    fn large_transfers_get_time_for_a_slow_link() {
+        assert_eq!(transfer_timeout(0), NETWORK_TIMEOUT);
+        assert_eq!(transfer_timeout(10 * 1024), NETWORK_TIMEOUT);
+        // 25 MB at 0.5 Mbit/s takes about 400 s; the old flat 45 s cut it off.
+        let big = transfer_timeout(25 * 1024 * 1024);
+        assert_eq!(big, NETWORK_TIMEOUT + Duration::from_secs(400));
+        assert_eq!(
+            transfer_timeout(u64::MAX),
+            NETWORK_TIMEOUT + Duration::from_secs(u64::MAX / SLOW_LINK_BYTES_PER_SEC)
         );
     }
 

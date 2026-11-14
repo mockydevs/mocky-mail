@@ -1,7 +1,7 @@
 import { screen, within } from '@testing-library/react';
 import { vi } from 'vitest';
 
-import { accountFolders, reader, renderApp, rows } from '../../test/renderApp';
+import { accountFolders, reader, renderApp, rows, accountToggle, queryAccountToggle } from '../../test/renderApp';
 
 async function openSettings(options: Parameters<typeof renderApp>[0] = {}) {
   const ctx = renderApp(options);
@@ -54,12 +54,12 @@ describe('settings', () => {
     const dialog = screen.getByRole('dialog', { name: 'Remove you@personal.example?' });
     expect(dialog).toHaveTextContent('Your mail on the server is not touched');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    expect(screen.getByRole('list', { name: 'Personal' })).toBeInTheDocument();
+    expect(accountToggle('Personal')).toBeInTheDocument();
 
     await user.click(row.getByRole('button', { name: 'Remove' }));
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove account' }));
     await vi.waitFor(() => {
-      expect(screen.queryByRole('list', { name: 'Personal' })).not.toBeInTheDocument();
+      expect(queryAccountToggle('Personal')).not.toBeInTheDocument();
     });
     expect(accountFolders('Work')).toBeDefined();
   });

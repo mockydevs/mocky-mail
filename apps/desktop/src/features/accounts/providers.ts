@@ -50,7 +50,7 @@ export function accountErrorCopy(error: AppError, email: string): ErrorCopy {
         : 'Check the password. Some providers need an app password for mail apps.';
       break;
     case 'connect':
-      hint = 'Check your internet connection and the server names and ports under Advanced.';
+      hint = 'Check your internet connection and the server names and ports under Advanced. If other apps can get online, your antivirus or firewall may be blocking Mocky Mail.';
       break;
     case 'tls':
       hint = 'Check the security setting: port 993 (IMAP) and 465 (SMTP) use TLS; 143 and 587 use STARTTLS.';

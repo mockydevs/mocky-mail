@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "windows": {
+      "signCommand": {
+        "cmd": "bash",
+        "args": ["../../scripts/sign-windows.sh", "%1"]
+      }
+    }
+  }
+}

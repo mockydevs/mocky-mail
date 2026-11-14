@@ -1,4 +1,4 @@
-import type { Account, Draft, FolderRole, Mailbox, MessageDetail } from '../../api/types';
+import type { Account, Draft, DraftAttachment, FolderRole, Mailbox, MessageDetail } from '../../api/types';
 import { formatLongDate } from '../../lib/format';
 
 /** "Wanjiru Kamau <wanjiru@fitout.example>" or the bare address. */
@@ -115,7 +115,11 @@ export function replyDraft(message: MessageDetail, account: Account, all: boolea
   };
 }
 
-export function forwardDraft(message: MessageDetail, timeZone?: string): Draft {
+/**
+ * Forward with the original text. `attachments` are copies from
+ * attachments_for_draft; the caller loads them because that can fail.
+ */
+export function forwardDraft(message: MessageDetail, timeZone?: string, attachments: DraftAttachment[] = []): Draft {
   const header = [
     '---------- Forwarded message ----------',
     `From: ${message.from ? formatMailbox(message.from) : ''}`,
@@ -129,18 +133,25 @@ export function forwardDraft(message: MessageDetail, timeZone?: string): Draft {
     subject: forwardSubject(message.subject),
     bodyText: `\n\n${header}\n\n${bodyTextOf(message)}`,
     references: threading(message).references,
+    attachments,
   };
 }
 
-/** Continue editing a message from Drafts. */
-export function draftFromMessage(message: MessageDetail): Draft {
+/**
+ * Continue editing a message from Drafts. Saving or sending replaces that
+ * saved copy, so the server keeps only one.
+ */
+export function draftFromMessage(message: MessageDetail, attachments: DraftAttachment[] = []): Draft {
   return {
     ...blankDraft(message.accountId),
     to: formatMailboxes(message.to),
     cc: formatMailboxes(message.cc),
     subject: message.subject,
     bodyText: bodyTextOf(message),
+    inReplyTo: message.inReplyTo,
     references: message.references,
+    attachments,
+    draftMessageId: message.messageIdHeader,
   };
 }
 

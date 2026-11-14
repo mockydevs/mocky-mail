@@ -71,6 +71,30 @@ impl Store {
         }
         Ok(())
     }
+
+    /// Remove local copies of moved messages that never arrived in this
+    /// folder on the server, once the account has no changes waiting.
+    ///
+    /// A local move parks the message here without a UID until a sync of
+    /// this folder finds it. After every change has been sent and this
+    /// folder synced, a copy still waiting can't be matched: the server
+    /// refused the move, or the message has no Message-ID and arrived as a
+    /// new row. Keeping it would show the message twice, or in a folder it
+    /// is not in. Checked in one statement, so a move made meanwhile (which
+    /// queues its change first) is never touched. Returns how many went.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn delete_unplaced_moves(&self, folder_id: &str) -> Result<usize> {
+        Ok(self.conn().execute(
+            "DELETE FROM messages
+             WHERE folder_id = ?1 AND uid IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM pending_ops WHERE pending_ops.account_id = messages.account_id
+               )",
+            params![folder_id],
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +164,29 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].preview, "hello world");
         assert!(store.set_body("nope", b"x", None, "").is_err());
+    }
+
+    #[test]
+    fn unplaced_moves_are_removed_only_when_nothing_is_waiting() {
+        let store = Store::open_in_memory().unwrap();
+        let account = add_account(&store, "a@x.co");
+        let inbox = add_folder(&store, &account, "INBOX", FolderRole::Inbox);
+        let archive = add_folder(&store, &account, "Archive", FolderRole::Archive);
+        let moved = add_message(&store, &inbox, 1, &summary("moved", 10));
+        let stays = add_message(&store, &archive, 7, &summary("stays", 20));
+        store.move_local(&[&moved], &archive).unwrap();
+        let op = store
+            .enqueue_op(&account, crate::OpKind::Move, &serde_json::json!({}), 1)
+            .unwrap();
+
+        // The move is still waiting to reach the server: keep the copy.
+        assert_eq!(store.delete_unplaced_moves(&archive).unwrap(), 0);
+        assert!(store.get_message(&moved).is_ok());
+
+        // Sent (or refused) and the folder synced, still no UID: remove it.
+        store.delete_op(&op).unwrap();
+        assert_eq!(store.delete_unplaced_moves(&archive).unwrap(), 1);
+        assert!(store.get_message(&moved).is_err());
+        assert!(store.get_message(&stays).is_ok());
     }
 }

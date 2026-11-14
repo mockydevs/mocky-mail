@@ -94,6 +94,8 @@ export type MessageDetail = MessageListItem & {
   blockedRemoteImages: number;
   attachments: AttachmentMeta[];
   messageIdHeader: string | null;
+  /** In-Reply-To of this message (for continuing a saved reply draft). */
+  inReplyTo: string | null;
   references: string[];
 };
 
@@ -151,7 +153,7 @@ export type OutboxState =
   | { state: 'queued'; next_attempt_at: number; maybe_sent: boolean }
   | { state: 'sending'; started_at: number }
   | { state: 'sent'; at: number }
-  | { state: 'failed'; reason: 'rejected' | 'gave_up' | 'too_large'; message: string }
+  | { state: 'failed'; reason: 'rejected' | 'gave_up' | 'too_large' | 'unconfirmed'; message: string }
   | { state: 'cancelled' };
 
 export interface OutboxEntry {
@@ -173,6 +175,8 @@ export interface Settings {
   theme: ThemeSetting;
   remoteImages: 'block' | 'allow';
   notifications: boolean;
+  /** A short chime with each new-mail notification. */
+  sound: boolean;
 }
 
 export interface SyncStatus {

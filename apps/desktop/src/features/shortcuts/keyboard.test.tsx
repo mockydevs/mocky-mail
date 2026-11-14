@@ -42,9 +42,8 @@ describe('keyboard shortcuts', () => {
     expect(screen.getByRole('form', { name: 'Reply' })).toBeInTheDocument();
     await user.keyboard('{Escape}');
     await user.keyboard('a');
-    expect(within(screen.getByRole('form', { name: 'Reply all' })).getByLabelText('Cc')).toHaveValue(
-      'Amina Hassan <amina@studio.example>',
-    );
+    const cc = within(within(screen.getByRole('form', { name: 'Reply all' })).getByRole('list', { name: 'Cc recipients' }));
+    expect(cc.getByRole('button', { name: 'Remove Amina Hassan <amina@studio.example>' })).toBeInTheDocument();
     await user.keyboard('{Escape}');
     await user.keyboard('f');
     expect(screen.getByRole('form', { name: 'Forward' })).toBeInTheDocument();

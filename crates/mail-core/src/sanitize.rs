@@ -89,8 +89,126 @@ const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
 ];
 
 fn is_remote(url: &str) -> bool {
-    let lower = url.trim_start().to_ascii_lowercase();
+    // Read the URL the way a browser does: it drops leading control
+    // characters and spaces, and every tab and newline anywhere, so
+    // `ht\ttps://` still loads over https.
+    let lower: String = url
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(6)
+        .collect::<String>()
+        .to_ascii_lowercase();
     lower.starts_with("http:") || lower.starts_with("https:")
+}
+
+/// A `bgcolor` value: a hex or named colour, nothing that could load or run.
+fn is_plain_colour_value(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .strip_prefix('#')
+            .unwrap_or(value)
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric())
+}
+
+/// `background` keywords that are not colours.
+const BACKGROUND_KEYWORDS: &[&str] = &[
+    "none", "repeat", "space", "round", "center", "top", "bottom", "left", "right", "fixed",
+    "scroll", "local", "auto", "cover", "contain",
+];
+
+/// Whether one `background` token is a colour: `#hex`, `rgb()`/`hsl()`
+/// with plain numbers, or a colour name.
+fn is_colour_token(token: &str) -> bool {
+    if let Some(hex) = token.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    for function in ["rgb(", "rgba(", "hsl(", "hsla("] {
+        if let Some(inner) = token
+            .strip_prefix(function)
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            return inner.chars().all(|c| {
+                c.is_ascii_digit() || " .,%/-".contains(c) || c == 'd' || c == 'e' || c == 'g'
+            });
+        }
+    }
+    (3..=20).contains(&token.len())
+        && token.chars().all(|c| c.is_ascii_alphabetic())
+        && !BACKGROUND_KEYWORDS.contains(&token)
+}
+
+/// The colour in a `background` shorthand value, if it has one and nothing
+/// that could load a URL or run code.
+fn background_colour(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    let lower = lower.strip_suffix("!important").unwrap_or(&lower).trim();
+    if [
+        "url(",
+        "image",
+        "expression",
+        "var(",
+        "attr(",
+        "\\",
+        "\"",
+        "'",
+        "/*",
+        "<",
+        "{",
+    ]
+    .iter()
+    .any(|bad| lower.contains(bad))
+    {
+        return None;
+    }
+    // Split on spaces outside brackets, so `rgb(1, 2, 3)` stays whole.
+    let mut tokens = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, c) in lower.char_indices() {
+        match c {
+            '(' => depth = depth.saturating_add(1),
+            ')' => depth = depth.saturating_sub(1),
+            c if c.is_whitespace() && depth == 0 => {
+                tokens.push(lower.get(start..i).unwrap_or_default());
+                start = i.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    tokens.push(lower.get(start..).unwrap_or_default());
+    tokens
+        .into_iter()
+        .find(|token| is_colour_token(token))
+        .map(str::to_owned)
+}
+
+/// Keep the colour from a `background:` shorthand as `background-color`.
+/// Email buttons are often `<td style="background:#FF5400">` with white
+/// text; dropping the colour leaves the text invisible.
+fn keep_background_colour(style: &str) -> Cow<'_, str> {
+    if !style.to_ascii_lowercase().contains("background") {
+        return Cow::Borrowed(style);
+    }
+    let declarations: Vec<String> = style
+        .split(';')
+        .map(|declaration| {
+            let Some((property, value)) = declaration.split_once(':') else {
+                return declaration.to_owned();
+            };
+            if !property.trim().eq_ignore_ascii_case("background") {
+                return declaration.to_owned();
+            }
+            // No colour: leave it for the allow-list to remove.
+            background_colour(value).map_or_else(
+                || declaration.to_owned(),
+                |colour| format!("background-color: {colour}"),
+            )
+        })
+        .collect();
+    Cow::Owned(declarations.join(";"))
 }
 
 /// Clean an HTML email body.
@@ -110,6 +228,11 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
         .add_generic_attributes(["style"])
         .filter_style_properties(ALLOWED_STYLE_PROPERTIES.iter().copied().collect())
         .rm_tag_attributes("img", ["srcset"])
+        // Old-style cell colours, still common in email buttons and banners.
+        .add_tag_attributes("table", ["bgcolor"])
+        .add_tag_attributes("tr", ["bgcolor"])
+        .add_tag_attributes("td", ["bgcolor"])
+        .add_tag_attributes("th", ["bgcolor"])
         .attribute_filter(move |element, attribute, value| {
             if remote == RemoteContent::Block
                 && element == "img"
@@ -119,7 +242,13 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
                 counter.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
-            Some(Cow::Borrowed(value))
+            match attribute {
+                "bgcolor" => is_plain_colour_value(value).then_some(Cow::Borrowed(value)),
+                // Runs before the CSS property allow-list, which then
+                // removes whatever is left of `background`.
+                "style" => Some(keep_background_colour(value)),
+                _ => Some(Cow::Borrowed(value)),
+            }
         });
 
     let html = builder.clean(html).to_string();
@@ -236,6 +365,25 @@ mod tests {
     }
 
     #[test]
+    fn tabs_and_newlines_in_the_scheme_do_not_unblock_images() {
+        // Browsers strip tabs and newlines from URLs, so these load over https.
+        for html in [
+            "<img src=\"ht\ttps://t.example/p.gif\">",
+            "<img src=\"ht&#10;tps://t.example/p.gif\">",
+            "<img src=\"h&#13;ttp://t.example/p.gif\">",
+            "<img src=\" \t https://t.example/p.gif\">",
+        ] {
+            let result = sanitize_html(html, RemoteContent::Block);
+            assert!(
+                !result.html.contains("t.example"),
+                "{html} kept: {}",
+                result.html
+            );
+            assert_eq!(result.blocked_remote_images, 1, "{html}");
+        }
+    }
+
+    #[test]
     fn allows_remote_images_when_trusted() {
         let result = sanitize_html(
             r#"<img src="https://cdn.example/a.png"><img src="//cdn.example/b.png">"#,
@@ -261,6 +409,75 @@ mod tests {
         for banned in ["position", "background-image", "behavior", "t.example"] {
             assert!(!out.contains(banned), "{banned} survived: {out}");
         }
+    }
+
+    #[test]
+    fn button_colours_survive() {
+        // A real M-Pesa payment button: white text on an orange cell.
+        let out = clean(
+            r##"<table><tr><td style="background:#FF5400;border-radius:4px;"><a href="https://pay.example/x" style="color:#ffffff;">Pay KES 8,500 with M-Pesa</a></td><td bgcolor="#FF5400">x</td><th bgcolor="orange">y</th></tr></table>"##,
+        );
+        assert!(
+            out.contains("background-color:#ff5400") || out.contains("background-color: #ff5400"),
+            "{out}"
+        );
+        assert!(out.contains("border-radius"), "{out}");
+        assert!(out.contains(r##"bgcolor="#FF5400""##), "{out}");
+        assert!(out.contains(r#"bgcolor="orange""#), "{out}");
+        assert!(
+            out.contains("color:#ffffff") || out.contains("color: #ffffff"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn background_keeps_only_a_plain_colour() {
+        for (style, colour) in [
+            (
+                "background: #fff url(https://t.example/p.gif) no-repeat",
+                None,
+            ),
+            ("background: red", Some("red")),
+            (
+                "background: rgb(255, 84, 0) !important",
+                Some("rgb(255, 84, 0)"),
+            ),
+            ("background: none", None),
+            ("background: image-set('x.png' 1x)", None),
+            ("background: expression(alert(1))", None),
+            ("background: \\75 rl(x)", None),
+            ("background: var(--x)", None),
+        ] {
+            let out = clean(&format!(r#"<p style="{style}">x</p>"#));
+            assert!(
+                !out.contains("t.example") && !out.contains("url") && !out.contains("expression"),
+                "{style}: {out}"
+            );
+            assert!(!out.contains("background:"), "{style}: {out}");
+            match colour {
+                Some(c) => assert!(
+                    out.contains(&format!("background-color:{c}"))
+                        || out.contains(&format!("background-color: {c}")),
+                    "{style}: {out}"
+                ),
+                None => assert!(!out.contains("background"), "{style}: {out}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bgcolor_must_be_a_plain_colour() {
+        let out = clean(
+            r##"<table bgcolor="#123456"><tr bgcolor="red"><td bgcolor="url(https://t.example/x)">a</td><td bgcolor="red;x:y">b</td></tr></table><p bgcolor="red">c</p>"##,
+        );
+        assert!(out.contains(r##"bgcolor="#123456""##));
+        assert!(out.contains(r#"<tr bgcolor="red">"#));
+        assert!(!out.contains("t.example"));
+        assert!(!out.contains("red;x"));
+        assert!(
+            out.contains("<p>c</p>"),
+            "bgcolor only on table cells: {out}"
+        );
     }
 
     #[test]

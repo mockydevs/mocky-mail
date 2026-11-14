@@ -12,12 +12,31 @@ describe('adding an account', () => {
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
     await user.type(field('Email address'), 'don@gmail.com');
     await user.tab();
-    expect(await within(form()).findByText(/This looks like a Google account/)).toBeInTheDocument();
+    expect(await within(form()).findByText(/This is a Google account/)).toBeInTheDocument();
+    // The suggested sign-in moves up under the email; the other provider steps aside.
+    expect(within(form()).getByRole('button', { name: 'Continue with Google' })).toHaveClass('btn--primary');
+    expect(within(form()).queryByRole('button', { name: 'Continue with Microsoft' })).not.toBeInTheDocument();
     expect(within(form()).getByText(/Gmail needs an app password here/)).toBeInTheDocument();
     await user.click(within(form()).getByRole('button', { name: 'Advanced: server settings' }));
     const imap = within(form()).getByRole('group', { name: 'Incoming mail (IMAP)' });
     expect(within(imap).getByLabelText('Server')).toHaveValue('imap.gmail.com');
     expect(within(imap).getByLabelText('Port')).toHaveValue('993');
+  });
+
+  it('shows and hides the password without losing it', async () => {
+    const { user } = renderApp({ accounts: [] });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    const password = field('Password or app password');
+    await user.type(password, 'abcd efgh ijkl');
+    expect(password).toHaveAttribute('type', 'password');
+    const toggle = within(form()).getByRole('button', { name: 'Show password' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await user.click(toggle);
+    expect(password).toHaveAttribute('type', 'text');
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(password).toHaveValue('abcd efgh ijkl');
+    await user.click(toggle);
+    expect(password).toHaveAttribute('type', 'password');
   });
 
   it('opens manual settings with a guess when the provider is unknown', async () => {
@@ -100,7 +119,7 @@ describe('adding an account', () => {
     const { user } = renderApp({ accounts: [] });
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
     await user.type(field('Email address'), 'don@mocky.co.ke');
-    await user.type(field('Your name (shown to people you email)'), 'Don');
+    await user.type(field('Your name (optional)'), 'Don');
     await user.tab();
     await user.type(field('Password or app password'), 'correct horse');
     await user.click(within(form()).getByRole('button', { name: 'Add account' }));

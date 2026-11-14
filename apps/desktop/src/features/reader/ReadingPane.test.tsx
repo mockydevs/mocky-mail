@@ -19,6 +19,32 @@ describe('reading pane', () => {
     expect(within(reader()).queryByRole('button', { name: /Show images/ })).not.toBeInTheDocument();
   });
 
+  it('shows HTML mail dark in dark mode, with a per-email switch back to original colours', async () => {
+    const { user } = renderApp({ settings: { theme: 'dark', remoteImages: 'block', notifications: false, sound: false } });
+    await user.click((await rows()).getByRole('button', { name: /Build server/ }));
+    const frame = await within(reader()).findByTitle('Message: Nightly build passed on main');
+    expect(frame.getAttribute('srcdoc')).toContain('invert(1)');
+
+    const toggle = within(reader()).getByRole('button', { name: 'Show original colours' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(within(reader()).getByTitle('Message: Nightly build passed on main').getAttribute('srcdoc')).not.toContain('invert(');
+
+    // The choice is per email: the next HTML email opens dark again.
+    await user.click((await rows()).getByRole('button', { name: /Wanjiru/ }));
+    await user.click((await rows()).getByRole('button', { name: /Build server/ }));
+    const again = await within(reader()).findByTitle('Message: Nightly build passed on main');
+    expect(again.getAttribute('srcdoc')).toContain('invert(1)');
+  });
+
+  it('has no colours switch in light mode', async () => {
+    const { user } = renderApp({ settings: { theme: 'light', remoteImages: 'block', notifications: false, sound: false } });
+    await user.click((await rows()).getByRole('button', { name: /Build server/ }));
+    await within(reader()).findByTitle('Message: Nightly build passed on main');
+    expect(within(reader()).queryByRole('button', { name: 'Show original colours' })).not.toBeInTheDocument();
+  });
+
   it('gives HTML mail the rest of the pane, with attachments above and quick reply below', async () => {
     const { user } = renderApp({
       messages: MOCK_MESSAGES.map((m) =>

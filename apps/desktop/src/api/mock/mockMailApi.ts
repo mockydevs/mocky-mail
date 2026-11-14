@@ -398,8 +398,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         const folder = folders.find((f) => f.accountId === acc.id && f.role === 'drafts');
         if (!folder) throw appError('not_found', 'This account has no Drafts folder.');
         removeDraft(draft.draftMessageId);
-        const id = `d${String(seq++)}`;
-        const draftMessageId = `<draft-${id}@mock.example>`;
+        const id = `saved${String(seq++)}`;
+        const draftMessageId = `<${id}@mock.example>`;
         messages = [
           ...messages,
           {
@@ -427,6 +427,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
               size: a.size,
             })),
             messageIdHeader: draftMessageId,
+            inReplyTo: draft.inReplyTo,
             references: draft.inReplyTo && !draft.references.includes(draft.inReplyTo)
               ? [...draft.references, draft.inReplyTo]
               : draft.references,

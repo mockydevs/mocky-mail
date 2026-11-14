@@ -322,8 +322,28 @@ fn update(app: &AppHandle, state: &AppState, id: &str, item: &OutboxItem) -> App
     Ok(())
 }
 
+/// Save `item` in place of `before`, unless something else changed it first
+/// (the worker started sending, or the user acted in another view).
+fn replace(
+    app: &AppHandle,
+    state: &AppState,
+    id: &str,
+    before: &OutboxItem,
+    item: &OutboxItem,
+) -> AppResult<bool> {
+    let replaced = state.store.replace_outbox_item(id, before, item)?;
+    if replaced {
+        events::outbox_changed(app, state);
+    }
+    Ok(replaced)
+}
+
 fn transition(result: Result<(), mail_core::outbox::TransitionError>) -> AppResult<()> {
     result.map_err(|e| AppError::invalid(format!("That isn't possible right now: {e}.")))
+}
+
+fn changed_meanwhile() -> AppError {
+    AppError::invalid("This message changed a moment ago (it may be sending now). Try again.")
 }
 
 /// `outbox_send_now`: skip the retry wait, or retry a failed message.
@@ -333,9 +353,12 @@ pub fn outbox_send_now(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> AppResult<()> {
-    let mut item = state.store.get_outbox(&id)?.entry.item;
+    let before = state.store.get_outbox(&id)?.entry.item;
+    let mut item = before.clone();
     transition(item.send_now(now()))?;
-    update(&app, &state, &id, &item)?;
+    if !replace(&app, &state, &id, &before, &item)? {
+        return Err(changed_meanwhile());
+    }
     state.outbox_wake.notify_one();
     Ok(())
 }
@@ -343,9 +366,14 @@ pub fn outbox_send_now(
 /// `outbox_cancel`.
 #[tauri::command]
 pub fn outbox_cancel(app: AppHandle, state: State<'_, Arc<AppState>>, id: String) -> AppResult<()> {
-    let mut item = state.store.get_outbox(&id)?.entry.item;
+    let before = state.store.get_outbox(&id)?.entry.item;
+    let mut item = before.clone();
     transition(item.cancel())?;
-    state.store.delete_outbox(&id)?;
+    // Only if it is still exactly as checked: a send that started a moment
+    // ago can't be cancelled, and must not vanish from the Outbox.
+    if !state.store.delete_outbox_if(&id, &before)? {
+        return Err(changed_meanwhile());
+    }
     events::outbox_changed(&app, &state);
     Ok(())
 }
@@ -374,7 +402,10 @@ pub async fn outbox_edit(
     let summary = parse_summary(&message.raw)?;
     let body = parse_body(&message.raw)?;
     let attachments = copy_attachments(&state, &message.raw, &format!("outbox-{id}")).await?;
-    state.store.delete_outbox(&id)?;
+    // If sending started meanwhile, editing would make a second copy.
+    if !state.store.delete_outbox_if(&id, &message.entry.item)? {
+        return Err(changed_meanwhile());
+    }
     events::outbox_changed(&app, &state);
     Ok(Draft {
         account_id: message.entry.account_id,
@@ -452,63 +483,130 @@ async fn process(app: &AppHandle, state: &AppState) -> AppResult<Duration> {
     let mut wait = MAX_IDLE;
     for entry in state.store.list_outbox()? {
         let t = now();
-        match entry.item.state {
+        let result = match entry.item.state {
             OutboxState::Queued {
                 maybe_sent: true, ..
-            } => resolve_duplicate(app, state, &entry).await?,
+            } => resolve_duplicate(app, state, &entry).await,
             OutboxState::Queued {
                 next_attempt_at, ..
             } if next_attempt_at > t => {
                 wait = wait.min(Duration::from_secs(next_attempt_at.saturating_sub(t)));
+                Ok(())
             }
-            OutboxState::Queued { .. } => Box::pin(send_one(app, state, &entry)).await?,
-            OutboxState::Sent { .. } | OutboxState::Cancelled => {
-                state.store.delete_outbox(&entry.id)?;
-                events::outbox_changed(app, state);
-            }
-            OutboxState::Sending { .. } | OutboxState::Failed { .. } => {}
+            OutboxState::Queued { .. } => Box::pin(send_one(app, state, &entry)).await,
+            OutboxState::Sent { .. } | OutboxState::Cancelled => forget(app, state, &entry.id),
+            OutboxState::Sending { .. } | OutboxState::Failed { .. } => Ok(()),
+        };
+        // One message that can't be handled (an unreadable entry, a
+        // database hiccup) must not hold up every message behind it.
+        if let Err(error) = result {
+            eprintln!("outbox: skipping one message for now: {error}");
         }
     }
     Ok(wait.max(Duration::from_secs(1)))
 }
 
-/// After a crash mid-send: look in Sent before sending again.
+/// Remove a finished entry (sent or cancelled) from the Outbox.
+fn forget(app: &AppHandle, state: &AppState, id: &str) -> AppResult<()> {
+    state.store.delete_outbox(id)?;
+    events::outbox_changed(app, state);
+    Ok(())
+}
+
+/// After a crash mid-send: look in Sent before sending again. If there is
+/// no way to look, the message waits for the user instead of being resent
+/// (it might arrive twice) or left "checking" for ever.
 async fn resolve_duplicate(
     app: &AppHandle,
     state: &AppState,
     entry: &OutboxEntry,
 ) -> AppResult<()> {
-    let account = state.store.get_account(&entry.account_id)?;
-    let sent = match entry.sent_folder_hint.clone() {
-        Some(path) => Some(path),
-        None => folder_path(state, &account.id, FolderRole::Sent)?,
+    let mut item = entry.item.clone();
+    match check_sent(state, entry).await? {
+        SentCheck::TryLater => return Ok(()),
+        SentCheck::Done(found) => transition(item.resolve_duplicate_check(found, now()))?,
+        SentCheck::Impossible(why) => transition(item.cannot_confirm(why.to_owned()))?,
+    }
+    // Cancelled or edited meanwhile: nothing left to resolve.
+    replace(app, state, &entry.id, &entry.item, &item)?;
+    Ok(())
+}
+
+/// What looking for a message in Sent found out.
+#[derive(Debug, PartialEq, Eq)]
+enum SentCheck {
+    /// Looked: whether it is there.
+    Done(bool),
+    /// Offline, signed out or a server hiccup: look again on the next round.
+    TryLater,
+    /// Looking can't work. The reason is shown to the user.
+    Impossible(&'static str),
+}
+
+const NO_SENT_FOLDER: &str = "Mocky Mail closed while sending this message and there is no Sent folder to check whether it went out.";
+const SENT_UNREADABLE: &str = "Mocky Mail closed while sending this message and the server wouldn't open the Sent folder to check whether it went out.";
+const NO_MESSAGE_ID: &str =
+    "Mocky Mail closed while sending this message and can't look it up in Sent.";
+
+/// What to do when one Sent folder can't be searched.
+fn after_search_error(error: &mail_sync::SyncError) -> Option<SentCheck> {
+    match error {
+        // Renamed or removed: try the next candidate folder.
+        mail_sync::SyncError::Refused(_) => None,
+        mail_sync::SyncError::Invalid(_) => Some(SentCheck::Impossible(NO_MESSAGE_ID)),
+        _ => Some(SentCheck::TryLater),
+    }
+}
+
+async fn check_sent(state: &AppState, entry: &OutboxEntry) -> AppResult<SentCheck> {
+    let Some(message_id) = entry.message_id_header.as_deref() else {
+        return Ok(SentCheck::Impossible(NO_MESSAGE_ID));
     };
-    let found = match (sent, entry.message_id_header.as_deref()) {
-        (Some(path), Some(message_id)) => {
-            let Ok(credentials) = credentials::for_account(state, &account).await else {
-                return Ok(());
-            };
-            let Ok(mut conn) = ImapConnection::connect(&to_sync(&account.imap), &credentials).await
-            else {
-                return Ok(());
-            };
-            let found = conn.contains_message_id(&path, message_id).await;
-            conn.logout().await;
-            match found {
-                Ok(found) => found,
-                Err(_) => return Ok(()),
+    let account = state.store.get_account(&entry.account_id)?;
+    // The folder named when it was queued, then today's Sent folder in case
+    // that one has been renamed since.
+    let mut folders: Vec<String> = entry.sent_folder_hint.iter().cloned().collect();
+    if let Some(path) = folder_path(state, &account.id, FolderRole::Sent)?
+        && !folders.contains(&path)
+    {
+        folders.push(path);
+    }
+    if folders.is_empty() {
+        return Ok(SentCheck::Impossible(NO_SENT_FOLDER));
+    }
+    let Ok(credentials) = credentials::for_account(state, &account).await else {
+        return Ok(SentCheck::TryLater);
+    };
+    let Ok(mut conn) = ImapConnection::connect(&to_sync(&account.imap), &credentials).await else {
+        return Ok(SentCheck::TryLater);
+    };
+    let mut outcome = SentCheck::Impossible(SENT_UNREADABLE);
+    for path in &folders {
+        match conn.contains_message_id(path, message_id).await {
+            Ok(found) => {
+                outcome = SentCheck::Done(found);
+                break;
+            }
+            Err(error) => {
+                if let Some(stop) = after_search_error(&error) {
+                    outcome = stop;
+                    break;
+                }
             }
         }
-        _ => false,
-    };
-    let mut item = entry.item.clone();
-    transition(item.resolve_duplicate_check(found, now()))?;
-    update(app, state, &entry.id, &item)
+    }
+    conn.logout().await;
+    Ok(outcome)
 }
 
 async fn send_one(app: &AppHandle, state: &AppState, entry: &OutboxEntry) -> AppResult<()> {
     let account = state.store.get_account(&entry.account_id)?;
-    let message = state.store.get_outbox(&entry.id)?;
+    let message = match state.store.get_outbox(&entry.id) {
+        Ok(message) => message,
+        // Cancelled or edited since the list was read: skip it.
+        Err(mail_store::StoreError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let mut item: OutboxItem = entry.item.clone();
     let estimated = u64::try_from(message.raw.len()).unwrap_or(u64::MAX);
     if estimated > limit_for(&account) {
@@ -516,12 +614,16 @@ async fn send_one(app: &AppHandle, state: &AppState, entry: &OutboxEntry) -> App
             estimated,
             limit: limit_for(&account),
         }))?;
-        return update(app, state, &entry.id, &item);
+        replace(app, state, &entry.id, &entry.item, &item)?;
+        return Ok(());
     }
     // Saved before the network call: if the app dies now, restart recovery
-    // knows this message may have gone out.
+    // knows this message may have gone out. Claimed only if nobody cancelled
+    // or edited it since the list was read.
     transition(item.begin_send(now()))?;
-    update(app, state, &entry.id, &item)?;
+    if !replace(app, state, &entry.id, &entry.item, &item)? {
+        return Ok(());
+    }
 
     let outcome = match credentials::for_account(state, &account).await {
         Err(error) => SendOutcome::Transient(error.message),
@@ -595,4 +697,30 @@ async fn after_delivery(state: &AppState, account: &Account, entry: &OutboxEntry
         }
     }
     state.wake_sync(Some(&account.id));
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use mail_sync::SyncError;
+
+    #[test]
+    fn a_missing_sent_folder_ends_the_check_instead_of_looping() {
+        // A renamed or removed folder: move on to the next candidate.
+        assert_eq!(
+            after_search_error(&SyncError::Refused("NO no such mailbox".into())),
+            None
+        );
+        // Offline or a hiccup: try again later.
+        assert_eq!(
+            after_search_error(&SyncError::Dropped),
+            Some(SentCheck::TryLater)
+        );
+        // A Message-ID that can't be searched for never will be.
+        assert_eq!(
+            after_search_error(&SyncError::Invalid("line break".into())),
+            Some(SentCheck::Impossible(NO_MESSAGE_ID))
+        );
+    }
 }

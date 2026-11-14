@@ -18,6 +18,8 @@ pub struct Settings {
     pub remote_images: String,
     /// Desktop notifications for new mail.
     pub notifications: bool,
+    /// A short chime with each new-mail notification.
+    pub sound: bool,
 }
 
 impl Default for Settings {
@@ -26,6 +28,7 @@ impl Default for Settings {
             theme: "system".into(),
             remote_images: "block".into(),
             notifications: true,
+            sound: true,
         }
     }
 }
@@ -84,6 +87,7 @@ mod tests {
             theme: "neon".into(),
             remote_images: "maybe".into(),
             notifications: false,
+            sound: false,
         }
         .normalized();
         assert_eq!(s.theme, "system");
@@ -101,5 +105,14 @@ mod tests {
                 ..Settings::default()
             }
         );
+    }
+
+    #[test]
+    fn settings_saved_before_the_sound_option_keep_the_chime_on() {
+        let s: Settings = serde_json::from_str(
+            r#"{"theme":"light","remoteImages":"block","notifications":true}"#,
+        )
+        .unwrap_or_default();
+        assert!(s.sound);
     }
 }

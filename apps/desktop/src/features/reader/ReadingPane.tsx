@@ -5,6 +5,7 @@ import { errorTitle, toAppError } from '../../api/errors';
 import type { Account, AppError, FolderRole, MessageDetail, MessageListItem } from '../../api/types';
 import { formatBytes, formatLongDate } from '../../lib/format';
 import { useLoad } from '../../lib/useLoad';
+import type { Theme } from '../../theme/useTheme';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
 import { formatMailbox, formatMailboxes, replyDraft, toolbarActions } from '../compose/seed';
@@ -28,6 +29,8 @@ interface Props extends ReaderActions {
   account: Account | undefined;
   role: FolderRole | null;
   alwaysLoadImages: boolean;
+  /** App theme; HTML emails are shown dark to match. */
+  theme: Theme;
   /** Loaded message, so keyboard shortcuts can reply to it. */
   onLoaded: (message: MessageDetail | null) => void;
 }
@@ -48,8 +51,10 @@ export const ReadingPane = forwardRef<HTMLElement, Props>(function ReadingPane(p
 
 const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(function MessageView(props, ref) {
   const api = useMailApi();
-  const { item, account, role, alwaysLoadImages, onLoaded } = props;
+  const { item, account, role, alwaysLoadImages, theme, onLoaded } = props;
   const [showImages, setShowImages] = useState(false);
+  // Per message: dark mode can be switched off for one email that reads badly inverted.
+  const [originalColours, setOriginalColours] = useState(false);
   const allowRemote = alwaysLoadImages || showImages;
   const loaded = useLoad(`message:${item.id}:${String(allowRemote)}`, 0, () =>
     api.getMessage(item.id, allowRemote).then((m) => {
@@ -227,6 +232,20 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
             <time dateTime={message.date === null ? undefined : new Date(message.date * 1000).toISOString()}>
               {formatLongDate(message.date)}
             </time>
+            {isHtml && theme === 'dark' && (
+              <button
+                type="button"
+                className="icon-btn"
+                aria-pressed={originalColours}
+                aria-label="Show original colours"
+                title={originalColours ? 'Show this email in dark mode' : 'Show this email in its original colours'}
+                onClick={() => {
+                  setOriginalColours((on) => !on);
+                }}
+              >
+                <Icon name={originalColours ? 'moon' : 'sun'} />
+              </button>
+            )}
           </div>
         </header>
 
@@ -315,7 +334,12 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
           className="reader__frame"
           style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }}
         >
-          <SandboxedHtml title={`Message: ${message.subject}`} html={message.html ?? ''} />
+          <SandboxedHtml
+            title={`Message: ${message.subject}`}
+            html={message.html ?? ''}
+            theme={originalColours ? 'light' : theme}
+            allowRemoteImages={allowRemote}
+          />
         </div>
       )}
 

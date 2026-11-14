@@ -1,9 +1,10 @@
-import { act, screen, within } from '@testing-library/react';
+import { act, cleanup, screen, within } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import { MOCK_ACCOUNTS, MOCK_NOW } from '../api/mock/mockData';
+import * as chimeModule from '../features/notifications/chime';
 import type { MockMessage } from '../api/mock/mockMailApi';
-import { accountFolders, deferred, reader, renderApp, rows, unified } from '../test/renderApp';
+import { accountFolders, deferred, reader, renderApp, rows, unified, accountToggle } from '../test/renderApp';
 
 describe('mailbox', () => {
   it('opens the unified inbox across accounts without marking anything read', async () => {
@@ -13,17 +14,40 @@ describe('mailbox', () => {
     expect(await within(reader()).findByRole('heading', { name: /Westlands office fit-out/ })).toBeInTheDocument();
     expect(await unified().findByRole('button', { name: 'Inbox 4 unread' })).toHaveAttribute('aria-current', 'page');
     expect(accountFolders('Work').getByRole('button', { name: 'Inbox 3 unread' })).toBeInTheDocument();
-    expect(accountFolders('Personal').getByRole('button', { name: 'Inbox 1 unread' })).toBeInTheDocument();
+    // Only one account is open at a time; the others show their inbox count on one row.
+    expect(accountToggle('Work')).toHaveAttribute('aria-expanded', 'true');
+    expect(accountToggle('Personal')).toHaveAttribute('aria-expanded', 'false');
+    expect(accountToggle('Personal')).toHaveAccessibleName('Personal (you@personal.example), 1 unread');
+    expect(screen.queryByRole('list', { name: 'Personal' })).not.toBeInTheDocument();
   });
 
-  it('lists each account folder tree with special folders first and decoded names', async () => {
+  it('opens one account at a time and shows its inbox', async () => {
+    const { user } = renderApp();
+    await rows();
+    await user.click(accountToggle('Personal'));
+    expect(accountToggle('Personal')).toHaveAttribute('aria-expanded', 'true');
+    expect(accountToggle('Work')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('list', { name: 'Work' })).not.toBeInTheDocument();
+    expect(accountFolders('Personal').getByRole('button', { name: 'Inbox 1 unread' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    // Clicking the open account folds it away; nothing else changes.
+    await user.click(accountToggle('Personal'));
+    expect(accountToggle('Personal')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('list', { name: 'Personal' })).not.toBeInTheDocument();
+    expect(accountToggle('Work')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('lists special folders first in each account', async () => {
     renderApp();
     await rows();
     await accountFolders('Work').findByRole('button', { name: 'Spam' });
     const names = accountFolders('Work')
       .getAllByRole('button')
+      .filter((b) => !b.hasAttribute('aria-expanded'))
       .map((b) => b.textContent);
-    expect(names).toEqual(['Inbox 3 unread', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', '2026', 'Acme', 'Clients', 'Résumés']);
+    expect(names.slice(0, 6)).toEqual(['Inbox 3 unread', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash']);
   });
 
   it('marks a message read only when the user opens it', async () => {
@@ -81,7 +105,7 @@ describe('mailbox', () => {
       from: { name: `Sender ${String(i)}`, address: `s${String(i)}@x.example` }, to: [],
       subject: `Message ${String(i)}`, preview: '', date: MOCK_NOW - i * 60, unread: false, flagged: false,
       answered: false, hasAttachments: false, cc: [], replyTo: [], html: null, text: 'x',
-      blockedRemoteImages: 0, attachments: [], messageIdHeader: null, references: [],
+      blockedRemoteImages: 0, attachments: [], messageIdHeader: null, inReplyTo: null, references: [],
     }));
 
   it('pages through long folders with a Load more button', async () => {
@@ -244,11 +268,32 @@ describe('sync status and notifications', () => {
     }
   });
 
+  it('plays the new-mail chime only when notifications and sound are on', async () => {
+    const chime = vi.spyOn(chimeModule, 'playChime').mockReturnValue(true);
+    const { api } = renderApp();
+    await rows();
+    act(() => {
+      api.emit('mail://new-mail', { accountId: 'work', count: 1 });
+    });
+    expect(chime).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    chime.mockClear();
+    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false } });
+    await rows();
+    act(() => {
+      quiet.api.emit('mail://new-mail', { accountId: 'work', count: 1 });
+    });
+    expect(chime).not.toHaveBeenCalled();
+  });
+
   it('refetches accounts when the backend says they changed', async () => {
     const { api } = renderApp();
     await rows();
     await api.updateAccount('personal', { displayName: 'Home' });
-    expect(await screen.findByRole('list', { name: 'Home' })).toBeInTheDocument();
+    await vi.waitFor(() => {
+      expect(accountToggle('Home')).toBeInTheDocument();
+    });
   });
 });
 

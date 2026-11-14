@@ -47,13 +47,18 @@ impl ErrorKind {
 #[derive(Debug, Error)]
 pub enum SyncError {
     /// Could not open a connection.
-    #[error("couldn't reach {host}:{port}. Check the server name and your connection.")]
+    #[error("couldn't reach {host}:{port}: {reason}.")]
     Connect {
         /// Server host.
         host: String,
         /// Server port.
         port: u16,
+        /// Why, in plain words, so a blocked port and a typo look different.
+        reason: String,
     },
+    /// The connection broke mid-conversation (Wi-Fi lost, laptop slept).
+    #[error("the connection to the mail server dropped.")]
+    Dropped,
     /// No answer in time.
     #[error("{host} took too long to answer.")]
     Timeout {
@@ -73,9 +78,15 @@ pub enum SyncError {
         "the server didn't accept the login. Check the email and password (some providers need an app password)."
     )]
     Auth,
-    /// The server answered with an error.
+    /// The server answered with an error that may pass (a dropped
+    /// connection, or a refusal it marked as temporary).
     #[error("the mail server reported an error: {0}")]
     Protocol(String),
+    /// The server understood the request and said no (IMAP `NO` or `BAD`).
+    /// Asking again won't help: the folder is gone, the message was moved
+    /// elsewhere, and so on.
+    #[error("the mail server refused: {0}")]
+    Refused(String),
     /// Bad settings.
     #[error("{0}")]
     Config(String),
@@ -95,18 +106,48 @@ pub enum SyncError {
     },
 }
 
+/// Plain words for a failed TCP connect. The OS message is kept for the
+/// cases we don't recognise, so support can still tell what happened.
+#[must_use]
+pub fn connect_reason(error: &std::io::Error) -> String {
+    use std::io::ErrorKind as Io;
+    match error.kind() {
+        Io::ConnectionRefused => {
+            "the server refused the connection. The port may be wrong, or a firewall is blocking it".to_owned()
+        }
+        Io::PermissionDenied => {
+            "this computer blocked the connection. Antivirus or firewall software may be stopping Mocky Mail; allow it there".to_owned()
+        }
+        Io::NetworkUnreachable | Io::HostUnreachable | Io::NetworkDown => {
+            "there is no network route to the server. Check your internet connection".to_owned()
+        }
+        Io::ConnectionReset | Io::ConnectionAborted => {
+            "the connection was cut off straight away, often by a firewall or antivirus".to_owned()
+        }
+        _ => {
+            let text = error.to_string();
+            let lower = text.to_lowercase();
+            if lower.contains("lookup") || lower.contains("no such host") || lower.contains("not known") {
+                "the server name could not be found. Check the spelling".to_owned()
+            } else {
+                text
+            }
+        }
+    }
+}
+
 impl SyncError {
     /// The category for the interface.
     #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         match self {
-            Self::Connect { .. } | Self::Timeout { .. } => ErrorKind::Connect,
+            Self::Connect { .. } | Self::Timeout { .. } | Self::Dropped => ErrorKind::Connect,
             Self::Tls { .. } => ErrorKind::Tls,
             Self::Auth => ErrorKind::Auth,
             Self::Config(_) => ErrorKind::Config,
             Self::Invalid(_) => ErrorKind::Invalid,
             Self::Keyring(_) => ErrorKind::Keyring,
-            Self::Protocol(_) | Self::Send { .. } => ErrorKind::Internal,
+            Self::Protocol(_) | Self::Refused(_) | Self::Send { .. } => ErrorKind::Internal,
         }
     }
 
@@ -114,9 +155,10 @@ impl SyncError {
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         match self {
-            Self::Connect { .. } | Self::Timeout { .. } | Self::Protocol(_) => true,
+            Self::Connect { .. } | Self::Timeout { .. } | Self::Dropped | Self::Protocol(_) => true,
             Self::Send { permanent, .. } => !*permanent,
             Self::Tls { .. }
+            | Self::Refused(_)
             | Self::Auth
             | Self::Config(_)
             | Self::Invalid(_)
@@ -125,12 +167,23 @@ impl SyncError {
     }
 }
 
+/// Whether an IMAP `NO` carries a response code that means "try later"
+/// (RFC 5530: busy, locked, a rate limit or a server fault).
+#[must_use]
+pub fn is_temporary_refusal(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    ["UNAVAILABLE", "INUSE", "LIMIT", "SERVERBUG"]
+        .iter()
+        .any(|code| upper.contains(code))
+}
+
 impl From<async_imap::error::Error> for SyncError {
     fn from(error: async_imap::error::Error) -> Self {
         use async_imap::error::Error as E;
         match error {
-            E::Io(_) | E::ConnectionLost => Self::Protocol("the connection dropped".to_owned()),
-            E::No(text) | E::Bad(text) => Self::Protocol(text),
+            E::Io(_) | E::ConnectionLost => Self::Dropped,
+            E::No(text) if is_temporary_refusal(&text) => Self::Protocol(text),
+            E::No(text) | E::Bad(text) => Self::Refused(text),
             other => Self::Protocol(other.to_string()),
         }
     }
@@ -139,6 +192,54 @@ impl From<async_imap::error::Error> for SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_failures_say_why() {
+        use std::io::{Error, ErrorKind as Io};
+        let blocked = connect_reason(&Error::from(Io::PermissionDenied));
+        assert!(blocked.contains("Antivirus or firewall"), "{blocked}");
+        let refused = connect_reason(&Error::from(Io::ConnectionRefused));
+        assert!(refused.contains("refused"), "{refused}");
+        let unknown = connect_reason(&Error::other("No such host is known. (os error 11001)"));
+        assert!(unknown.contains("could not be found"), "{unknown}");
+        let other = connect_reason(&Error::other("something odd"));
+        assert_eq!(other, "something odd");
+        let error = SyncError::Connect {
+            host: "mail.example.com".into(),
+            port: 993,
+            reason: blocked,
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with("couldn't reach mail.example.com:993: this computer")
+        );
+    }
+
+    #[test]
+    fn server_refusals_are_final_unless_marked_temporary() {
+        use async_imap::error::Error as E;
+        let refused = SyncError::from(E::No(
+            r#"code: Some(TryCreate), info: Some("Mailbox doesn't exist")"#.into(),
+        ));
+        assert!(matches!(refused, SyncError::Refused(_)));
+        assert!(!refused.is_transient());
+        assert!(!SyncError::from(E::Bad("code: None, info: None".into())).is_transient());
+        for temporary in [
+            r#"code: Some(Unavailable), info: Some("try later")"#,
+            r#"code: Some(Other("INUSE", None)), info: None"#,
+            r#"code: Some(Other("LIMIT", None)), info: None"#,
+        ] {
+            assert!(
+                SyncError::from(E::No(temporary.into())).is_transient(),
+                "{temporary}"
+            );
+        }
+        let dropped = SyncError::from(E::ConnectionLost);
+        assert!(dropped.is_transient());
+        // Shown as "offline", not as a server error.
+        assert_eq!(dropped.kind(), ErrorKind::Connect);
+    }
 
     #[test]
     fn kinds_and_retry_rules() {
