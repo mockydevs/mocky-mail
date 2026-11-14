@@ -70,7 +70,7 @@ describe('reading pane', () => {
     expect(frame.compareDocumentPosition(quickReply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await user.type(quickReply, 'Signed, see attached.');
     await user.click(within(reader()).getByRole('button', { name: 'Send' }));
-    expect(await within(reader()).findByText('Reply queued in the Outbox.')).toBeInTheDocument();
+    expect(await within(reader()).findByText('Sending your reply…')).toBeInTheDocument();
   });
 
   it('keeps quick reply to one line until it is used', async () => {

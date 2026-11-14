@@ -5,6 +5,7 @@ import { formatListTime } from '../../lib/format';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
 import { emptyCopy } from './selectors';
+import { usePullToRefresh } from './usePullToRefresh';
 
 interface Props {
   title: string;
@@ -25,6 +26,8 @@ interface Props {
   onSelect: (id: string) => void;
   onLoadMore: () => void;
   onRetry: () => void;
+  /** Phones: pull the list down to check for new mail. */
+  onRefresh?: (() => Promise<void>) | undefined;
 }
 
 const FILTERS: readonly { id: ReadFilter; label: string }[] = [
@@ -51,6 +54,7 @@ export function MessageList(props: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const showAccount = accounts.length > 1;
   const empty = emptyCopy(role, props.filtered);
+  const pull = usePullToRefresh(listRef, props.onRefresh);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -115,6 +119,33 @@ export function MessageList(props: Props) {
       </div>
 
       <div className="list__scroll" ref={listRef} data-testid="list-scroll">
+        {props.onRefresh && (
+          <div
+            className={`pull pull--${pull.state}`}
+            style={{ height: pull.distance }}
+            role="status"
+            aria-live="polite"
+          >
+            {pull.state !== 'idle' && (
+              <>
+                {pull.state === 'refreshing' ? (
+                  <span className="spinner" aria-hidden="true" />
+                ) : (
+                  <span className="pull__arrow" aria-hidden="true">
+                    <Icon name="back" size={18} />
+                  </span>
+                )}
+                <span>
+                  {pull.state === 'refreshing'
+                    ? 'Checking for new mail'
+                    : pull.state === 'armed'
+                      ? 'Release to check for new mail'
+                      : 'Pull to check for new mail'}
+                </span>
+              </>
+            )}
+          </div>
+        )}
         {props.status === 'loading' && (
           <div aria-busy="true" aria-label="Loading messages">
             {[0, 1, 2, 3, 4].map((i) => (

@@ -47,7 +47,46 @@ describe('compose', () => {
         attachments: [{ path: '/home/you/Documents/INV-0144.pdf', fileName: 'INV-0144.pdf', size: 186 * 1024 }],
       }),
     );
-    expect(screen.getByText('Message queued')).toBeInTheDocument();
+    expect(screen.getByText('Sending…')).toBeInTheDocument();
+  });
+
+  it('says when the message is actually sent, or why it was not', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    const form = composeForm();
+    await user.type(form.getByLabelText('To'), 'peter@client.example');
+    await user.type(form.getByLabelText('Subject'), 'Hello');
+    await user.click(form.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('Sending…')).toBeInTheDocument();
+
+    const entries = await api.listOutbox();
+    const mine = entries[entries.length - 1];
+    if (!mine) throw new Error('no outbox entry');
+    act(() => {
+      api.emit('mail://outbox-changed', { entries: entries.map((e) => (e === mine ? { ...e, status: { state: 'sending', started_at: 0 } } : e)) });
+    });
+    act(() => {
+      api.emit('mail://outbox-changed', { entries: entries.filter((e) => e !== mine) });
+    });
+    expect(screen.getByRole('status', { name: '' })).toHaveTextContent('SentYour message was delivered to your mail server.');
+
+    // A refusal is reported, not hidden behind "queued".
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    await user.type(composeForm().getByLabelText('To'), 'peter@client.example');
+    await user.click(composeForm().getByRole('button', { name: 'Send' }));
+    const again = await api.listOutbox();
+    const second = again[again.length - 1];
+    if (!second) throw new Error('no outbox entry');
+    act(() => {
+      api.emit('mail://outbox-changed', {
+        entries: again.map((e) =>
+          e === second ? { ...e, status: { state: 'failed', reason: 'rejected', message: 'The server refused the recipient.' } } : e,
+        ),
+      });
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('Not sent');
+    expect(screen.getByRole('alert')).toHaveTextContent('The server refused the recipient.');
   });
 
   it('rejects an attachment the account cannot send and does not queue it', async () => {

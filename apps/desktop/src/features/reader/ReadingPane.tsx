@@ -9,6 +9,7 @@ import type { Theme } from '../../theme/useTheme';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
 import { formatMailbox, formatMailboxes, replyDraft, toolbarActions } from '../compose/seed';
+import { useSendStatus } from '../outbox/useSendStatus';
 import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
 
@@ -618,7 +619,8 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
-  const [sent, setSent] = useState(false);
+  const sending = useSendStatus(api);
+  const sendPhase = sending.status?.phase;
   const [focused, setFocused] = useState(false);
   const box = useRef<HTMLTextAreaElement>(null);
   const isSheet = sheet !== undefined;
@@ -626,6 +628,15 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
     // The phone panel opens because the user tapped Reply: start typing at once.
     if (isSheet) box.current?.focus();
   }, [isSheet]);
+  // "Reply sent" is a confirmation: let it fade after a moment.
+  const clearSending = sending.clear;
+  useEffect(() => {
+    if (sendPhase !== 'sent' && sendPhase !== 'waiting') return;
+    const timer = window.setTimeout(clearSending, 4000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [sendPhase, clearSending]);
   const firstName = (message.from?.name ?? message.from?.address ?? '').split(' ')[0] ?? '';
 
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
@@ -635,14 +646,14 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
     const draft = { ...base, bodyText: `${text.trim()}${base.bodyText}` };
     setBusy(true);
     setError(null);
-    setSent(false);
+    sending.clear();
     api
       .checkDraft(draft)
       .then(() => api.sendMessage(draft))
       .then(
-        () => {
+        (entry) => {
           setText('');
-          setSent(true);
+          sending.track(entry);
         },
         (e: unknown) => {
           setError(toAppError(e));
@@ -685,7 +696,6 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
           }}
           onChange={(e) => {
             setText(e.target.value);
-            setSent(false);
           }}
         />
       </label>
@@ -693,9 +703,15 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
         <Icon name="sent" size={16} />
         Send
       </button>
-      {sent && (
-        <p className="quick-reply__status form-hint" role="status">
-          Reply queued in the Outbox.
+      {sending.status && (
+        <p
+          className={`quick-reply__status ${sending.status.phase === 'failed' ? 'form-error' : 'form-hint'}`}
+          role={sending.status.phase === 'failed' ? 'alert' : 'status'}
+        >
+          {sending.status.phase === 'sending' && 'Sending your reply…'}
+          {sending.status.phase === 'sent' && 'Reply sent.'}
+          {sending.status.phase === 'waiting' && 'No connection right now. Your reply will send by itself when you are back online.'}
+          {sending.status.phase === 'failed' && `Reply not sent: ${sending.status.message} It is in the Outbox.`}
         </p>
       )}
       {error && (

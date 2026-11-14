@@ -40,7 +40,7 @@ describe('settings', () => {
 
   it('turns desktop notifications on and off in the backend settings', async () => {
     const { user, api, region } = await openSettings();
-    const box = region.getByRole('checkbox', { name: /desktop notification/ });
+    const box = region.getByRole('checkbox', { name: /Show a notification/ });
     expect(box).toBeChecked();
     await user.click(box);
     expect(box).not.toBeChecked();

@@ -32,6 +32,8 @@ export interface MockOptions {
   now?: () => number;
   oauthConfigured?: boolean;
   picked?: DraftAttachment[];
+  /** Dev preview: new messages go sending, then sent, like the real Outbox. */
+  simulateDelivery?: boolean;
 }
 
 export interface MockMailApi extends MailApi {
@@ -113,6 +115,24 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   /** Attachments of drafts saved in this session, by message id. */
   const draftFiles = new Map<string, DraftAttachment[]>();
   const now = options.now ?? (() => MOCK_NOW);
+  /** Play a sent message through sending and sent, then drop it, as Rust does. */
+  const deliver = (id: string) => {
+    const step = (status: OutboxEntry['status'], next?: () => void) => {
+      outbox = outbox.map((e) => (e.id === id ? { ...e, status } : e));
+      outboxChanged();
+      next?.();
+    };
+    setTimeout(() => {
+      step({ state: 'sending', started_at: now() }, () =>
+        setTimeout(() => {
+          step({ state: 'sent', at: now() }, () => {
+            outbox = outbox.filter((e) => e.id !== id);
+            outboxChanged();
+          });
+        }, 1200),
+      );
+    }, 400);
+  };
   type Handler = (payload: never) => void;
   const handlers = new Map<MailEventName, Set<Handler>>();
   const failures = new Map<Method, AppError>();
@@ -392,6 +412,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           messages = messages.map((m) => (m.id === draft.replyToMessageId ? { ...m, answered: true } : m));
         }
         outboxChanged();
+        if (options.simulateDelivery) deliver(entry.id);
         return entry;
       }),
 

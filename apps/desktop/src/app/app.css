@@ -493,6 +493,40 @@ button:disabled {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  /* Pull-to-refresh replaces the browser's own overscroll bounce. */
+  overscroll-behavior-y: contain;
+}
+
+/* Pull-to-refresh indicator: grows with the pull at the top of the list. */
+.pull {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pull--idle {
+  transition: height 0.2s ease;
+}
+
+.pull__arrow {
+  display: inline-flex;
+  transform: rotate(-90deg);
+  transition: transform 0.15s ease;
+}
+
+.pull--armed .pull__arrow {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pull--idle,
+  .pull__arrow {
+    transition: none;
+  }
 }
 
 
@@ -1662,13 +1696,6 @@ button:disabled {
     padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
   }
 
-  .toast {
-    right: 12px;
-    left: 12px;
-    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
-    max-width: none;
-  }
-
   .icon-btn {
     min-width: 44px;
     min-height: 44px;
@@ -2300,6 +2327,17 @@ kbd {
 
 .toast .icon-btn {
   color: inherit;
+}
+
+/* Phones: full width, above the New message button (comes after the base
+   rule so it wins). */
+@media (max-width: 640px) {
+  .toast {
+    right: 12px;
+    left: 12px;
+    bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+    max-width: none;
+  }
 }
 
 .conn--info {

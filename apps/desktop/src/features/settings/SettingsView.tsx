@@ -86,7 +86,7 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
                 onChange({ ...settings, notifications: e.target.checked });
               }}
             />
-            Show a desktop notification when new mail arrives
+            Show a notification when new mail arrives
           </label>
           <div className="choice-row">
             <label className="choice">

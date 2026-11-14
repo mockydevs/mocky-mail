@@ -20,7 +20,7 @@ if (!root) throw new Error('Missing #root element');
 
 // Inside the desktop app talk to the Rust backend; in a plain browser
 // (vite dev) use the in-memory mock so the interface can be worked on alone.
-const api = '__TAURI_INTERNALS__' in window ? createTauriMailApi() : createMockMailApi({ now: () => Math.floor(Date.now() / 1000) });
+const api = '__TAURI_INTERNALS__' in window ? createTauriMailApi() : createMockMailApi({ now: () => Math.floor(Date.now() / 1000), simulateDelivery: true });
 
 createRoot(root).render(
   <StrictMode>

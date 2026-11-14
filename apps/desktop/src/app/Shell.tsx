@@ -23,6 +23,7 @@ import { Sidebar } from '../features/mailbox/Sidebar';
 import { useMessagePage } from '../features/mailbox/useMessagePage';
 import { OutboxView } from '../features/outbox/OutboxView';
 import { isActive } from '../features/outbox/outboxCopy';
+import { useSendStatus, type SendStatus } from '../features/outbox/useSendStatus';
 import { playChime } from '../features/notifications/chime';
 import { ReadingPane } from '../features/reader/ReadingPane';
 import { SettingsView } from '../features/settings/SettingsView';
@@ -48,10 +49,31 @@ type Screen =
   | { kind: 'settings' }
   | { kind: 'addAccount' };
 
+/** How long a confirmation toast stays up. */
+const NOTICE_MS = 4000;
+
+/** The toast for a message the user just sent, if one is being followed. */
+function sendNoticeOf(status: SendStatus | null): Notice | null {
+  switch (status?.phase) {
+    case undefined:
+      return null;
+    case 'sending':
+      return { tone: 'info', title: 'Sending…', text: 'Your message is on its way.', sticky: true };
+    case 'sent':
+      return { tone: 'info', title: 'Sent', text: 'Your message was delivered to your mail server.' };
+    case 'waiting':
+      return { tone: 'info', title: 'Not sent yet', text: 'There is no connection right now. It will send by itself when you are back online.' };
+    case 'failed':
+      return { tone: 'error', title: 'Not sent', text: `${status.message} The message is in the Outbox.` };
+  }
+}
+
 interface Notice {
   tone: 'error' | 'info';
   title: string;
   text: string;
+  /** Stays up until replaced or dismissed (an action still under way). */
+  sticky?: boolean;
 }
 
 function errorNotice(error: AppError, what: string): Notice {
@@ -95,6 +117,32 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [outbox, setOutbox] = useState<OutboxEntry[] | null>(null);
   const [sync, setSync] = useState<Record<string, SyncStatus>>({});
   const [notice, setNotice] = useState<Notice | null>(null);
+
+  // Confirmations close by themselves; errors stay until dismissed.
+  useEffect(() => {
+    if (notice?.tone !== 'info' || notice.sticky) return;
+    const timer = window.setTimeout(() => {
+      setNotice(null);
+    }, NOTICE_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [notice]);
+
+  // Tell the user whether a message they sent actually went out.
+  const sending = useSendStatus(api);
+  const sendNotice = sendNoticeOf(sending.status);
+  const clearSending = sending.clear;
+  const sendPhase = sending.status?.phase;
+  /** A send in progress or just finished takes the toast slot. */
+  const shownNotice = sendNotice ?? notice;
+  useEffect(() => {
+    if (sendPhase !== 'sent' && sendPhase !== 'waiting') return;
+    const timer = window.setTimeout(clearSending, NOTICE_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [sendPhase, clearSending]);
 
   const report = (error: AppError, what: string) => {
     setNotice(errorNotice(error, what));
@@ -426,9 +474,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           onClose={() => {
             setScreen({ kind: 'mail' });
           }}
-          onSent={() => {
+          onSent={(entry) => {
             setScreen({ kind: 'mail' });
-            setNotice({ tone: 'info', title: 'Message queued', text: 'It is in the Outbox and will send automatically.' });
+            sending.track(entry);
             refresh();
           }}
         />
@@ -501,6 +549,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               onSelect={open}
               onLoadMore={page.loadMore}
               onRetry={refresh}
+              onRefresh={phone ? () => api.syncNow(null) : undefined}
             />
             <ReadingPane
               ref={readerRef}
@@ -611,11 +660,11 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       </div>
       <StatusBar sync={summary} outbox={outboxActive} accountCount={accounts.length} />
 
-      {notice && (
-        <div className={`toast toast--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>
+      {shownNotice && (
+        <div className={`toast toast--${shownNotice.tone}`} role={shownNotice.tone === 'error' ? 'alert' : 'status'}>
           <div>
-            <p className="toast__title">{notice.title}</p>
-            <p className="toast__text">{notice.text}</p>
+            <p className="toast__title">{shownNotice.title}</p>
+            <p className="toast__text">{shownNotice.text}</p>
           </div>
           <button
             type="button"
@@ -623,6 +672,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             aria-label="Dismiss"
             onClick={() => {
               setNotice(null);
+              sending.clear();
             }}
           >
             <Icon name="close" />

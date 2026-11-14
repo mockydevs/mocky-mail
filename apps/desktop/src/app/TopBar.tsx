@@ -53,7 +53,8 @@ export function TopBar({ searchField, ...props }: Props) {
           ref={searchField}
           type="search"
           className="search__input"
-          placeholder="Search mail, people, attachments"
+          // Phones (which get the menu button) have room for two words only.
+          placeholder={props.onMenu ? 'Search mail' : 'Search mail, people, attachments'}
           value={props.search}
           onChange={(e) => {
             props.onSearch(e.target.value);

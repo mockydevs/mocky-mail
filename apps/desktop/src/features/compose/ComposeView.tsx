@@ -2,7 +2,7 @@ import { useEffect, useId, useState, type KeyboardEvent, type SyntheticEvent } f
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, Draft, DraftAttachment } from '../../api/types';
+import type { Account, AppError, Draft, DraftAttachment, OutboxEntry } from '../../api/types';
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
@@ -17,7 +17,7 @@ interface Props {
   accounts: readonly Account[];
   offlineNote: boolean;
   onClose: () => void;
-  onSent: () => void;
+  onSent: (entry: OutboxEntry) => void;
 }
 
 type FieldName = 'to' | 'cc' | 'bcc';

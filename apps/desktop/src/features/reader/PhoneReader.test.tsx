@@ -100,7 +100,7 @@ describe('phone message view', () => {
     expect(pane.queryByRole('toolbar', { name: 'Reply' })).not.toBeInTheDocument();
     await user.type(box, 'Approved.');
     await user.click(pane.getByRole('button', { name: 'Send' }));
-    expect(await pane.findByText('Reply queued in the Outbox.')).toBeInTheDocument();
+    expect(await pane.findByText('Sending your reply…')).toBeInTheDocument();
 
     await user.click(pane.getByRole('button', { name: 'Close reply' }));
     expect(pane.getByRole('toolbar', { name: 'Reply' })).toBeInTheDocument();
