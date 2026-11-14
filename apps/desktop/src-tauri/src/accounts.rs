@@ -9,6 +9,7 @@ use mail_sync::imap::ImapConnection;
 use mail_sync::{Credentials, Security, ServerConfig, ServerSuggestion, smtp};
 use serde::Deserialize;
 use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::convert::{to_store, to_sync};
 use crate::credentials::{cache_token, oauth_key, password_key};
@@ -64,6 +65,70 @@ fn clean_name(name: &str, email: &str) -> String {
         email.split('@').next().unwrap_or(email).to_owned()
     } else {
         name.chars().take(100).collect()
+    }
+}
+
+/// The result of signing in with Google or Microsoft.
+struct SignedIn {
+    /// The mailbox address chosen.
+    email: String,
+    access_token: String,
+    expires_at: u64,
+    /// What to keep in the keyring: the refresh token, or for Android's own
+    /// Google sign-in a marker (Android renews those tokens itself).
+    stored_secret: String,
+}
+
+/// Sign in with the provider. On Android, Google uses the phone's own
+/// accounts; everything else opens the provider's page in the browser.
+async fn sign_in(app: &AppHandle, provider: Provider, typed: &str) -> AppResult<SignedIn> {
+    #[cfg(target_os = "android")]
+    if provider == Provider::Google {
+        let granted = crate::google_android::sign_in().await?;
+        return Ok(SignedIn {
+            email: clean_email(&granted.email)?,
+            access_token: granted.access_token,
+            expires_at: now().saturating_add(crate::google_android::TOKEN_LIFETIME_SECS),
+            stored_secret: crate::credentials::ANDROID_GOOGLE.to_owned(),
+        });
+    }
+    let opener = app.clone();
+    let tokens = mail_auth::authorize(provider, typed, move |url| {
+        // The opener plugin works on every platform, Android included.
+        match opener.opener().open_url(url, None::<&str>) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("couldn't open the browser for sign-in: {error}");
+                false
+            }
+        }
+    })
+    .await?;
+    let email = chosen_address(typed, tokens.granted_email.as_deref())?;
+    let refresh_token = tokens.refresh_token.clone().ok_or_else(|| {
+        AppError::new(
+            "auth",
+            "The provider didn't grant offline access. Please try signing in again.",
+        )
+    })?;
+    Ok(SignedIn {
+        email,
+        access_token: tokens.access_token.clone(),
+        expires_at: tokens.expires_at_unix,
+        stored_secret: refresh_token,
+    })
+}
+
+/// The account the user signed in as: the one picked in the provider's
+/// chooser, or else the address typed before signing in.
+fn chosen_address(typed: &str, granted: Option<&str>) -> AppResult<String> {
+    match granted {
+        Some(granted) => clean_email(granted),
+        None if !typed.is_empty() => clean_email(typed),
+        None => Err(AppError::new(
+            "auth",
+            "Couldn't tell which account you chose. Type your email address and try again.",
+        )),
     }
 }
 
@@ -174,20 +239,19 @@ pub async fn add_oauth_account(
     state: State<'_, Arc<AppState>>,
     input: AddOAuthInput,
 ) -> AppResult<Account> {
-    let email = clean_email(&input.email)?;
-    ensure_new(&state, &email)?;
+    // The address is optional: the provider's account chooser picks it.
+    let typed = input.email.trim();
+    if !typed.is_empty() {
+        ensure_new(&state, &clean_email(typed)?)?;
+    }
     let (provider, auth) = match input.provider.as_str() {
         "google" => (Provider::Google, AuthKind::Google),
         "microsoft" => (Provider::Microsoft, AuthKind::Microsoft),
         _ => return Err(AppError::invalid("Unknown sign-in provider.")),
     };
-    let tokens = mail_auth::authorize(provider, &email).await?;
-    let refresh_token = tokens.refresh_token.clone().ok_or_else(|| {
-        AppError::new(
-            "auth",
-            "The provider didn't grant offline access. Please try signing in again.",
-        )
-    })?;
+    let signed_in = sign_in(&app, provider, typed).await?;
+    let email = signed_in.email;
+    ensure_new(&state, &email)?;
     let servers = provider.servers();
     let imap = ServerConfig {
         host: servers.imap.to_owned(),
@@ -203,11 +267,11 @@ pub async fn add_oauth_account(
             Security::Tls
         },
     };
-    // The token says nothing reliable about which mailbox was chosen; logging
-    // in to the typed address proves the grant covers that mailbox.
+    // Logging in to the mailbox with the access token proves the grant
+    // really covers this address.
     let credentials = Credentials::OAuth2 {
         username: email.clone(),
-        access_token: tokens.access_token.clone(),
+        access_token: signed_in.access_token.clone(),
     };
     verify(&imap, &smtp_server, &credentials).await.map_err(|error| {
         if error.kind == "auth" {
@@ -226,12 +290,12 @@ pub async fn add_oauth_account(
         size_limit_bytes: Some(25 * 1024 * 1024),
         created_at: now(),
     };
-    let account = save(&state, &new, oauth_key, &refresh_token)?;
+    let account = save(&state, &new, oauth_key, &signed_in.stored_secret)?;
     cache_token(
         &state,
         &account.id,
-        &tokens.access_token,
-        tokens.expires_at_unix,
+        &signed_in.access_token,
+        signed_in.expires_at,
     );
     sync::start(&app, state.inner(), &account.id);
     events::accounts_changed(&app);
@@ -301,6 +365,26 @@ pub fn remove_account(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_account_chosen_at_the_provider_wins() {
+        assert_eq!(
+            chosen_address("", Some("don@gmail.com")).ok().as_deref(),
+            Some("don@gmail.com")
+        );
+        // Picked a different account than the one typed: use the one signed in.
+        assert_eq!(
+            chosen_address("old@gmail.com", Some("don@gmail.com"))
+                .ok()
+                .as_deref(),
+            Some("don@gmail.com")
+        );
+        assert_eq!(
+            chosen_address("don@outlook.com", None).ok().as_deref(),
+            Some("don@outlook.com")
+        );
+        assert_eq!(chosen_address("", None).map_err(|e| e.kind), Err("auth"));
+    }
 
     #[test]
     fn email_and_name_cleanup() {

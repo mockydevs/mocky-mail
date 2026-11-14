@@ -12,6 +12,8 @@ mod convert;
 mod credentials;
 mod error;
 mod events;
+#[cfg(target_os = "android")]
+mod google_android;
 mod mail;
 mod outbox;
 mod settings;
@@ -118,6 +120,9 @@ pub fn run() {
             let _ = window.set_focus();
         }
     }));
+    // Android: Gmail sign-in with the phone's own Google accounts.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(google_android::init());
     let result = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

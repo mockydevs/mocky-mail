@@ -27,6 +27,10 @@ pub const fn provider(auth: AuthKind) -> Option<Provider> {
     }
 }
 
+/// Stored instead of a refresh token for Gmail accounts added with
+/// Android's own Google sign-in: Android hands out fresh tokens itself.
+pub const ANDROID_GOOGLE: &str = "android-google-play-services";
+
 /// Seconds of validity a cached token must have left to be reused.
 const TOKEN_MARGIN: u64 = 120;
 
@@ -67,6 +71,9 @@ pub async fn for_account(state: &AppState, account: &Account) -> AppResult<Crede
         .secrets
         .get(&oauth_key(&account.id))?
         .ok_or_else(|| AppError::new("auth", "Sign in again to reconnect this account."))?;
+    if refresh_token == ANDROID_GOOGLE {
+        return android_google(state, account).await;
+    }
     let tokens = mail_auth::refresh(provider, &refresh_token).await?;
     if let Some(rotated) = tokens.refresh_token.as_deref() {
         state.secrets.set(&oauth_key(&account.id), rotated)?;
@@ -81,4 +88,31 @@ pub async fn for_account(state: &AppState, account: &Account) -> AppResult<Crede
         username,
         access_token: tokens.access_token,
     })
+}
+
+/// A Gmail account added with Android's own Google sign-in: ask Android for
+/// a fresh token, with no screen shown.
+#[cfg(target_os = "android")]
+async fn android_google(state: &AppState, account: &Account) -> AppResult<Credentials> {
+    let access_token = crate::google_android::token(&account.email).await?;
+    cache_token(
+        state,
+        &account.id,
+        &access_token,
+        now().saturating_add(crate::google_android::TOKEN_LIFETIME_SECS),
+    );
+    Ok(Credentials::OAuth2 {
+        username: account.email.clone(),
+        access_token,
+    })
+}
+
+/// Such accounts only exist on Android; elsewhere they must sign in again.
+#[cfg(not(target_os = "android"))]
+#[allow(clippy::unused_async, reason = "same signature as the Android version")]
+async fn android_google(_state: &AppState, _account: &Account) -> AppResult<Credentials> {
+    Err(AppError::new(
+        "auth",
+        "Sign in again to reconnect this account.",
+    ))
 }

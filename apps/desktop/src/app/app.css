@@ -1235,6 +1235,13 @@ button:disabled {
   display: contents;
 }
 
+/* Phones: the add-account form uses the full width. */
+@media (max-width: 640px) {
+  .panel {
+    padding: 16px;
+  }
+}
+
 /* Phones: one pane at a time, folders in a slide-out menu, Back closes
    layers. The page itself never scrolls; each pane scrolls on its own. */
 @media (max-width: 640px) {
@@ -1575,10 +1582,38 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 28px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--surface);
+  /* Sits straight on the page background: no card around the fields. */
+  padding: 8px 0;
+}
+
+/* Shown while Google or Microsoft sign-in is under way. */
+.signin-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.spinner {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
 }
 
 .account-form__title {

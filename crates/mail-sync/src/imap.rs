@@ -205,11 +205,24 @@ fn quote_search(value: &str) -> Result<String, SyncError> {
 struct XOAuth2<'a> {
     username: &'a str,
     token: &'a str,
+    sent: bool,
 }
 
 impl async_imap::Authenticator for XOAuth2<'_> {
     type Response = String;
-    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+    fn process(&mut self, challenge: &[u8]) -> Self::Response {
+        if self.sent {
+            // A second challenge means the server refused the token and sent
+            // its reason (JSON: status and scope, no secrets). RFC 7628 and
+            // Gmail expect an empty reply, after which the server answers NO.
+            // Sending the token again would leave both sides waiting.
+            eprintln!(
+                "XOAUTH2 refused by the server: {}",
+                String::from_utf8_lossy(challenge)
+            );
+            return String::new();
+        }
+        self.sent = true;
         format!(
             "user={}\x01auth=Bearer {}\x01\x01",
             self.username, self.token
@@ -313,6 +326,7 @@ impl ImapConnection {
                         XOAuth2 {
                             username,
                             token: access_token,
+                            sent: false,
                         },
                     )
                     .await
@@ -716,6 +730,19 @@ impl ImapConnection {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_refused_oauth_token_gets_an_empty_reply_not_a_hang() {
+        use async_imap::Authenticator as _;
+        let mut auth = XOAuth2 {
+            username: "a@gmail.com",
+            token: "t",
+            sent: false,
+        };
+        assert_eq!(auth.process(b""), "user=a@gmail.com\x01auth=Bearer t\x01\x01");
+        assert_eq!(auth.process(br#"{"status":"400"}"#), "");
+    }
+
     use super::*;
 
     #[test]

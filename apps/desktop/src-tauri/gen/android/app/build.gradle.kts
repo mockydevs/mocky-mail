@@ -77,6 +77,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     // Must equal the rustls-platform-verifier-android version in Cargo.lock.
     implementation("org.rustls:rustls-platform-verifier:0.2.0")
+    // Gmail sign-in with the phone's own Google accounts (GoogleAuthPlugin).
+    implementation("com.google.android.gms:play-services-auth:21.3.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
