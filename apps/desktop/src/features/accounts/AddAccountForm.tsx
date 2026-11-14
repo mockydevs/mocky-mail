@@ -3,6 +3,7 @@ import { useId, useRef, useState, type SyntheticEvent } from 'react';
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
 import type { Account, AppError, Security, ServerConfig } from '../../api/types';
+import { PasswordField } from '../../ui/PasswordField';
 import { parseRecipients } from '../compose/recipients';
 import { accountErrorCopy, appPasswordProvider, domainOf, guessServers, isValidServer } from './providers';
 
@@ -240,17 +241,17 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
 
       <p className="divider">or use a password</p>
 
-      <label className="form-field" htmlFor={`${id}-password`}>
-        <span className="form-field__label">Password or app password</span>
-        <input
+      <div className="form-field">
+        <label className="form-field__label" htmlFor={`${id}-password`}>
+          Password or app password
+        </label>
+        <PasswordField
           id={`${id}-password`}
-          ref={passwordRef}
-          className="field"
-          type="password"
+          inputRef={passwordRef}
           autoComplete="current-password"
-          aria-describedby={`${id}-password-hint`}
+          describedBy={`${id}-password-hint`}
         />
-      </label>
+      </div>
       <p id={`${id}-password-hint`} className="form-hint">
         {provider
           ? `${provider} needs an app password here, not your normal password. Create one in your ${provider} account security settings.`

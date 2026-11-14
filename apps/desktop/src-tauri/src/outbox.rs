@@ -322,8 +322,28 @@ fn update(app: &AppHandle, state: &AppState, id: &str, item: &OutboxItem) -> App
     Ok(())
 }
 
+/// Save `item` in place of `before`, unless something else changed it first
+/// (the worker started sending, or the user acted in another view).
+fn replace(
+    app: &AppHandle,
+    state: &AppState,
+    id: &str,
+    before: &OutboxItem,
+    item: &OutboxItem,
+) -> AppResult<bool> {
+    let replaced = state.store.replace_outbox_item(id, before, item)?;
+    if replaced {
+        events::outbox_changed(app, state);
+    }
+    Ok(replaced)
+}
+
 fn transition(result: Result<(), mail_core::outbox::TransitionError>) -> AppResult<()> {
     result.map_err(|e| AppError::invalid(format!("That isn't possible right now: {e}.")))
+}
+
+fn changed_meanwhile() -> AppError {
+    AppError::invalid("This message changed a moment ago (it may be sending now). Try again.")
 }
 
 /// `outbox_send_now`: skip the retry wait, or retry a failed message.
@@ -333,9 +353,12 @@ pub fn outbox_send_now(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> AppResult<()> {
-    let mut item = state.store.get_outbox(&id)?.entry.item;
+    let before = state.store.get_outbox(&id)?.entry.item;
+    let mut item = before.clone();
     transition(item.send_now(now()))?;
-    update(&app, &state, &id, &item)?;
+    if !replace(&app, &state, &id, &before, &item)? {
+        return Err(changed_meanwhile());
+    }
     state.outbox_wake.notify_one();
     Ok(())
 }
@@ -343,9 +366,14 @@ pub fn outbox_send_now(
 /// `outbox_cancel`.
 #[tauri::command]
 pub fn outbox_cancel(app: AppHandle, state: State<'_, Arc<AppState>>, id: String) -> AppResult<()> {
-    let mut item = state.store.get_outbox(&id)?.entry.item;
+    let before = state.store.get_outbox(&id)?.entry.item;
+    let mut item = before.clone();
     transition(item.cancel())?;
-    state.store.delete_outbox(&id)?;
+    // Only if it is still exactly as checked: a send that started a moment
+    // ago can't be cancelled, and must not vanish from the Outbox.
+    if !state.store.delete_outbox_if(&id, &before)? {
+        return Err(changed_meanwhile());
+    }
     events::outbox_changed(&app, &state);
     Ok(())
 }
@@ -374,7 +402,10 @@ pub async fn outbox_edit(
     let summary = parse_summary(&message.raw)?;
     let body = parse_body(&message.raw)?;
     let attachments = copy_attachments(&state, &message.raw, &format!("outbox-{id}")).await?;
-    state.store.delete_outbox(&id)?;
+    // If sending started meanwhile, editing would make a second copy.
+    if !state.store.delete_outbox_if(&id, &message.entry.item)? {
+        return Err(changed_meanwhile());
+    }
     events::outbox_changed(&app, &state);
     Ok(Draft {
         account_id: message.entry.account_id,
@@ -503,12 +534,19 @@ async fn resolve_duplicate(
     };
     let mut item = entry.item.clone();
     transition(item.resolve_duplicate_check(found, now()))?;
-    update(app, state, &entry.id, &item)
+    // Cancelled or edited meanwhile: nothing left to resolve.
+    replace(app, state, &entry.id, &entry.item, &item)?;
+    Ok(())
 }
 
 async fn send_one(app: &AppHandle, state: &AppState, entry: &OutboxEntry) -> AppResult<()> {
     let account = state.store.get_account(&entry.account_id)?;
-    let message = state.store.get_outbox(&entry.id)?;
+    let message = match state.store.get_outbox(&entry.id) {
+        Ok(message) => message,
+        // Cancelled or edited since the list was read: skip it.
+        Err(mail_store::StoreError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let mut item: OutboxItem = entry.item.clone();
     let estimated = u64::try_from(message.raw.len()).unwrap_or(u64::MAX);
     if estimated > limit_for(&account) {
@@ -516,12 +554,16 @@ async fn send_one(app: &AppHandle, state: &AppState, entry: &OutboxEntry) -> App
             estimated,
             limit: limit_for(&account),
         }))?;
-        return update(app, state, &entry.id, &item);
+        replace(app, state, &entry.id, &entry.item, &item)?;
+        return Ok(());
     }
     // Saved before the network call: if the app dies now, restart recovery
-    // knows this message may have gone out.
+    // knows this message may have gone out. Claimed only if nobody cancelled
+    // or edited it since the list was read.
     transition(item.begin_send(now()))?;
-    update(app, state, &entry.id, &item)?;
+    if !replace(app, state, &entry.id, &entry.item, &item)? {
+        return Ok(());
+    }
 
     let outcome = match credentials::for_account(state, &account).await {
         Err(error) => SendOutcome::Transient(error.message),

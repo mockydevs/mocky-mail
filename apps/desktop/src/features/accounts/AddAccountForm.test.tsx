@@ -20,6 +20,22 @@ describe('adding an account', () => {
     expect(within(imap).getByLabelText('Port')).toHaveValue('993');
   });
 
+  it('shows and hides the password without losing it', async () => {
+    const { user } = renderApp({ accounts: [] });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    const password = field('Password or app password');
+    await user.type(password, 'abcd efgh ijkl');
+    expect(password).toHaveAttribute('type', 'password');
+    const toggle = within(form()).getByRole('button', { name: 'Show password' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await user.click(toggle);
+    expect(password).toHaveAttribute('type', 'text');
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(password).toHaveValue('abcd efgh ijkl');
+    await user.click(toggle);
+    expect(password).toHaveAttribute('type', 'password');
+  });
+
   it('opens manual settings with a guess when the provider is unknown', async () => {
     const { user } = renderApp({ accounts: [] });
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });

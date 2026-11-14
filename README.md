@@ -17,6 +17,19 @@ A fast, private desktop email client for Windows, macOS and Linux, by
   sandbox.
 - **Small and light.** Built with Rust and Tauri, not a bundled browser.
 
+## Install
+
+Download Mocky Mail from **[mailer.co.ke](https://mailer.co.ke)** (Windows
+`.exe` and Linux `.deb` now; macOS coming soon). Builds are also attached to
+[GitHub releases](https://github.com/mockydevs/mocky-mail/releases/latest).
+On Ubuntu or Debian:
+
+```bash
+sudo apt install ./mocky-mail_0.1.0_amd64.deb
+```
+
+Step-by-step instructions for each system are in [docs/install.md](docs/install.md).
+
 ## Layout
 
 ```

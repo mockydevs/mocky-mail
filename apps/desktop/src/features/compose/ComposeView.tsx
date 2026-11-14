@@ -1,8 +1,8 @@
-import { useId, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
+import { useEffect, useId, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, Draft } from '../../api/types';
+import type { Account, AppError, Draft, DraftAttachment } from '../../api/types';
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
@@ -10,6 +10,8 @@ import { parseRecipients } from './recipients';
 
 interface Props {
   initial: Draft;
+  /** Load copies of this message's attachments into the draft (forwarding, continuing a draft). */
+  attachmentsFrom?: string | null;
   title: string;
   accounts: readonly Account[];
   offlineNote: boolean;
@@ -31,10 +33,14 @@ function encodedEstimate(bytes: number): number {
   return Math.ceil(bytes / 3) * 4;
 }
 
-export function ComposeView({ initial, title, accounts, offlineNote, onClose, onSent }: Props) {
+export function ComposeView({ initial, attachmentsFrom = null, title, accounts, offlineNote, onClose, onSent }: Props) {
   const api = useMailApi();
   const id = useId();
   const [draft, setDraft] = useState<Draft>(initial);
+  /** The last saved (or loaded) state; changes are compared against it. */
+  const [baseline, setBaseline] = useState<Draft>(initial);
+  const [loadingAttachments, setLoadingAttachments] = useState(attachmentsFrom !== null);
+  const [attachError, setAttachError] = useState<AppError | null>(null);
   const [showCopies, setShowCopies] = useState(initial.cc !== '' || initial.bcc !== '');
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<FieldName, string>>>({});
   const [error, setError] = useState<AppError | null>(null);
@@ -42,7 +48,34 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
   const [busy, setBusy] = useState<null | 'send' | 'save' | 'attach'>(null);
   const [confirmClose, setConfirmClose] = useState(false);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
+  useEffect(() => {
+    if (attachmentsFrom === null) return;
+    let active = true;
+    const merge = (d: Draft, files: DraftAttachment[]): Draft => {
+      const known = new Set(d.attachments.map((a) => a.path));
+      return { ...d, attachments: [...d.attachments, ...files.filter((f) => !known.has(f.path))] };
+    };
+    api
+      .attachmentsForDraft(attachmentsFrom)
+      .then(
+        (files) => {
+          if (!active) return;
+          setDraft((d) => merge(d, files));
+          setBaseline((b) => merge(b, files));
+        },
+        (e: unknown) => {
+          if (active) setAttachError(toAppError(e));
+        },
+      )
+      .finally(() => {
+        if (active) setLoadingAttachments(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, attachmentsFrom]);
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const account = accounts.find((a) => a.id === draft.accountId);
   const attachmentBytes = draft.attachments.reduce((sum, a) => sum + a.size, 0);
   const overLimit =
@@ -79,10 +112,19 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
       });
   };
 
+  /** Save and remember the saved copy's id, so the next save or send replaces it. */
+  const saveNow = (): Promise<void> => {
+    const snapshot = draft;
+    return api.saveDraft(snapshot).then(({ draftMessageId }) => {
+      setDraft((d) => ({ ...d, draftMessageId }));
+      setBaseline({ ...snapshot, draftMessageId });
+    });
+  };
+
   const save = () => {
     setError(null);
     setBusy('save');
-    api.saveDraft(draft).then(
+    saveNow().then(
       () => {
         setBusy(null);
         setStatus('Draft saved.');
@@ -256,6 +298,18 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
         }}
       />
 
+      {loadingAttachments && (
+        <p className="compose__loading form-hint" role="status" aria-busy="true">
+          Adding the original attachments
+        </p>
+      )}
+      {attachError && (
+        <div className="notice notice--error compose__attach-error" role="alert">
+          <p className="notice__title">Couldn’t add the original attachments</p>
+          <p>{attachError.message} You can still send the message, or add files with Attach files.</p>
+        </div>
+      )}
+
       {draft.attachments.length > 0 && (
         <div className="compose__attachments">
           <ul className="attachments" aria-label="Attached files">
@@ -295,7 +349,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
       )}
 
       <footer className="compose__foot">
-        <button type="submit" className="btn btn--primary btn--large" disabled={busy !== null}>
+        <button type="submit" className="btn btn--primary btn--large" disabled={busy !== null || loadingAttachments}>
           <Icon name="sent" size={16} />
           {busy === 'send' ? 'Sending' : 'Send'}
         </button>
@@ -338,7 +392,7 @@ export function ComposeView({ initial, title, accounts, offlineNote, onClose, on
               className="btn btn--secondary"
               onClick={() => {
                 setConfirmClose(false);
-                api.saveDraft(draft).then(onClose, (e: unknown) => {
+                saveNow().then(onClose, (e: unknown) => {
                   setError(toAppError(e));
                 });
               }}

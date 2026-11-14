@@ -13,6 +13,15 @@ export function renderApp(options: MockOptions = {}, api: MockMailApi = createMo
 
 export const unified = () => within(screen.getByRole('list', { name: 'All accounts' }));
 export const accountFolders = (name: string) => within(screen.getByRole('list', { name }));
+/** The header row that opens or closes an account's folders. */
+export const accountToggle = (name: string) =>
+  within(screen.getByRole('navigation', { name: 'Mailboxes' })).getByRole('button', {
+    name: new RegExp(`^${name} \\(`),
+  });
+export const queryAccountToggle = (name: string) =>
+  within(screen.getByRole('navigation', { name: 'Mailboxes' })).queryByRole('button', {
+    name: new RegExp(`^${name} \\(`),
+  });
 export const reader = () => screen.getByRole('article', { name: 'Reading pane' });
 export async function rows(title = 'Inbox') {
   return within(await screen.findByRole('list', { name: `${title} messages` }));

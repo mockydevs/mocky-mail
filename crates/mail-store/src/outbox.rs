@@ -215,6 +215,47 @@ impl Store {
         Ok(())
     }
 
+    /// Replace an outbox item only if it is still `expected`, in one step.
+    ///
+    /// Returns `false`, changing nothing, when the entry is gone or someone
+    /// else changed it first. The worker and the user (cancel, edit, send
+    /// now) both change items; this stops one from overwriting the other,
+    /// for example a cancel landing just as sending starts.
+    ///
+    /// # Errors
+    /// On database or JSON errors.
+    pub fn replace_outbox_item(
+        &self,
+        id: &str,
+        expected: &OutboxItem,
+        new: &OutboxItem,
+    ) -> Result<bool> {
+        let conn = self.conn();
+        if !outbox_item_is(&conn, id, expected)? {
+            return Ok(false);
+        }
+        conn.execute(
+            "UPDATE outbox SET item = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(new)?],
+        )?;
+        Ok(true)
+    }
+
+    /// Delete an outbox entry only if its item is still `expected`.
+    /// Returns `false`, deleting nothing, when it is gone or has changed
+    /// (for example, sending has started).
+    ///
+    /// # Errors
+    /// On database or JSON errors.
+    pub fn delete_outbox_if(&self, id: &str, expected: &OutboxItem) -> Result<bool> {
+        let conn = self.conn();
+        if !outbox_item_is(&conn, id, expected)? {
+            return Ok(false);
+        }
+        conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+        Ok(true)
+    }
+
     /// Remove an entry. Returns whether it existed.
     ///
     /// # Errors
@@ -256,6 +297,22 @@ impl Store {
         }
         tx.commit()?;
         Ok(recovered)
+    }
+}
+
+/// Whether the stored item for `id` exists and equals `expected`. The caller
+/// holds the connection lock, so nothing can change it before the write.
+fn outbox_item_is(conn: &rusqlite::Connection, id: &str, expected: &OutboxItem) -> Result<bool> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT item FROM outbox WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        None => Ok(false),
+        Some(json) => Ok(serde_json::from_str::<OutboxItem>(&json)? == *expected),
     }
 }
 
@@ -392,5 +449,57 @@ mod tests {
             Err(StoreError::Json(_))
         ));
         assert_eq!(store.get_outbox(&sending).unwrap().entry.item, item);
+    }
+
+    #[test]
+    fn replace_only_when_unchanged() {
+        let store = Store::open_in_memory().unwrap();
+        let account = add_account(&store, "a@example.com");
+        let id = store.insert_outbox(&new_outbox(&account)).unwrap();
+        let queued = store.get_outbox(&id).unwrap().entry.item;
+        let mut sending = queued.clone();
+        sending.begin_send(100).unwrap();
+        assert!(store.replace_outbox_item(&id, &queued, &sending).unwrap());
+        // A second writer still holding the old Queued copy loses.
+        let mut stale = queued.clone();
+        stale.send_now(200).unwrap();
+        assert!(!store.replace_outbox_item(&id, &queued, &stale).unwrap());
+        assert_eq!(store.get_outbox(&id).unwrap().entry.item, sending);
+        assert!(
+            !store
+                .replace_outbox_item("nope", &queued, &sending)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn cancel_loses_to_a_send_that_already_started() {
+        let store = Store::open_in_memory().unwrap();
+        let account = add_account(&store, "a@example.com");
+        let id = store.insert_outbox(&new_outbox(&account)).unwrap();
+        // The user's cancel read the item while it was still queued...
+        let seen_by_cancel = store.get_outbox(&id).unwrap().entry.item;
+        // ...then the worker started sending it.
+        let mut sending = seen_by_cancel.clone();
+        sending.begin_send(100).unwrap();
+        assert!(
+            store
+                .replace_outbox_item(&id, &seen_by_cancel, &sending)
+                .unwrap()
+        );
+        assert!(!store.delete_outbox_if(&id, &seen_by_cancel).unwrap());
+        assert!(store.get_outbox(&id).is_ok());
+        // A cancel that sees the current state goes through.
+        let mut failed = sending.clone();
+        failed
+            .finish(
+                mail_core::outbox::SendOutcome::Permanent("no".into()),
+                110,
+                &mail_core::outbox::RetryPolicy::default(),
+            )
+            .unwrap();
+        assert!(store.replace_outbox_item(&id, &sending, &failed).unwrap());
+        assert!(store.delete_outbox_if(&id, &failed).unwrap());
+        assert!(!store.delete_outbox_if(&id, &failed).unwrap());
     }
 }

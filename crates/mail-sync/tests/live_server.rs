@@ -147,7 +147,7 @@ async fn full_mailbox_round_trip() {
     );
 
     // Reading the body must not mark it read (BODY.PEEK).
-    let raw = bob.fetch_raw("INBOX", ours.uid).await.unwrap().unwrap();
+    let raw = bob.fetch_raw("INBOX", ours.uid, 0).await.unwrap().unwrap();
     let body = parse_body(&raw).unwrap();
     assert!(body.text.unwrap().contains("This is a test."));
     assert_eq!(body.attachments[0].file_name, "notes.txt");

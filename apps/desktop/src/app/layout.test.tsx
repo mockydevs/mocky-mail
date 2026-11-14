@@ -82,7 +82,8 @@ describe('shell layout', () => {
     const iframe = rule('.email-frame');
     expect(iframe['height']).toBeUndefined();
     expect(iframe['max-width']).toBeUndefined();
-    expect(iframe['background']).toEqual(['#fff']);
+    // Follows the theme, so no white flash around a dark-mode email.
+    expect(iframe['background']).toEqual(['var(--surface)']);
     expect(rule('.reader__text')['max-width']).toEqual(['80ch']);
   });
 

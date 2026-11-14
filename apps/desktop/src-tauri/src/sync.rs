@@ -338,12 +338,33 @@ const fn flags(f: mail_sync::imap::Flags) -> MessageFlags {
     }
 }
 
+/// Open a folder, or `None` when the server refuses it (removed meanwhile,
+/// no permission): one such folder must not stop the rest of the account.
+async fn select_or_skip(
+    conn: &mut ImapConnection,
+    folder: &Folder,
+) -> AppResult<Option<mail_sync::imap::FolderStatus>> {
+    match conn.select(&folder.path).await {
+        Ok(status) => Ok(Some(status)),
+        Err(mail_sync::SyncError::Refused(reason)) => {
+            eprintln!("skipping a folder the server won't open: {reason}");
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn sync_folder(
     state: &AppState,
     conn: &mut ImapConnection,
     folder: &Folder,
 ) -> AppResult<Report> {
-    let status = conn.select(&folder.path).await?;
+    let Some(status) = select_or_skip(conn, folder).await? else {
+        return Ok(Report {
+            changed: false,
+            new_unseen: 0,
+        });
+    };
     let mut changed = state
         .store
         .set_uidvalidity(&folder.id, status.uid_validity)?;
@@ -355,15 +376,19 @@ async fn sync_folder(
         conn.all_uids(&folder.path).await?
     };
 
-    let mut fresh: Vec<u32> = server
-        .iter()
-        .copied()
-        .filter(|&uid| uid > highest)
-        .collect();
-    fresh.sort_unstable();
-    if fresh.len() > INITIAL_MESSAGES {
-        fresh = fresh.split_off(fresh.len().saturating_sub(INITIAL_MESSAGES));
-    }
+    // With no local changes waiting, anything recent on the server that is
+    // missing here is a gap (a move the server refused) and is fetched again.
+    let settled = state.store.list_ops(&folder.account_id)?.is_empty();
+    let local_before: HashSet<u32> = if settled {
+        state
+            .store
+            .uids_in_folder(&folder.id)?
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let fresh = uids_to_fetch(&server, &local_before, highest, settled);
     let mut new_unseen: u32 = 0;
     for chunk in fresh.chunks(FETCH_CHUNK) {
         let Some(set) = uid_set(chunk) else { continue };
@@ -375,14 +400,21 @@ async fn sync_folder(
                 flags(message.flags),
                 u64::from(message.size),
             )?;
-            if !initial && !message.flags.seen && folder.role == FolderRole::Inbox {
+            if !initial
+                && message.uid > highest
+                && !message.flags.seen
+                && folder.role == FolderRole::Inbox
+            {
                 new_unseen = new_unseen.saturating_add(1);
             }
             changed = true;
         }
     }
-    if let Some(&max) = fresh.last() {
+    if let Some(&max) = fresh.last().filter(|&&max| max > highest) {
         state.store.set_highest_uid(&folder.id, max)?;
+    }
+    if settled && state.store.delete_unplaced_moves(&folder.id)? > 0 {
+        changed = true;
     }
 
     let local = state.store.uids_in_folder(&folder.id)?;
@@ -409,6 +441,39 @@ async fn sync_folder(
         }
     }
 
+    changed |= prefetch_bodies(state, conn, folder).await?;
+    Ok(Report {
+        changed,
+        new_unseen,
+    })
+}
+
+/// UIDs to download, ascending: those above `highest` (new since the last
+/// sync) and, when `fill_gaps`, any not in `local`, both limited to the
+/// newest `INITIAL_MESSAGES` on the server.
+fn uids_to_fetch(
+    server: &HashSet<u32>,
+    local: &HashSet<u32>,
+    highest: u32,
+    fill_gaps: bool,
+) -> Vec<u32> {
+    let mut newest: Vec<u32> = server.iter().copied().collect();
+    newest.sort_unstable();
+    let skip = newest.len().saturating_sub(INITIAL_MESSAGES);
+    newest
+        .into_iter()
+        .skip(skip)
+        .filter(|uid| *uid > highest || (fill_gaps && !local.contains(uid)))
+        .collect()
+}
+
+/// Download recent small bodies so they open offline. Returns whether any did.
+async fn prefetch_bodies(
+    state: &AppState,
+    conn: &mut ImapConnection,
+    folder: &Folder,
+) -> AppResult<bool> {
+    let mut fetched = false;
     let prefetch = if folder.role == FolderRole::Inbox {
         INBOX_BODY_PREFETCH
     } else {
@@ -419,15 +484,15 @@ async fn sync_folder(
         prefetch,
         u64::from(MAX_BACKGROUND_BODY_BYTES),
     )? {
-        if let Some(raw) = conn.fetch_raw(&folder.path, uid).await? {
+        if let Some(raw) = conn
+            .fetch_raw(&folder.path, uid, u64::from(MAX_BACKGROUND_BODY_BYTES))
+            .await?
+        {
             cache_body(state, &id, &raw)?;
-            changed = true;
+            fetched = true;
         }
     }
-    Ok(Report {
-        changed,
-        new_unseen,
-    })
+    Ok(fetched)
 }
 
 /// Store a downloaded body with its searchable text and list preview.
@@ -464,7 +529,7 @@ pub async fn body_now(state: &AppState, id: &str) -> AppResult<Vec<u8>> {
     let credentials = credentials::for_account(state, &account).await?;
     let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
     let raw = conn
-        .fetch_raw(&folder.path, uid)
+        .fetch_raw(&folder.path, uid, message.size)
         .await?
         .ok_or_else(|| AppError::new("not_found", "This message was deleted on the server."))?;
     conn.logout().await;
@@ -509,6 +574,24 @@ mod tests {
         let value = serde_json::to_value(&op).unwrap_or_default();
         assert_eq!(value["op"], "move");
         assert_eq!(serde_json::from_value::<Op>(value).ok(), Some(op));
+    }
+
+    #[test]
+    fn fetches_new_mail_and_refills_recent_gaps() {
+        let server: HashSet<u32> = (1..=10).collect();
+        let local: HashSet<u32> = [1, 2, 3, 5, 6, 7, 8].into_iter().collect();
+        // Changes still waiting: only what is new.
+        assert_eq!(uids_to_fetch(&server, &local, 8, false), vec![9, 10]);
+        // Settled: the message missing at UID 4 comes back too.
+        assert_eq!(uids_to_fetch(&server, &local, 8, true), vec![4, 9, 10]);
+        // First sync of a huge folder: only the newest INITIAL_MESSAGES.
+        let big: HashSet<u32> = (1..=5000).collect();
+        let first = uids_to_fetch(&big, &HashSet::new(), 0, true);
+        assert_eq!(first.len(), INITIAL_MESSAGES);
+        assert_eq!(first.first(), Some(&4001));
+        // Older mail that was never downloaded is not treated as a gap.
+        let local: HashSet<u32> = (4001..=5000).collect();
+        assert!(uids_to_fetch(&big, &local, 5000, true).is_empty());
     }
 
     #[test]

@@ -23,6 +23,7 @@ import { Sidebar } from '../features/mailbox/Sidebar';
 import { useMessagePage } from '../features/mailbox/useMessagePage';
 import { OutboxView } from '../features/outbox/OutboxView';
 import { isActive } from '../features/outbox/outboxCopy';
+import { playChime } from '../features/notifications/chime';
 import { ReadingPane } from '../features/reader/ReadingPane';
 import { SettingsView } from '../features/settings/SettingsView';
 import { HelpSheet } from '../features/shortcuts/HelpSheet';
@@ -42,7 +43,7 @@ export const SEARCH_DEBOUNCE_MS = 300;
 
 type Screen =
   | { kind: 'mail' }
-  | { kind: 'compose'; draft: Draft; title: string }
+  | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null }
   | { kind: 'settings' }
   | { kind: 'addAccount' };
 
@@ -56,7 +57,7 @@ function errorNotice(error: AppError, what: string): Notice {
   return { tone: 'error', title: `${what}: ${errorTitle(error.kind)}`, text: error.message };
 }
 
-const DEFAULT_SETTINGS: Settings = { theme: 'system', remoteImages: 'block', notifications: false };
+const DEFAULT_SETTINGS: Settings = { theme: 'system', remoteImages: 'block', notifications: false, sound: false };
 
 export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const api = useMailApi();
@@ -106,9 +107,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   useMailEvent(api, 'mail://sync-status', (status) => {
     setSync((all) => ({ ...all, [status.accountId]: status }));
   });
-  // The backend shows the desktop notification itself; here new mail only
-  // refreshes the lists and unread counts.
-  useMailEvent(api, 'mail://new-mail', refresh);
+  // The backend shows the desktop notification itself; here new mail
+  // refreshes the lists and unread counts and plays the chime.
+  useMailEvent(api, 'mail://new-mail', () => {
+    refresh();
+    if (settings?.notifications && settings.sound) playChime();
+  });
   useMailEvent(api, 'mail://accounts-changed', refresh);
 
   const changeSettings = (next: Settings) => {
@@ -250,8 +254,17 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     );
   };
 
-  const compose = (draft: Draft, title: string) => {
-    setScreen({ kind: 'compose', draft, title });
+  /** Open compose; `attachmentsFrom` loads copies of that message's attachments into the draft. */
+  const compose = (draft: Draft, title: string, attachmentsFrom: string | null = null) => {
+    setScreen({ kind: 'compose', draft, title, attachmentsFrom });
+  };
+
+  const forward = (m: MessageDetail) => {
+    compose(forwardDraft(m), 'Forward', m.attachments.length > 0 ? m.id : null);
+  };
+
+  const continueDraft = (m: MessageDetail) => {
+    compose(draftFromMessage(m), 'Edit draft', m.attachments.length > 0 ? m.id : null);
   };
 
   const reply = (m: MessageDetail, all: boolean) => {
@@ -308,7 +321,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           if (message && role !== 'drafts') reply(message, action === 'replyAll');
           return;
         case 'forward':
-          if (message && role !== 'drafts') compose(forwardDraft(message), 'Forward');
+          if (message && role !== 'drafts') forward(message);
           return;
         case 'archive':
           if (role !== 'archive' && role !== 'trash' && role !== 'junk' && role !== 'drafts') remove(active, 'archive');
@@ -376,6 +389,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         <ComposeView
           key={JSON.stringify(screen.draft)}
           initial={screen.draft}
+          attachmentsFrom={screen.attachmentsFrom}
           title={screen.title}
           accounts={accounts}
           offlineNote={offline}
@@ -408,7 +422,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       break;
     case 'addAccount':
       main = (
-        <div className="panel">
+        <div className="panel panel--center">
           <AddAccountForm
             onAdded={() => {
               refresh();
@@ -464,14 +478,11 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               account={accounts.find((a) => a.id === active?.accountId)}
               role={roleOf(active)}
               alwaysLoadImages={settings?.remoteImages === 'allow'}
+              theme={theme}
               onLoaded={setLoaded}
               onReply={reply}
-              onForward={(m) => {
-                compose(forwardDraft(m), 'Forward');
-              }}
-              onEdit={(m) => {
-                compose(draftFromMessage(m), 'Edit draft');
-              }}
+              onForward={forward}
+              onEdit={continueDraft}
               onArchive={() => {
                 if (active) remove(active, 'archive');
               }}

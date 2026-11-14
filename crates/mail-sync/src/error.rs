@@ -54,6 +54,9 @@ pub enum SyncError {
         /// Server port.
         port: u16,
     },
+    /// The connection broke mid-conversation (Wi-Fi lost, laptop slept).
+    #[error("the connection to the mail server dropped.")]
+    Dropped,
     /// No answer in time.
     #[error("{host} took too long to answer.")]
     Timeout {
@@ -73,9 +76,15 @@ pub enum SyncError {
         "the server didn't accept the login. Check the email and password (some providers need an app password)."
     )]
     Auth,
-    /// The server answered with an error.
+    /// The server answered with an error that may pass (a dropped
+    /// connection, or a refusal it marked as temporary).
     #[error("the mail server reported an error: {0}")]
     Protocol(String),
+    /// The server understood the request and said no (IMAP `NO` or `BAD`).
+    /// Asking again won't help: the folder is gone, the message was moved
+    /// elsewhere, and so on.
+    #[error("the mail server refused: {0}")]
+    Refused(String),
     /// Bad settings.
     #[error("{0}")]
     Config(String),
@@ -100,13 +109,13 @@ impl SyncError {
     #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         match self {
-            Self::Connect { .. } | Self::Timeout { .. } => ErrorKind::Connect,
+            Self::Connect { .. } | Self::Timeout { .. } | Self::Dropped => ErrorKind::Connect,
             Self::Tls { .. } => ErrorKind::Tls,
             Self::Auth => ErrorKind::Auth,
             Self::Config(_) => ErrorKind::Config,
             Self::Invalid(_) => ErrorKind::Invalid,
             Self::Keyring(_) => ErrorKind::Keyring,
-            Self::Protocol(_) | Self::Send { .. } => ErrorKind::Internal,
+            Self::Protocol(_) | Self::Refused(_) | Self::Send { .. } => ErrorKind::Internal,
         }
     }
 
@@ -114,9 +123,10 @@ impl SyncError {
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         match self {
-            Self::Connect { .. } | Self::Timeout { .. } | Self::Protocol(_) => true,
+            Self::Connect { .. } | Self::Timeout { .. } | Self::Dropped | Self::Protocol(_) => true,
             Self::Send { permanent, .. } => !*permanent,
             Self::Tls { .. }
+            | Self::Refused(_)
             | Self::Auth
             | Self::Config(_)
             | Self::Invalid(_)
@@ -125,12 +135,23 @@ impl SyncError {
     }
 }
 
+/// Whether an IMAP `NO` carries a response code that means "try later"
+/// (RFC 5530: busy, locked, a rate limit or a server fault).
+#[must_use]
+pub fn is_temporary_refusal(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    ["UNAVAILABLE", "INUSE", "LIMIT", "SERVERBUG"]
+        .iter()
+        .any(|code| upper.contains(code))
+}
+
 impl From<async_imap::error::Error> for SyncError {
     fn from(error: async_imap::error::Error) -> Self {
         use async_imap::error::Error as E;
         match error {
-            E::Io(_) | E::ConnectionLost => Self::Protocol("the connection dropped".to_owned()),
-            E::No(text) | E::Bad(text) => Self::Protocol(text),
+            E::Io(_) | E::ConnectionLost => Self::Dropped,
+            E::No(text) if is_temporary_refusal(&text) => Self::Protocol(text),
+            E::No(text) | E::Bad(text) => Self::Refused(text),
             other => Self::Protocol(other.to_string()),
         }
     }
@@ -139,6 +160,31 @@ impl From<async_imap::error::Error> for SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_refusals_are_final_unless_marked_temporary() {
+        use async_imap::error::Error as E;
+        let refused = SyncError::from(E::No(
+            r#"code: Some(TryCreate), info: Some("Mailbox doesn't exist")"#.into(),
+        ));
+        assert!(matches!(refused, SyncError::Refused(_)));
+        assert!(!refused.is_transient());
+        assert!(!SyncError::from(E::Bad("code: None, info: None".into())).is_transient());
+        for temporary in [
+            r#"code: Some(Unavailable), info: Some("try later")"#,
+            r#"code: Some(Other("INUSE", None)), info: None"#,
+            r#"code: Some(Other("LIMIT", None)), info: None"#,
+        ] {
+            assert!(
+                SyncError::from(E::No(temporary.into())).is_transient(),
+                "{temporary}"
+            );
+        }
+        let dropped = SyncError::from(E::ConnectionLost);
+        assert!(dropped.is_transient());
+        // Shown as "offline", not as a server error.
+        assert_eq!(dropped.kind(), ErrorKind::Connect);
+    }
 
     #[test]
     fn kinds_and_retry_rules() {

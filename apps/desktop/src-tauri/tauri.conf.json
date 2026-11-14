@@ -20,13 +20,19 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
+    "publisher": "Mocky Digital",
+    "homepage": "https://github.com/mockydevs/mocky-mail",
     "shortDescription": "Fast, private email for Windows, macOS and Linux.",
+    "longDescription": "Mocky Mail is a fast, private desktop email client by Mocky Digital. Mail is kept on your computer, messages wait in the Outbox until the connection returns, and remote images are blocked until you allow them.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }

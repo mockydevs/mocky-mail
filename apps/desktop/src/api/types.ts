@@ -94,6 +94,8 @@ export type MessageDetail = MessageListItem & {
   blockedRemoteImages: number;
   attachments: AttachmentMeta[];
   messageIdHeader: string | null;
+  /** In-Reply-To of this message (for continuing a saved reply draft). */
+  inReplyTo: string | null;
   references: string[];
 };
 
@@ -173,6 +175,8 @@ export interface Settings {
   theme: ThemeSetting;
   remoteImages: 'block' | 'allow';
   notifications: boolean;
+  /** A short chime with each new-mail notification. */
+  sound: boolean;
 }
 
 export interface SyncStatus {

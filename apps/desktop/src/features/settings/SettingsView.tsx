@@ -5,6 +5,8 @@ import { toAppError } from '../../api/errors';
 import type { Account, AppError, Settings, ThemeSetting } from '../../api/types';
 import { ConfirmDialog } from '../../ui/Modal';
 import { Icon } from '../../ui/Icon';
+import { PasswordField } from '../../ui/PasswordField';
+import { playChime } from '../notifications/chime';
 import { accountErrorCopy } from '../accounts/providers';
 
 interface Props {
@@ -86,6 +88,28 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
             />
             Show a desktop notification when new mail arrives
           </label>
+          <div className="choice-row">
+            <label className="choice">
+              <input
+                type="checkbox"
+                checked={settings.sound}
+                disabled={!settings.notifications}
+                onChange={(e) => {
+                  onChange({ ...settings, sound: e.target.checked });
+                }}
+              />
+              Play a sound with new mail
+            </label>
+            <button
+              type="button"
+              className="btn btn--secondary btn--small"
+              onClick={() => {
+                playChime({ force: true });
+              }}
+            >
+              Play sound
+            </button>
+          </div>
           <p className="form-hint">
             If nothing appears, check that notifications are allowed for Mocky Mail in your system settings.
           </p>
@@ -200,16 +224,12 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
       {account.auth === 'password' &&
         (changingPassword ? (
           <form className="inline-form" onSubmit={updatePassword}>
-            <label className="form-field" htmlFor={`${id}-password`}>
-              <span className="form-field__label">New password or app password</span>
-              <input
-                id={`${id}-password`}
-                ref={passwordRef}
-                className="field"
-                type="password"
-                autoComplete="new-password"
-              />
-            </label>
+            <div className="form-field">
+              <label className="form-field__label" htmlFor={`${id}-password`}>
+                New password or app password
+              </label>
+              <PasswordField id={`${id}-password`} inputRef={passwordRef} autoComplete="new-password" />
+            </div>
             <button type="submit" className="btn btn--primary" disabled={busy}>
               Update password
             </button>

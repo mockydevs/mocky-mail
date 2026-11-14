@@ -77,10 +77,22 @@ describe('forward and edit', () => {
     expect(draft.replyToMessageId).toBeNull();
   });
 
-  it('reopens a draft', () => {
-    const draft = draftFromMessage(byId('d1'));
+  it('reopens a draft, replacing the saved copy and keeping its threading', () => {
+    const files = [{ path: '/tmp/Menu.pdf', fileName: 'Menu.pdf', size: 1 }];
+    const draft = draftFromMessage(byId('d1'), files);
     expect(draft.to).toBe('Brian Otieno <brian@personal.example>');
     expect(draft.bodyText).toBe('Friday works. 1pm at');
+    expect(draft.draftMessageId).toBe('<d1@mock.example>');
+    expect(draft.inReplyTo).toBe('<lunch-1@personal.example>');
+    expect(draft.references).toEqual(['<lunch-1@personal.example>']);
+    expect(draft.attachments).toEqual(files);
+  });
+
+  it('carries forwarded attachments and never a draft id', () => {
+    const files = [{ path: '/tmp/a.pdf', fileName: 'a.pdf', size: 1 }];
+    const draft = forwardDraft(byId('m1'), 'UTC', files);
+    expect(draft.attachments).toEqual(files);
+    expect(draft.draftMessageId).toBeNull();
   });
 });
 

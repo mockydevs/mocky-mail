@@ -97,6 +97,7 @@ function message(m: Partial<MockMessage> & Pick<MockMessage, 'id' | 'accountId' 
     blockedRemoteImages: 0,
     attachments: [],
     messageIdHeader: `<${m.id}@mock.example>`,
+    inReplyTo: null,
     references: [],
     ...m,
   };
@@ -185,6 +186,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     from: { name: null, address: 'you@personal.example' },
     subject: 'Re: Lunch on Friday?', preview: 'Friday works. 1pm at',
     date: at('2026-11-13T07:14:00Z'), text: 'Friday works. 1pm at',
+    inReplyTo: '<lunch-1@personal.example>',
     references: ['<lunch-1@personal.example>'],
     attachments: [{ index: 0, fileName: 'Menu.pdf', mimeType: 'application/pdf', size: 220 * 1024 }],
   }),
@@ -225,4 +227,4 @@ export const MOCK_OUTBOX: OutboxEntry[] = [
   },
 ];
 
-export const MOCK_SETTINGS: Settings = { theme: 'system', remoteImages: 'block', notifications: true };
+export const MOCK_SETTINGS: Settings = { theme: 'system', remoteImages: 'block', notifications: true, sound: true };

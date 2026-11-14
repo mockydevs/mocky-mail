@@ -774,7 +774,7 @@ button:disabled {
   flex: 1 1 auto;
   min-height: 0;
   border-top: 1px solid var(--border);
-  background: #fff;
+  background: var(--surface);
 }
 
 .email-frame {
@@ -783,7 +783,7 @@ button:disabled {
   width: 100%;
   min-height: 0;
   border: 0;
-  background: #fff;
+  background: var(--surface);
   color-scheme: light;
 }
 
@@ -1307,6 +1307,19 @@ kbd {
 }
 
 
+/* A single card (such as Add account) sits in the middle of the space.
+   Auto margins centre it but still let a tall card scroll from its top. */
+.panel--center {
+  display: flex;
+  flex-direction: column;
+}
+
+.panel--center > .account-form {
+  flex: none;
+  width: 100%;
+  margin: auto;
+}
+
 .account-form {
   flex: 1 1 420px;
   max-width: 560px;
@@ -1495,7 +1508,7 @@ kbd {
 .nav-group__title--account {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   text-transform: none;
   letter-spacing: 0;
   font-size: 13px;
@@ -1508,8 +1521,13 @@ kbd {
   white-space: nowrap;
 }
 
+/* Account dot and name line up with the folder icons and labels below. */
+.nav-group__title--account .dot {
+  margin: 0 4px;
+}
+
 .nav-group__sub {
-  margin: -4px 10px 6px 28px;
+  margin: -4px 10px 6px 38px;
   font-size: 12px;
   color: var(--muted);
   overflow: hidden;
@@ -1524,6 +1542,7 @@ kbd {
 }
 
 .nav__item--dashed {
+  padding-left: 9px;
   border: 1px dashed var(--dashed);
 }
 
@@ -1721,7 +1740,217 @@ kbd {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  /* Let the thin scrollbar sit in the sidebar's right padding so rows keep
+     the same width and right edge whether or not the list scrolls. */
+  margin-right: -10px;
+  padding-right: 2px;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 22px;
+}
+
+.compose__loading {
+  padding: 0 24px 8px;
+}
+
+.compose .compose__attach-error {
+  margin: 0 20px 12px;
+}
+
+/* Folder tree: icons line up with the unified folders above; nesting indents
+   inside the row so the highlight stays full width, and the expand arrow sits
+   at the right edge. */
+.tree-row {
+  position: relative;
+}
+
+.tree-row .nav__item {
+  padding-left: calc(10px + var(--depth, 0) * 18px);
+}
+
+.tree-row--parent .nav__item {
+  padding-right: 36px;
+}
+
+.tree-toggle {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.tree-toggle:hover {
+  background: var(--row-hover);
+}
+
+.tree-chevron {
+  display: inline-flex;
+  transition: transform 120ms ease;
+}
+
+.tree-chevron--closed {
+  transform: rotate(-90deg);
+}
+
+.nav__item--container {
+  cursor: default;
+  color: var(--muted);
+}
+
+.nav__item--container:hover {
+  background: transparent;
+}
+
+.nav--nested {
+  margin: 0;
+}
+
+/* Thin scrollbars that follow the theme; the thumb only shows clearly on hover. */
+@supports selector(::-webkit-scrollbar) {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: var(--border) padding-box;
+  }
+
+  :hover::-webkit-scrollbar-thumb {
+    background-color: var(--dashed);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--faint);
+  }
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--dashed) transparent;
+  }
+}
+
+/* Password with a show/hide button inside the field's right edge. */
+.password-field {
+  position: relative;
+  display: flex;
+}
+
+.password-field .field {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 48px;
+}
+
+.password-field__toggle {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  width: 44px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  transform: translateY(-50%);
+}
+
+.password-field__toggle:hover {
+  color: var(--text);
+}
+
+/* Account header: one row per account that opens or closes its folders. */
+.nav-group__heading {
+  margin: 0;
+  font: inherit;
+}
+
+.account-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 4px 14px 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.account-toggle:hover {
+  background: var(--row-hover);
+}
+
+.account-toggle .dot {
+  margin: 0 4px;
+}
+
+.account-toggle__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.account-toggle .nav-group__name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.account-toggle .nav-group__sub {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.account-toggle .tree-chevron {
+  flex: none;
+  color: var(--muted);
+}
+
+.account-toggle[aria-expanded='true'] {
+  margin-bottom: 4px;
+}
+
+.account-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-group--account:has(> ul) {
+  margin-bottom: 8px;
+}
+
+.choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
 }
