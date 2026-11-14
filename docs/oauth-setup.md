@@ -1,6 +1,6 @@
 # Desktop mailbox sign-in
 
-Mocky Mail uses the system browser, authorization code with PKCE S256, a random state, and an ephemeral loopback listener. The Rust process exchanges the code. Keep tokens out of IPC responses, logs, telemetry and the renderer. Store the refresh token in the operating system keyring. When refresh returns a replacement token, persist it before the next sync. If it omits a replacement, retain the old one. Reauthorize after an invalid grant.
+Mocky Mail uses the system browser (opened through the Tauri opener plugin, which can also open it on Android), authorization code with PKCE S256, a random state, and an ephemeral loopback listener. The Rust process exchanges the code. Keep tokens out of IPC responses, logs, telemetry and the renderer. Store the refresh token in the operating system keyring. When refresh returns a replacement token, persist it before the next sync. If it omits a replacement, retain the old one. Reauthorize after an invalid grant.
 
 ## Google
 
