@@ -268,7 +268,7 @@ footer a { color: inherit; }
     <div class="wrap">
       <div class="section-head">
         <h2>Download</h2>
-        <p class="section-lead">Version 0.2.0. Free, with no ads.</p>
+        <p class="section-lead">Version 0.2.1. Free, with no ads.</p>
       </div>
       <div class="downloads">
         <article class="dl" data-os="linux">
@@ -279,7 +279,7 @@ footer a { color: inherit; }
           </div>
           <p>Ubuntu 22.04 or newer, Debian 12, Linux Mint and Pop!_OS (64-bit).</p>
           <div class="dl__foot">
-            <a class="btn" href="/downloads/mocky-mail_0.2.0_amd64.deb" download>Download .deb</a>
+            <a class="btn" href="/downloads/mocky-mail_0.2.1_amd64.deb" download>Download .deb</a>
             <span class="meta">13.1 MB &middot; or <a href="#install-linux">one command</a></span>
           </div>
         </article>
@@ -291,7 +291,7 @@ footer a { color: inherit; }
           </div>
           <p>Windows 10 and 11 (64-bit).</p>
           <div class="dl__foot">
-            <a class="btn" href="/downloads/mocky-mail_0.2.0_x64-setup.exe" download>Download .exe</a>
+            <a class="btn" href="/downloads/mocky-mail_0.2.1_x64-setup.exe" download>Download .exe</a>
             <span class="meta">10.7 MB &middot; <a href="#install-windows">how to install</a></span>
           </div>
         </article>
@@ -330,12 +330,12 @@ footer a { color: inherit; }
             <button type="button" class="cmd__copy" data-copy="linux-cmd">Copy</button>
           </div>
           <p class="meta">It downloads the latest version, checks its checksum and installs it with apt, asking for your password only for apt. Run it again any time to update. <a href="https://github.com/mockydevs/mocky-mail/blob/main/install.sh">Read the script</a> first if you like.</p>
-          <p class="meta">Or install the downloaded file yourself: <code>sudo apt install ./mocky-mail_0.2.0_amd64.deb</code>. To remove it: <code>sudo apt remove mocky-mail</code> (your mail and settings stay).</p>
+          <p class="meta">Or install the downloaded file yourself: <code>sudo apt install ./mocky-mail_0.2.1_amd64.deb</code>. To remove it: <code>sudo apt remove mocky-mail</code> (your mail and settings stay).</p>
         </div>
         <div class="install__card" id="install-windows">
           <h3>Install on Windows</h3>
           <ol>
-            <li>Download <code>mocky-mail_0.2.0_x64-setup.exe</code> and open it.</li>
+            <li>Download <code>mocky-mail_0.2.1_x64-setup.exe</code> and open it.</li>
             <li>The installer is not code-signed yet, so Windows may say it protected your PC. Click <strong>More info</strong>, then <strong>Run anyway</strong>.</li>
             <li>Follow the steps, then open <strong>Mocky Mail</strong> from the Start menu and add your email account.</li>
           </ol>
@@ -345,10 +345,10 @@ footer a { color: inherit; }
 
       <details class="check">
         <summary>Check your download (SHA-256)</summary>
-        <p class="meta">To confirm a file is genuine, compare its checksum. On Linux run <code>sha256sum mocky-mail_0.2.0_amd64.deb</code>; on Windows run <code>certutil -hashfile mocky-mail_0.2.0_x64-setup.exe SHA256</code> in Command Prompt. Also listed in <a href="/downloads/SHA256SUMS">SHA256SUMS</a>.</p>
+        <p class="meta">To confirm a file is genuine, compare its checksum. On Linux run <code>sha256sum mocky-mail_0.2.1_amd64.deb</code>; on Windows run <code>certutil -hashfile mocky-mail_0.2.1_x64-setup.exe SHA256</code> in Command Prompt. Also listed in <a href="/downloads/SHA256SUMS">SHA256SUMS</a>.</p>
         <dl class="sums">
-          <dt>Windows .exe</dt><dd><code>96fb4ef9e29e9a3eec438bd60c4def8cdfd4d7238c630348266d044b2bfff898</code></dd>
-          <dt>Linux .deb</dt><dd><code>c97c0c0060b56b4ac4a5d7cc557065da9415c6b40f2b2dba2ee743ffd3b45008</code></dd>
+          <dt>Windows .exe</dt><dd><code>9bace1dfafa00cc2d8061c89dae0a13d98c03ac5d8cbe3f57dc9a010344084a8</code></dd>
+          <dt>Linux .deb</dt><dd><code>65e74b95d186dc4bd4d00819daa7bfaffbd16b26e6d1e926eb758858907a0d3e</code></dd>
         </dl>
       </details>
     </div>
@@ -406,7 +406,7 @@ footer a { color: inherit; }
     card.parentNode.insertBefore(card, card.parentNode.firstChild);
     if (os === 'windows') {
       var winHero = document.getElementById('hero-download');
-      winHero.href = '/downloads/mocky-mail_0.2.0_x64-setup.exe';
+      winHero.href = '/downloads/mocky-mail_0.2.1_x64-setup.exe';
       winHero.setAttribute('download', '');
       winHero.textContent = 'Download for Windows';
       document.getElementById('hero-note').textContent = 'Free. For Windows 10 and 11, 10.7 MB.';
@@ -419,7 +419,7 @@ footer a { color: inherit; }
     }
     if (os === 'linux') {
       var hero = document.getElementById('hero-download');
-      hero.href = '/downloads/mocky-mail_0.2.0_amd64.deb';
+      hero.href = '/downloads/mocky-mail_0.2.1_amd64.deb';
       hero.setAttribute('download', '');
       hero.textContent = 'Download for Linux';
       document.getElementById('hero-note').textContent = 'Free. .deb for Ubuntu, Debian and Mint, 13.1 MB.';
