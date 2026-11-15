@@ -294,9 +294,9 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
                 <p className="reader__meta">{formatLongDate(message.date)}</p>
                 <div className="phone-details__row">
                   {account && (
-                    <span className="chip">
+                    <span className="account-chip" title={account.email}>
                       <span className="dot" style={{ background: account.color }} aria-hidden="true" />
-                      {account.displayName || account.email}
+                      <span className="account-chip__name">{account.displayName || account.email}</span>
                     </span>
                   )}
                   {isHtml && theme === 'dark' && (
@@ -535,9 +535,9 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
           </div>
           <div className="reader__when">
             {account && (
-              <span className="chip">
+              <span className="account-chip" title={account.email}>
                 <span className="dot" style={{ background: account.color }} aria-hidden="true" />
-                {account.displayName || account.email}
+                <span className="account-chip__name">{account.displayName || account.email}</span>
               </span>
             )}
             <time dateTime={message.date === null ? undefined : new Date(message.date * 1000).toISOString()}>

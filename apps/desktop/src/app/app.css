@@ -785,13 +785,33 @@ button:disabled {
   color: var(--muted);
 }
 
-.chip {
+/* Which account a message belongs to. Its own class: compose's recipient
+   chips (`.chip`) are styled for a remove button and must not leak in here. */
+.account-chip {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 6px;
-  padding: 2px 10px;
+  max-width: 220px;
+  height: 22px;
+  padding: 0 10px 0 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.account-chip .dot {
+  width: 8px;
+  height: 8px;
+}
+
+.account-chip__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .reader__body {

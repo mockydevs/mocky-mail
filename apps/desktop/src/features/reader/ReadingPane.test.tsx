@@ -89,6 +89,15 @@ describe('reading pane', () => {
     expect(box).toHaveAttribute('rows', '1');
   });
 
+  it('labels the account with its own badge, not a compose recipient chip', async () => {
+    renderApp();
+    await rows();
+    const badge = await within(reader()).findByText('Work');
+    expect(badge.closest('.account-chip')).not.toBeNull();
+    // `.chip` is compose's recipient chip, styled around a remove button.
+    expect(badge.closest('.chip')).toBeNull();
+  });
+
   it('opens links in plain text mail through the system browser', async () => {
     const { user, api } = renderApp();
     await rows();
