@@ -80,6 +80,8 @@ command -v sha256sum > /dev/null 2>&1 || fail "sha256sum is needed (part of core
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+# apt reads the file as its own "_apt" user, so it must be able to get in.
+chmod 755 "$work"
 
 say "Checking the latest version..."
 curl -fsSL "$BASE_URL/SHA256SUMS" -o "$work/SHA256SUMS" || fail "couldn't reach $BASE_URL"
@@ -103,8 +105,10 @@ else
 fi
 confirm "Continue?"
 
-say "Downloading $file..."
-curl -fL --progress-bar "$BASE_URL/$file" -o "$work/$file" || fail "download failed"
+size="$(curl -fsSIL "$BASE_URL/$file" | tr -d '\r' | awk 'tolower($1)=="content-length:" {n=$2} END {if (n) printf "%.1f MB", n/1048576}')"
+say "Downloading $file${size:+ ($size)}..."
+curl -fsSL "$BASE_URL/$file" -o "$work/$file" || fail "download failed"
+chmod 644 "$work/$file"
 actual="$(sha256sum "$work/$file" | cut -d' ' -f1)"
 [ "$actual" = "$expected" ] || fail "the download doesn't match its published checksum; nothing was installed. Please try again."
 say "Checksum verified."
