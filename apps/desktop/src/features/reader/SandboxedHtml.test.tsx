@@ -3,13 +3,15 @@ import { render, screen } from '@testing-library/react';
 import { EMAIL_CSP, EMAIL_CSP_REMOTE_IMAGES, emailDocument, SandboxedHtml } from './SandboxedHtml';
 
 describe('SandboxedHtml', () => {
-  it('renders in an iframe with an empty sandbox and the CSP', () => {
+  it('renders in a sandboxed iframe without scripts, with the CSP', () => {
     render(<SandboxedHtml title="Message body" html="<p>Hello</p>" />);
     const frame = screen.getByTitle('Message body');
     expect(frame.tagName).toBe('IFRAME');
-    // Only popups are allowed (links open via the backend's new-window guard);
-    // never scripts, same-origin, forms or top navigation.
-    expect(frame.getAttribute('sandbox')).toBe('allow-popups');
+    // Popups (links open via the backend's new-window guard) and same-origin,
+    // so the app can read the rendered email to fix its layout and contrast.
+    // Never scripts, forms or top navigation; the CSP blocks scripts too.
+    const flags = (frame.getAttribute('sandbox') ?? '').split(' ').sort();
+    expect(flags).toEqual(['allow-popups', 'allow-same-origin']);
     expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
     const doc = frame.getAttribute('srcdoc') ?? '';
     expect(doc).toContain(`<meta http-equiv="Content-Security-Policy" content="${EMAIL_CSP}">`);

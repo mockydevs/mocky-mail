@@ -130,9 +130,13 @@ function scrollWideTables(body: HTMLElement, pageWidth: number) {
 function flatten(doc: Document, body: HTMLElement, view: Window, pageWidth: number) {
   // The email's outer background becomes the page's, so no band of another
   // colour frames it at the screen edges.
+  // Only a box that wraps most of the email counts: a coloured header bar
+  // would otherwise paint the whole page and leave the body text unreadable.
   let page = view.getComputedStyle(body).backgroundColor;
+  const emailHeight = body.scrollHeight;
   for (const element of body.querySelectorAll<HTMLElement>(CONTAINERS)) {
-    if (widthOf(element) < pageWidth * 0.8) continue;
+    const box = element.getBoundingClientRect();
+    if (box.width < pageWidth * 0.8 || box.height < emailHeight * 0.8) continue;
     const style = view.getComputedStyle(element);
     if (hasBackground(style)) {
       page = style.backgroundColor;

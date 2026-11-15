@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { Theme } from '../../theme/useTheme';
+import { fixContrast } from './contrast';
 import { fitToPhone, PHONE_STYLE } from './phoneLayout';
 
 /**
@@ -67,11 +68,15 @@ const UNMEASURED_HEIGHT = 480;
  * navigation are always blocked; `allow-popups` lets link clicks become
  * new-window requests that the app hands to the system browser.
  *
- * Normally the frame fills the space it is given and scrolls itself, with no
- * same-origin access. With `fitContent` (the phone layout) it grows to the
- * email's full height so the message scrolls as one page. Measuring needs
- * `allow-same-origin`; scripts stay blocked by the sandbox and the CSP, so the
- * email still cannot run code or reach the app.
+ * Once loaded, text the email made unreadable (white on a background picture
+ * the sanitizer removed, pale grey footers) is given enough contrast. Normally
+ * the frame then fills the space it is given and scrolls itself; with
+ * `fitContent` (the phone layout) the email is laid out for the narrow screen
+ * and the frame grows to its full height, so the message scrolls as one page.
+ *
+ * Reading the rendered email needs `allow-same-origin`. Scripts stay blocked
+ * by the sandbox and the CSP, so the email still cannot run code or reach the
+ * app; only the app reads the email.
  */
 export function SandboxedHtml({
   html,
@@ -91,7 +96,7 @@ export function SandboxedHtml({
 
   useEffect(() => {
     const element = frame.current;
-    if (!fitContent || !element) return;
+    if (!element) return;
     let observer: ResizeObserver | null = null;
     const measure = () => {
       const doc = element.contentDocument;
@@ -99,8 +104,12 @@ export function SandboxedHtml({
       setHeight(Math.ceil(doc.documentElement.scrollHeight));
     };
     const onLoad = () => {
-      // Phone: lay the email out for the narrow screen first, then size the frame to it.
-      if (element.contentDocument?.body) fitToPhone(element.contentDocument);
+      const doc = element.contentDocument;
+      if (!doc?.body) return;
+      if (fitContent) fitToPhone(doc);
+      fixContrast(doc);
+      if (!fitContent) return;
+      // Phone: size the frame to the laid-out email.
       measure();
       observer?.disconnect();
       // The frame's own ResizeObserver: it watches the email's layout, which
@@ -126,7 +135,7 @@ export function SandboxedHtml({
       ref={frame}
       className="email-frame"
       title={title}
-      sandbox={fitContent ? 'allow-popups allow-same-origin' : 'allow-popups'}
+      sandbox="allow-popups allow-same-origin"
       referrerPolicy="no-referrer"
       srcDoc={emailDocument(html, theme, allowRemoteImages, fitContent)}
       style={

@@ -13,8 +13,12 @@ Do not open a public issue. We aim to reply within 3 working days.
 - **HTML email** is cleaned in Rust with an allow-list (`mail-core/src/sanitize.rs`):
   no scripts, event handlers, forms, iframes, SVG, `<style>` blocks,
   `javascript:` or `data:` links, or CSS that can position content or load
-  URLs. The result is then shown in an `<iframe sandbox="">` with its own
-  Content-Security-Policy, so even a sanitizer bug cannot run code.
+  URLs. The result is then shown in an `<iframe sandbox="allow-popups
+  allow-same-origin">` with its own Content-Security-Policy. Scripts are never
+  allowed, by the sandbox or the CSP, so even a sanitizer bug cannot run code.
+  Same-origin lets the app read the rendered email to keep text readable and,
+  on phones, to fit the layout to the screen; link popups go to the system
+  browser.
 - **Remote images are blocked** until you choose to show them.
 - **Sender names, subjects and file names** have control characters and
   invisible direction marks removed, which defeats tricks like

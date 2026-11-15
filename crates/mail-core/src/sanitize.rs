@@ -221,6 +221,9 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
     builder
         .url_schemes(HashSet::from(["http", "https", "mailto", "tel", "cid"]))
         .url_relative(UrlRelative::Deny)
+        // A <title> is the document's name, not part of the message: without
+        // this its text shows up as stray words at the top of the email.
+        .add_clean_content_tags(["title"])
         .link_rel(Some("noopener noreferrer"))
         // Links open as popups, which the app hands to the system browser;
         // the viewer itself never navigates.
@@ -291,6 +294,15 @@ mod tests {
 
     fn clean(html: &str) -> String {
         sanitize_html(html, RemoteContent::Block).html
+    }
+
+    #[test]
+    fn drops_the_document_title_text() {
+        let out = clean(
+            "<html><head><title>Live Rating Notice</title></head><body><p>Body</p></body></html>",
+        );
+        assert!(!out.contains("Live Rating Notice"), "{out}");
+        assert!(out.contains("<p>Body</p>"));
     }
 
     #[test]

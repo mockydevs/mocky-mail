@@ -9,7 +9,7 @@ describe('reading pane', () => {
     const { user } = renderApp();
     await user.click((await rows()).getByRole('button', { name: /Build server/ }));
     const frame = await within(reader()).findByTitle('Message: Nightly build passed on main');
-    expect(frame).toHaveAttribute('sandbox', 'allow-popups');
+    expect(frame).toHaveAttribute('sandbox', 'allow-popups allow-same-origin');
     expect(frame.getAttribute('srcdoc')).not.toContain('badge.svg');
     await user.click(within(reader()).getByRole('button', { name: 'Show images (1 blocked)' }));
     const shown = await within(reader()).findByTitle('Message: Nightly build passed on main');
