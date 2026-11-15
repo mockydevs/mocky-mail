@@ -8,7 +8,7 @@ import { useLoad } from '../../lib/useLoad';
 import type { Theme } from '../../theme/useTheme';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
-import { formatMailbox, formatMailboxes, replyDraft, toolbarActions } from '../compose/seed';
+import { formatMailbox, formatMailboxes, replyDraft, toolbarActions, withSignature } from '../compose/seed';
 import { useSendStatus } from '../outbox/useSendStatus';
 import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
@@ -661,12 +661,18 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
     event.preventDefault();
     if (!text.trim() || busy) return;
     const base = replyDraft(message, account, false);
-    const draft = { ...base, bodyText: `${text.trim()}${base.bodyText}` };
     setBusy(true);
     setError(null);
     sending.clear();
+    let draft = base;
     api
-      .checkDraft(draft)
+      .getSignature(account.id)
+      // A quick reply carries the signature like any other reply.
+      .catch(() => null)
+      .then((signature) => {
+        draft = { ...base, bodyText: `${text.trim()}${withSignature(base.bodyText, signature?.text ?? null)}` };
+        return api.checkDraft(draft);
+      })
       .then(() => api.sendMessage(draft))
       .then(
         (entry) => {

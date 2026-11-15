@@ -13,6 +13,7 @@ use mail_core::message::{
     Mailbox, attachment_bytes, make_preview, parse_body, parse_summary, safe_file_name,
 };
 use mail_core::outbox::{OutboxItem, OutboxState, RetryPolicy, SendOutcome};
+use mail_core::signature::html_with_signature;
 use mail_store::{Account, AuthKind, NewOutbox, OutboxEntry};
 use mail_sync::imap::ImapConnection;
 use mail_sync::outgoing::{OutgoingAttachment, OutgoingMessage, build, mime_for_file_name};
@@ -172,6 +173,9 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
         bcc: field("Bcc", &draft.bcc)?,
         subject: draft.subject.clone(),
         body_text: draft.body_text.clone(),
+        // The full signature, if its block is still in the body as compose put it.
+        body_html: crate::signatures::load(state, &account.id)?
+            .and_then(|signature| html_with_signature(&draft.body_text, &signature)),
         in_reply_to: draft.in_reply_to.clone(),
         references: draft.references.clone(),
         attachments,

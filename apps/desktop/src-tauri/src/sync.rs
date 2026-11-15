@@ -6,8 +6,11 @@
 //! Errors back off and retry; a wrong password waits for the user.
 
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use futures::FutureExt as _;
 
 use mail_core::folders::{FolderRole, decode_folder_name, detect_role};
 use mail_core::message::{parse_body, parse_summary};
@@ -140,12 +143,19 @@ async fn run(app: AppHandle, state: Arc<AppState>, account_id: String, wake: Arc
             return;
         };
         events::sync_status(&app, &account_id, "syncing", None);
-        let error = match session(&app, &state, &account, &wake).await {
-            Ok(()) => {
+        // A bug must not stop this account's mail for good: a session that
+        // panics is reported like any other error and retried.
+        let attempt = AssertUnwindSafe(session(&app, &state, &account, &wake)).catch_unwind();
+        let error = match attempt.await {
+            Ok(Ok(())) => {
                 backoff = FIRST_BACKOFF;
                 continue;
             }
-            Err(error) => error,
+            Ok(Err(error)) => error,
+            Err(_) => {
+                eprintln!("mail sync stopped unexpectedly; restarting it");
+                AppError::internal("Mail sync stopped unexpectedly. Restarting it.")
+            }
         };
         let label = if error.kind == "connect" {
             "offline"
@@ -178,9 +188,15 @@ async fn session(
     let started = Instant::now();
     let mut full_done = false;
     loop {
-        replay_ops(state, account, &mut conn).await?;
-        if !full_done {
-            refresh_folders(state, account, &mut conn).await?;
+        // Anything that goes wrong here is reported after the pass, not
+        // instead of it: new mail must still arrive. Only a lost connection
+        // ends the pass early.
+        let mut problem: Option<AppError> = None;
+        if let Err(error) = replay_ops(state, account, &mut conn).await {
+            stop_if_disconnected(error, &mut problem)?;
+        }
+        if !full_done && let Err(error) = refresh_folders(state, account, &mut conn).await {
+            stop_if_disconnected(error, &mut problem)?;
         }
         let folders = state.store.list_folders(&account.id)?;
         let mut new_unseen: u32 = 0;
@@ -193,7 +209,15 @@ async fn session(
             .collect();
         due.sort_by_key(|f| f.role != FolderRole::Inbox);
         for folder in due {
-            let report = sync_folder(state, &mut conn, folder).await?;
+            let report = match sync_folder(state, &mut conn, folder).await {
+                Ok(report) => report,
+                Err(error) => {
+                    // One folder the server or the database chokes on must
+                    // not hold up the others; the inbox goes first anyway.
+                    stop_if_disconnected(error, &mut problem)?;
+                    continue;
+                }
+            };
             if report.changed {
                 events::changed(app, &account.id, std::slice::from_ref(&folder.id));
             }
@@ -202,6 +226,11 @@ async fn session(
         full_done = true;
         if new_unseen > 0 {
             events::new_mail(app, state, account, new_unseen);
+        }
+        if let Some(error) = problem {
+            // Shown as the account's status; the session backs off and the
+            // next pass tries everything again.
+            return Err(error);
         }
         events::sync_status(app, &account.id, "idle", None);
 
@@ -229,6 +258,22 @@ async fn session(
             }
         }
     }
+}
+
+/// A lost connection (or a refused login) ends the pass; anything else is
+/// remembered, the first one reported after the pass.
+fn stop_if_disconnected(error: AppError, problem: &mut Option<AppError>) -> AppResult<()> {
+    if ends_session(error.kind) {
+        return Err(error);
+    }
+    eprintln!("mail sync: {}", error.message);
+    problem.get_or_insert(error);
+    Ok(())
+}
+
+/// Errors after which the connection can't be used for anything else.
+fn ends_session(kind: &str) -> bool {
+    matches!(kind, "connect" | "tls" | "auth" | "config" | "keyring")
 }
 
 const fn should_sync(folder: &Folder) -> bool {
@@ -438,9 +483,13 @@ async fn sync_folder(
     };
     let fresh = uids_to_fetch(&server, &local_before, highest, settled);
     let mut new_unseen: u32 = 0;
+    // Only UIDs actually stored move the high-water mark, so a message the
+    // server didn't return this time is asked for again next time.
+    let mut stored_max = highest;
     for chunk in fresh.chunks(FETCH_CHUNK) {
         let Some(set) = uid_set(chunk) else { continue };
         for message in conn.fetch_headers(&folder.path, &set).await? {
+            stored_max = stored_max.max(message.uid);
             state.store.upsert_message(
                 &folder.id,
                 message.uid,
@@ -458,8 +507,8 @@ async fn sync_folder(
             changed = true;
         }
     }
-    if let Some(&max) = fresh.last().filter(|&&max| max > highest) {
-        state.store.set_highest_uid(&folder.id, max)?;
+    if stored_max > highest {
+        state.store.set_highest_uid(&folder.id, stored_max)?;
     }
     if settled && state.store.delete_unplaced_moves(&folder.id)? > 0 {
         changed = true;
@@ -610,6 +659,23 @@ pub fn group_by_folder(state: &AppState, ids: &[String]) -> AppResult<FolderGrou
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_lost_connection_ends_a_sync_pass() {
+        let mut problem = None;
+        // A folder the database or server chokes on is remembered, not fatal.
+        assert!(stop_if_disconnected(AppError::internal("bad folder"), &mut problem).is_ok());
+        assert!(stop_if_disconnected(AppError::new("storage", "disk"), &mut problem).is_ok());
+        // The first problem is the one reported after the pass.
+        assert_eq!(problem.map(|e| e.message), Some("bad folder".to_owned()));
+        for kind in ["connect", "tls", "auth", "config", "keyring"] {
+            let mut none = None;
+            assert!(
+                stop_if_disconnected(AppError::new(kind, "x"), &mut none).is_err(),
+                "{kind}"
+            );
+        }
+    }
 
     #[test]
     fn ops_round_trip_as_json() {

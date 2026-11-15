@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
@@ -8,6 +8,7 @@ import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
 import { RecipientField } from './RecipientField';
 import { parseRecipients } from './recipients';
+import { swapSignature } from './seed';
 
 interface Props {
   initial: Draft;
@@ -18,6 +19,8 @@ interface Props {
   offlineNote: boolean;
   onClose: () => void;
   onSent: (entry: OutboxEntry) => void;
+  /** Add the From account's signature (new messages, replies, forwards), and swap it with the account. */
+  addSignature?: boolean;
 }
 
 type FieldName = 'to' | 'cc' | 'bcc';
@@ -34,7 +37,16 @@ function encodedEstimate(bytes: number): number {
   return Math.ceil(bytes / 3) * 4;
 }
 
-export function ComposeView({ initial, attachmentsFrom = null, title, accounts, offlineNote, onClose, onSent }: Props) {
+export function ComposeView({
+  initial,
+  attachmentsFrom = null,
+  title,
+  accounts,
+  offlineNote,
+  onClose,
+  onSent,
+  addSignature = false,
+}: Props) {
   const api = useMailApi();
   const id = useId();
   const [draft, setDraft] = useState<Draft>(initial);
@@ -76,6 +88,32 @@ export function ComposeView({ initial, attachmentsFrom = null, title, accounts, 
       active = false;
     };
   }, [api, attachmentsFrom]);
+
+  // The signature now in the body, so changing From can swap it.
+  const signature = useRef<string | null>(null);
+  const signatureLoaded = useRef(false);
+  useEffect(() => {
+    if (!addSignature) return;
+    let active = true;
+    api.getSignature(draft.accountId).then(
+      (next) => {
+        if (!active) return;
+        const previous = signature.current;
+        const text = next?.text ?? null;
+        signature.current = text;
+        setDraft((d) => ({ ...d, bodyText: swapSignature(d.bodyText, previous, text) }));
+        // Adding it at the start isn't a change the user made.
+        if (!signatureLoaded.current) {
+          setBaseline((b) => ({ ...b, bodyText: swapSignature(b.bodyText, previous, text) }));
+        }
+        signatureLoaded.current = true;
+      },
+      () => undefined,
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, addSignature, draft.accountId]);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const account = accounts.find((a) => a.id === draft.accountId);

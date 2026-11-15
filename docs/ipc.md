@@ -114,6 +114,8 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `outbox_edit` | `{ id }` | `Draft` (removes it from the outbox) |
 | `sync_now` | `{ accountId: string \| null }` | `void` |
 | `get_settings` / `set_settings` | `{ settings }` | `Settings` |
+| `get_signature` | `{ accountId }` | `Signature \| null` (`{ html, text }`: sanitized HTML and its plain text) |
+| `set_signature` | `{ accountId, html }` | `Signature \| null`; the HTML is sanitized like incoming mail, empty clears it. Sending adds an HTML alternative with the full signature when its plain block (`-- \n` + text) is still in the body. |
 | `open_external` | `{ url }` | `void` (http, https, mailto only) |
 
 ## Events

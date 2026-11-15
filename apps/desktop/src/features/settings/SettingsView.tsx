@@ -8,6 +8,7 @@ import { Icon } from '../../ui/Icon';
 import { PasswordField } from '../../ui/PasswordField';
 import { playChime } from '../notifications/chime';
 import { accountErrorCopy } from '../accounts/providers';
+import { SignatureEditor } from './SignatureEditor';
 
 const MARK_READ: readonly [MarkReadSetting, string][] = [
   ['open', 'Mark as read as soon as I open a message'],
@@ -267,6 +268,8 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
           Save name
         </button>
       </form>
+
+      <SignatureEditor accountId={account.id} />
 
       {account.auth === 'password' &&
         (changingPassword ? (

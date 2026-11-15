@@ -4,6 +4,7 @@ import type {
   Account,
   AppError,
   Draft,
+  Signature,
   DraftAttachment,
   DraftCheck,
   Folder,
@@ -33,6 +34,8 @@ export interface MockOptions {
   now?: () => number;
   oauthConfigured?: boolean;
   picked?: DraftAttachment[];
+  /** Signatures by account id. */
+  signatures?: Record<string, Signature>;
   /** Dev preview: new messages go sending, then sent, like the real Outbox. */
   simulateDelivery?: boolean;
 }
@@ -112,6 +115,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   let messages = clone(options.messages ?? MOCK_MESSAGES).filter(known);
   let outbox = clone(options.outbox ?? MOCK_OUTBOX).filter(known);
   let settings = clone(options.settings ?? MOCK_SETTINGS);
+  const signatures = new Map<string, Signature>(Object.entries(options.signatures ?? {}));
   const outboxDrafts = new Map<string, Draft>();
   /** Attachments of drafts saved in this session, by message id. */
   const draftFiles = new Map<string, DraftAttachment[]>();
@@ -549,6 +553,34 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           emit('mail://sync-status', { accountId: acc.id, state: 'syncing', lastSyncedAt: null, message: null });
           emit('mail://sync-status', { accountId: acc.id, state: 'idle', lastSyncedAt: now(), message: null });
         }
+      }),
+
+    getSignature: (accountId) => run('getSignature', () => signatures.get(accountId) ?? null),
+
+    setSignature: (accountId, html) =>
+      run('setSignature', () => {
+        // The backend sanitizes; the mock only drops scripts and derives the text.
+        const holder = document.createElement('div');
+        holder.innerHTML = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+        const clean = holder.innerHTML.trim();
+        holder.querySelectorAll('br').forEach((br) => {
+          br.replaceWith('\n');
+        });
+        holder.querySelectorAll('div,p').forEach((block) => {
+          block.append('\n');
+        });
+        const text = holder.textContent
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .join('\n');
+        if (text === '') {
+          signatures.delete(accountId);
+          return null;
+        }
+        const signature = { html: clean, text };
+        signatures.set(accountId, signature);
+        return signature;
       }),
 
     getSettings: () => run('getSettings', () => settings),

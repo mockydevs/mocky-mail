@@ -12,3 +12,4 @@ pub mod limits;
 pub mod message;
 pub mod outbox;
 pub mod sanitize;
+pub mod signature;

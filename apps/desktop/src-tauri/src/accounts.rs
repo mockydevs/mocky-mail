@@ -357,6 +357,7 @@ pub fn remove_account(
     state.secrets.delete(&password_key(&id))?;
     state.secrets.delete(&oauth_key(&id))?;
     state.store.delete_account(&id)?;
+    crate::signatures::remove(&state, &id)?;
     events::accounts_changed(&app);
     events::outbox_changed(&app, &state);
     Ok(())

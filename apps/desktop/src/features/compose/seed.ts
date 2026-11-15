@@ -166,3 +166,40 @@ export function toolbarActions(role: FolderRole | null): ToolbarAction[] {
   actions.push('flag', 'read');
   return actions;
 }
+
+/** Starts a signature in plain text (RFC 3676: dash dash space). The backend looks for it too. */
+export const SIGNATURE_SEPARATOR = '-- ';
+
+/** The signature as compose shows it. */
+export function signatureBlock(text: string): string {
+  return `${SIGNATURE_SEPARATOR}\n${text}`;
+}
+
+/**
+ * Add a signature under where the user types: after the (empty) top of a new
+ * message, above the quoted original in a reply or forward.
+ */
+export function withSignature(body: string, text: string | null): string {
+  if (!text) return body;
+  const block = signatureBlock(text);
+  if (body.includes(block)) return body;
+  if (body === '') return `\n\n${block}`;
+  return `\n\n${block}${body.startsWith('\n') ? body : `\n\n${body}`}`;
+}
+
+/**
+ * Swap the signature when the From account changes. A block the user edited
+ * is left alone (it is no longer the old signature), and no second one is added.
+ */
+export function swapSignature(body: string, previous: string | null, next: string | null): string {
+  if (previous === next) return body;
+  if (previous) {
+    const old = signatureBlock(previous);
+    if (!body.includes(old)) return body;
+    if (next) return body.replace(old, signatureBlock(next));
+    const at = body.indexOf(old);
+    const before = body.slice(0, at).replace(/\n\n$/, '');
+    return before + body.slice(at + old.length);
+  }
+  return withSignature(body, next);
+}

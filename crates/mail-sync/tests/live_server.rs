@@ -69,6 +69,7 @@ async fn send(host: &str, subject: &str, with_attachment: bool) -> String {
         bcc: vec![],
         subject: subject.into(),
         body_text: "Hello Bob,\n\nThis is a test.".into(),
+        body_html: None,
         in_reply_to: None,
         references: vec![],
         attachments: if with_attachment {

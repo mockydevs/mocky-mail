@@ -33,6 +33,8 @@ pub struct OutgoingMessage {
     pub subject: String,
     /// Plain-text body.
     pub body_text: String,
+    /// HTML version of the body (a full signature), sent alongside the text.
+    pub body_html: Option<String>,
     /// Message-ID being replied to (no angle brackets).
     pub in_reply_to: Option<String>,
     /// Thread Message-IDs (no angle brackets).
@@ -160,20 +162,32 @@ pub fn build(message: &OutgoingMessage) -> Result<BuiltMessage, SyncError> {
     }
 
     let text = SinglePart::plain(message.body_text.clone());
-    let email = if message.attachments.is_empty() {
-        builder.singlepart(text)
-    } else {
-        let mut parts = MultiPart::mixed().singlepart(text);
-        for a in &message.attachments {
-            let content_type = ContentType::parse(&a.mime_type)
-                .or_else(|_| ContentType::parse("application/octet-stream"))
-                .map_err(|e| SyncError::Invalid(e.to_string()))?;
-            parts = parts.singlepart(
-                Attachment::new(mail_core::message::safe_file_name(&a.file_name))
-                    .body(a.data.clone(), content_type),
-            );
+    let email = match (&message.body_html, message.attachments.is_empty()) {
+        (None, true) => builder.singlepart(text),
+        // Text and HTML of the same message; readers show the HTML.
+        (Some(html), true) => builder.multipart(MultiPart::alternative_plain_html(
+            message.body_text.clone(),
+            html.clone(),
+        )),
+        (html, false) => {
+            let mut parts = match html {
+                Some(html) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(
+                    message.body_text.clone(),
+                    html.clone(),
+                )),
+                None => MultiPart::mixed().singlepart(text),
+            };
+            for a in &message.attachments {
+                let content_type = ContentType::parse(&a.mime_type)
+                    .or_else(|_| ContentType::parse("application/octet-stream"))
+                    .map_err(|e| SyncError::Invalid(e.to_string()))?;
+                parts = parts.singlepart(
+                    Attachment::new(mail_core::message::safe_file_name(&a.file_name))
+                        .body(a.data.clone(), content_type),
+                );
+            }
+            builder.multipart(parts)
         }
-        builder.multipart(parts)
     }
     .map_err(|e| SyncError::Invalid(e.to_string()))?;
 
@@ -211,6 +225,7 @@ mod tests {
             bcc: vec![mb("secret@hidden.example", None)],
             subject: "Invoice INV-0144".into(),
             body_text: "Hi Peter,\n\nInvoice attached.".into(),
+            body_html: None,
             in_reply_to: Some("q-1@client.example".into()),
             references: vec!["q-0@client.example".into(), "q-1@client.example".into()],
             attachments: vec![OutgoingAttachment {
@@ -239,6 +254,27 @@ mod tests {
         assert_eq!(summary.attachments.len(), 1);
         assert_eq!(summary.attachments[0].file_name, "INV-0144.pdf");
         assert!(built.message_id.ends_with("@work.example"));
+    }
+
+    #[test]
+    fn a_signature_goes_as_html_alongside_the_text() {
+        let html = "<!doctype html><html><body><p>Hi Peter,</p><div class=\"signature\"><b>Don</b></div></body></html>";
+        for keep_attachments in [false, true] {
+            let mut message = base();
+            message.body_html = Some(html.to_owned());
+            if !keep_attachments {
+                message.attachments.clear();
+            }
+            let built = build(&message).unwrap();
+            let raw = String::from_utf8_lossy(&built.raw);
+            assert!(raw.contains("multipart/alternative"), "{raw}");
+            assert!(raw.contains("text/plain"));
+            assert!(raw.contains("text/html"));
+            let parsed = mail_core::message::parse_body(&built.raw).unwrap();
+            assert!(parsed.html.unwrap().contains("<b>Don</b>"));
+            assert!(parsed.text.unwrap().contains("Invoice attached"));
+            assert_eq!(parsed.attachments.len(), usize::from(keep_attachments));
+        }
     }
 
     #[test]

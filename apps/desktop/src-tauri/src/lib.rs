@@ -17,6 +17,7 @@ mod google_android;
 mod mail;
 mod outbox;
 mod settings;
+mod signatures;
 mod state;
 mod sync;
 
@@ -165,6 +166,8 @@ pub fn run() {
             outbox::outbox_edit,
             settings::get_settings,
             settings::set_settings,
+            signatures::get_signature,
+            signatures::set_signature,
         ])
         .run(tauri::generate_context!());
 

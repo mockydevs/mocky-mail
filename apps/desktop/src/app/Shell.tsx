@@ -32,6 +32,7 @@ import { shortcutFor, type ShortcutAction } from '../features/shortcuts/shortcut
 import { nowSeconds } from '../lib/format';
 import { useDebounced } from '../lib/useDebounced';
 import { useMailEvent } from '../lib/useEvent';
+import { useWakeSync } from '../lib/useWakeSync';
 import { useLoad } from '../lib/useLoad';
 import { useTheme } from '../theme/useTheme';
 import { ConfirmDialog } from '../ui/Modal';
@@ -45,7 +46,7 @@ export const SEARCH_DEBOUNCE_MS = 300;
 
 type Screen =
   | { kind: 'mail' }
-  | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null }
+  | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null; signature: boolean }
   | { kind: 'settings' }
   | { kind: 'addAccount' };
 
@@ -198,6 +199,11 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   }, [api, revision]);
 
   useMailEvent(api, 'mail://changed', refresh);
+  // Coming back (focus, wake, network) checks for new mail at once.
+  const syncOnWake = useCallback(() => {
+    api.syncNow(null).catch(() => undefined);
+  }, [api]);
+  useWakeSync(syncOnWake);
   useMailEvent(api, 'mail://outbox-changed', (payload) => {
     setOutbox(payload.entries);
   });
@@ -414,12 +420,13 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
 
   /** Open compose; `attachmentsFrom` loads copies of that message's attachments into the draft. */
-  const compose = (draft: Draft, title: string, attachmentsFrom: string | null = null) => {
-    setScreen({ kind: 'compose', draft, title, attachmentsFrom });
+  /** `signature`: add the account's signature (new, reply, forward; not a draft or message being edited again). */
+  const compose = (draft: Draft, title: string, attachmentsFrom: string | null = null, signature = false) => {
+    setScreen({ kind: 'compose', draft, title, attachmentsFrom, signature });
   };
 
   const forward = (m: MessageDetail) => {
-    compose(forwardDraft(m), 'Forward', m.attachments.length > 0 ? m.id : null);
+    compose(forwardDraft(m), 'Forward', m.attachments.length > 0 ? m.id : null, true);
   };
 
   const continueDraft = (m: MessageDetail) => {
@@ -428,12 +435,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
 
   const reply = (m: MessageDetail, all: boolean) => {
     const account = accounts.find((a) => a.id === m.accountId);
-    if (account) compose(replyDraft(m, account, all), all ? 'Reply all' : 'Reply');
+    if (account) compose(replyDraft(m, account, all), all ? 'Reply all' : 'Reply', null, true);
   };
 
   const newMessage = () => {
     const accountId = view.type === 'folder' ? view.accountId : (accounts[0]?.id ?? '');
-    compose(blankDraft(accountId), 'New message');
+    compose(blankDraft(accountId), 'New message', null, true);
   };
 
   // Keyboard shortcuts.
@@ -549,6 +556,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           key={JSON.stringify(screen.draft)}
           initial={screen.draft}
           attachmentsFrom={screen.attachmentsFrom}
+          addSignature={screen.signature}
           title={screen.title}
           accounts={accounts}
           offlineNote={offline}

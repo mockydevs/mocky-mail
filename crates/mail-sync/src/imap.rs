@@ -24,8 +24,65 @@ pub type ImapStream = Either<TlsStream<TcpStream>, TcpStream>;
 
 /// How long any single network step may take.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(45);
-/// How long to wait in IDLE before re-issuing it (RFC 2177 says under 29 min).
-pub const IDLE_TIMEOUT: Duration = Duration::from_mins(25);
+/// How long to wait in IDLE before re-issuing it and re-checking the inbox.
+/// RFC 2177 allows up to 29 minutes, but home routers and office firewalls
+/// often drop a quiet connection after 5 to 15; re-issuing every few minutes
+/// keeps it open and catches mail even if the server's push was lost.
+pub const IDLE_TIMEOUT: Duration = Duration::from_mins(4);
+
+/// TCP keepalive: probe a quiet connection after this long, so a link that
+/// died (Wi-Fi change, sleep, a router dropping it) is noticed in about a
+/// minute and a half instead of hanging until the next timeout.
+const KEEPALIVE_IDLE: Duration = Duration::from_mins(1);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Ask the operating system to probe a quiet connection. Best effort: a
+/// platform without these options still works, just notices a dead link later.
+fn keep_alive(tcp: &TcpStream) {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL);
+    let _ = socket2::SockRef::from(tcp).set_tcp_keepalive(&keepalive);
+}
+
+/// Arrival dates further than this in the future of the server's arrival
+/// time come from a sender whose clock is wrong.
+const FUTURE_DATE_SLACK: i64 = 24 * 60 * 60;
+
+/// The date a message is listed under: its Date header, unless that is
+/// missing or in the future of when the server received it (a sender with a
+/// wrong clock), in which case the server's arrival time. Otherwise a new
+/// message could sort far from the top and look as if it never arrived.
+#[must_use]
+pub fn listed_date(header: Option<i64>, arrived: Option<i64>) -> Option<i64> {
+    match (header, arrived) {
+        (Some(date), Some(arrived)) if date > arrived.saturating_add(FUTURE_DATE_SLACK) => {
+            Some(arrived)
+        }
+        (Some(date), _) => Some(date),
+        (None, arrived) => arrived,
+    }
+}
+
+/// What is shown for a message whose headers can't be read, so it still
+/// appears (and can be opened) instead of silently never arriving.
+#[must_use]
+pub fn unreadable_summary(arrived: Option<i64>) -> MessageSummary {
+    MessageSummary {
+        message_id: None,
+        subject: "(This message's details could not be read)".to_owned(),
+        from: None,
+        reply_to: Vec::new(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        date: arrived,
+        preview: String::new(),
+        has_html: false,
+        attachments: Vec::new(),
+        in_reply_to: None,
+        references: Vec::new(),
+    }
+}
 /// Messages larger than this are not downloaded in the background.
 pub const MAX_BACKGROUND_BODY_BYTES: u32 = 2 * 1024 * 1024;
 
@@ -275,6 +332,7 @@ async fn open_stream(server: &ServerConfig) -> Result<ImapStream, SyncError> {
             port: server.port,
             reason: crate::error::connect_reason(&e),
         })?;
+    keep_alive(&tcp);
     match server.security {
         Security::Tls => Ok(Either::Left(within(host, tls::wrap(tcp, host)).await??)),
         Security::Starttls => {
@@ -457,13 +515,23 @@ impl ImapConnection {
         set: &str,
     ) -> Result<Vec<RemoteMessage>, SyncError> {
         let fetches = self
-            .fetch(path, set, "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])")
+            .fetch(
+                path,
+                set,
+                "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])",
+            )
             .await?;
         Ok(fetches
             .iter()
             .filter_map(|fetch| {
                 let uid = fetch.uid?;
-                let summary = parse_summary(fetch.header()?).ok()?;
+                let arrived = fetch.internal_date().map(|date| date.timestamp());
+                // Never drop a message: one we can't parse is still listed.
+                let mut summary = fetch
+                    .header()
+                    .and_then(|header| parse_summary(header).ok())
+                    .unwrap_or_else(|| unreadable_summary(arrived));
+                summary.date = listed_date(summary.date, arrived);
                 Some(RemoteMessage {
                     uid,
                     flags: Flags::from_fetch(fetch),
@@ -730,6 +798,42 @@ impl ImapConnection {
 
 #[cfg(test)]
 mod tests {
+    use super::{IDLE_TIMEOUT, listed_date, unreadable_summary};
+
+    #[test]
+    fn a_message_is_listed_by_its_date_unless_the_sender_clock_is_wrong() {
+        let arrived = 1_800_000_000;
+        // Normal: the Date header, even if a little before arrival.
+        assert_eq!(
+            listed_date(Some(arrived - 120), Some(arrived)),
+            Some(arrived - 120)
+        );
+        // Missing Date: when the server received it.
+        assert_eq!(listed_date(None, Some(arrived)), Some(arrived));
+        // A sender's clock days ahead would pin it to the top for days.
+        assert_eq!(
+            listed_date(Some(arrived + 3 * 86_400), Some(arrived)),
+            Some(arrived)
+        );
+        // Old mail moved in later keeps its real date.
+        assert_eq!(
+            listed_date(Some(arrived - 400 * 86_400), Some(arrived)),
+            Some(arrived - 400 * 86_400)
+        );
+        assert_eq!(listed_date(None, None), None);
+    }
+
+    #[test]
+    fn a_message_that_cannot_be_read_is_still_listed() {
+        let summary = unreadable_summary(Some(1_800_000_000));
+        assert!(!summary.subject.is_empty());
+        assert_eq!(summary.date, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn idle_is_renewed_before_routers_drop_a_quiet_connection() {
+        assert!(IDLE_TIMEOUT <= std::time::Duration::from_mins(5));
+    }
 
     #[test]
     fn a_refused_oauth_token_gets_an_empty_reply_not_a_hang() {

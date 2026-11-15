@@ -124,6 +124,12 @@ export interface DraftAttachment {
   size: number;
 }
 
+/** An email signature: cleaned HTML, and the plain text compose shows. */
+export interface Signature {
+  html: string;
+  text: string;
+}
+
 export interface Draft {
   accountId: string;
   /** As typed; the backend validates. */
@@ -272,6 +278,10 @@ export interface MailApi {
   outboxCancel(id: string): Promise<void>;
   outboxEdit(id: string): Promise<Draft>;
   syncNow(accountId: string | null): Promise<void>;
+  /** The account's email signature, if it has one. */
+  getSignature(accountId: string): Promise<Signature | null>;
+  /** Clean and store a signature (pasted HTML or typed text); empty clears it. Returns what was stored. */
+  setSignature(accountId: string, html: string): Promise<Signature | null>;
   getSettings(): Promise<Settings>;
   setSettings(settings: Settings): Promise<Settings>;
   openExternal(url: string): Promise<void>;

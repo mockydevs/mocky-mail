@@ -2694,3 +2694,37 @@ kbd {
   justify-content: space-between;
   gap: 8px 16px;
 }
+
+/* Email signature editor in Settings. */
+.signature-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.signature-editor .form-hint {
+  margin: 0;
+}
+
+.signature-editor__box {
+  min-height: 88px;
+  max-height: 320px;
+  overflow: auto;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+
+.signature-editor__box img {
+  max-width: 100%;
+  height: auto;
+}
+
+.signature-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
