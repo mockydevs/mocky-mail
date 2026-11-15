@@ -24,13 +24,15 @@ mail-auth = { version = "0.1.0", path = "../../../crates/mail-auth" }
 mail-core = { path = "../../../crates/mail-core" }
 mail-store = { version = "0.1.0", path = "../../../crates/mail-store" }
 mail-sync = { version = "0.1.0", path = "../../../crates/mail-sync" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10"
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-notification = "2.8.1"
 tauri-plugin-opener = "2.7.3"
-tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs"] }
+tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs", "process"] }
 
 # Desktop only: one running copy at a time. Android runs one copy anyway.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

@@ -2728,3 +2728,41 @@ kbd {
   align-items: center;
   gap: 8px;
 }
+
+/* A newer version of the app is available. */
+.update-bar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--info-border);
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: 13px;
+}
+
+.update-bar__text {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.update-bar__title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.update-bar__notes,
+.update-bar__error {
+  margin: 2px 0 0;
+}
+
+.update-bar__error {
+  color: var(--error-text);
+}
+
+.update-bar__actions {
+  display: flex;
+  gap: 6px;
+}

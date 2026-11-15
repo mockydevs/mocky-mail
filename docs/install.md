@@ -77,7 +77,19 @@ The download site at https://mailer.co.ke is a static page served by the mail
 server (`data/web/mailer-site/` with `data/conf/nginx/mailer-site.conf` in the
 Mailcow checkout). To publish a new version there, upload the new installer to
 its `downloads/` folder, regenerate `SHA256SUMS`, and update the version, size
-and checksum in its `index.html`.
+and checksum in its `index.html`. Then write and upload `latest.json`, which
+installed copies read to offer the update:
+
+```bash
+scripts/write-latest-json.py path/to/downloads --notes "One line on what's new."
+```
+
+Installed apps check it at start-up and every six hours. Windows installs and
+Linux `.deb` installs download the new installer, check it against the
+SHA-256 in `latest.json` and install it (on Linux, apt asks for the password);
+other copies get a link to the download page. Google Play and the Microsoft
+Store update their copies themselves. A copy older than the first version
+with this check (0.2.1 and before) must be updated by hand once.
 
 To build the installers on a Linux machine (load the sign-in IDs from
 `.env.oauth` first, see `docs/oauth-setup.md`):

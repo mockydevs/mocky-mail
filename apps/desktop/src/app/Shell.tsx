@@ -33,6 +33,7 @@ import { nowSeconds } from '../lib/format';
 import { useDebounced } from '../lib/useDebounced';
 import { useMailEvent } from '../lib/useEvent';
 import { useWakeSync } from '../lib/useWakeSync';
+import { UpdateBanner } from '../features/updates/UpdateBanner';
 import { useLoad } from '../lib/useLoad';
 import { useTheme } from '../theme/useTheme';
 import { ConfirmDialog } from '../ui/Modal';
@@ -701,6 +702,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             : undefined
         }
       />
+      <UpdateBanner />
       <div className="workspace">
         {(!phone || drawer) && (
           <div className={phone ? 'drawer' : 'sidebar-slot'}>

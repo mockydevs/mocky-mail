@@ -136,6 +136,12 @@ fn store_app_id() -> Option<String> {
     Some(format!("{family}!{STORE_APPLICATION_ID}"))
 }
 
+/// Whether this copy was installed from the Microsoft Store, which updates it.
+#[cfg(windows)]
+pub fn running_from_store() -> bool {
+    store_app_id().is_some()
+}
+
 /// New unread mail arrived in an inbox.
 pub fn new_mail(app: &AppHandle, state: &AppState, account: &Account, count: u32) {
     emit(

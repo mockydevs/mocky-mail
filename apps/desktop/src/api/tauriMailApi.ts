@@ -40,6 +40,8 @@ export function createTauriMailApi(): MailApi {
     outboxCancel: (id) => call('outbox_cancel', { id }),
     outboxEdit: (id) => call('outbox_edit', { id }),
     syncNow: (accountId) => call('sync_now', { accountId }),
+    checkForUpdate: () => call('check_for_update'),
+    installUpdate: () => call('install_update'),
     getSignature: (accountId) => call('get_signature', { accountId }),
     setSignature: (accountId, html) => call('set_signature', { accountId, html }),
     getSettings: () => call('get_settings'),

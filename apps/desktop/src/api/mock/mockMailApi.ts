@@ -5,6 +5,7 @@ import type {
   AppError,
   Draft,
   Signature,
+  UpdateInfo,
   DraftAttachment,
   DraftCheck,
   Folder,
@@ -34,6 +35,8 @@ export interface MockOptions {
   now?: () => number;
   oauthConfigured?: boolean;
   picked?: DraftAttachment[];
+  /** A newer version for checkForUpdate to report. */
+  update?: UpdateInfo;
   /** Signatures by account id. */
   signatures?: Record<string, Signature>;
   /** Dev preview: new messages go sending, then sent, like the real Outbox. */
@@ -554,6 +557,10 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           emit('mail://sync-status', { accountId: acc.id, state: 'idle', lastSyncedAt: now(), message: null });
         }
       }),
+
+    checkForUpdate: () => run('checkForUpdate', () => options.update ?? null),
+
+    installUpdate: () => run('installUpdate', () => undefined),
 
     getSignature: (accountId) => run('getSignature', () => signatures.get(accountId) ?? null),
 

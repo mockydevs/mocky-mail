@@ -116,6 +116,8 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `get_settings` / `set_settings` | `{ settings }` | `Settings` |
 | `get_signature` | `{ accountId }` | `Signature \| null` (`{ html, text }`: sanitized HTML and its plain text) |
 | `set_signature` | `{ accountId, html }` | `Signature \| null`; the HTML is sanitized like incoming mail, empty clears it. Sending adds an HTML alternative with the full signature when its plain block (`-- \n` + text) is still in the body. |
+| `check_for_update` | — | `UpdateInfo \| null` (`{ version, notes, how: 'install' \| 'download', page }`); reads `latest.json` on the download site; null for store installs |
+| `install_update` | — | `void`; downloads this install's installer, checks its SHA-256, runs it (the app closes or restarts) |
 | `open_external` | `{ url }` | `void` (http, https, mailto only) |
 
 ## Events

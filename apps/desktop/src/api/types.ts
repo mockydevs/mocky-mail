@@ -124,6 +124,14 @@ export interface DraftAttachment {
   size: number;
 }
 
+/** A newer version of the app. `install`: the app can update itself; `download`: open `page`. */
+export interface UpdateInfo {
+  version: string;
+  notes: string;
+  how: 'install' | 'download';
+  page: string;
+}
+
 /** An email signature: cleaned HTML, and the plain text compose shows. */
 export interface Signature {
   html: string;
@@ -278,6 +286,10 @@ export interface MailApi {
   outboxCancel(id: string): Promise<void>;
   outboxEdit(id: string): Promise<Draft>;
   syncNow(accountId: string | null): Promise<void>;
+  /** A newer version this install can move to, or null. Store installs always get null. */
+  checkForUpdate(): Promise<UpdateInfo | null>;
+  /** Download, verify and run the update; the app closes or restarts. */
+  installUpdate(): Promise<void>;
   /** The account's email signature, if it has one. */
   getSignature(accountId: string): Promise<Signature | null>;
   /** Clean and store a signature (pasted HTML or typed text); empty clears it. Returns what was stored. */

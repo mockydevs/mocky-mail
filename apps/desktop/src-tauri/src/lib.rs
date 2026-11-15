@@ -20,6 +20,7 @@ mod settings;
 mod signatures;
 mod state;
 mod sync;
+mod updates;
 
 use std::sync::Arc;
 
@@ -168,6 +169,8 @@ pub fn run() {
             settings::set_settings,
             signatures::get_signature,
             signatures::set_signature,
+            updates::check_for_update,
+            updates::install_update,
         ])
         .run(tauri::generate_context!());
 
