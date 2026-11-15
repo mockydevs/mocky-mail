@@ -139,21 +139,47 @@ h2 { margin: 0 0 10px; font-size: clamp(26px, 4vw, 36px); letter-spacing: -0.02e
 .feature p { margin: 0; color: var(--muted); font-size: 15px; }
 
 /* Downloads */
-.downloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
-.dl { display: flex; flex-direction: column; gap: 12px; padding: 24px; border: 1px solid var(--border); border-radius: 16px; background: var(--card); }
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 24px; margin-bottom: 24px; }
+.section-head h2 { margin: 0; }
+.section-head .section-lead { margin: 0; }
+.downloads { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 760px) { .downloads { grid-template-columns: minmax(0, 1fr); } }
+.dl { display: flex; flex-direction: column; gap: 14px; padding: 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--card); }
 .dl.is-yours { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary) inset; }
-.dl h3 { margin: 0; font-size: 20px; }
-.dl p { margin: 0; color: var(--muted); font-size: 14px; }
-.dl .btn { margin-top: auto; }
-.tag { align-self: flex-start; padding: 2px 10px; border-radius: 999px; background: var(--soft); color: var(--soft-text); font-size: 12px; font-weight: 600; }
+.dl__head { display: flex; align-items: center; gap: 14px; }
+.dl__icon { display: grid; place-items: center; flex: none; width: 48px; height: 48px; border-radius: 12px; background: var(--soft); color: var(--soft-text); }
+.dl__icon svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.dl h3 { margin: 0; font-size: 22px; }
+.dl p { margin: 0; color: var(--muted); font-size: 15px; }
+.dl__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: auto; padding-top: 6px; }
+.dl__foot .btn { min-width: 200px; white-space: nowrap; }
+.dl--soon .dl__icon { background: var(--code-bg); color: var(--muted); }
+.tag { margin-left: auto; padding: 3px 10px; border-radius: 999px; background: var(--soft); color: var(--soft-text); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .meta { color: var(--muted); font-size: 13px; }
-.install { margin-top: 36px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; }
-.install h3 { margin: 0 0 8px; font-size: 18px; }
+.install { margin-top: 28px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+@media (max-width: 760px) { .install { grid-template-columns: minmax(0, 1fr); } }
+.install__card { padding: 24px 28px; border: 1px solid var(--border); border-radius: 18px; background: var(--card); scroll-margin-top: 80px; }
+.install h3 { margin: 0 0 10px; font-size: 18px; }
+.install .meta { margin: 10px 0 0; line-height: 1.6; }
+.cmd { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; padding: 12px 12px 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--code-bg); }
+.cmd code { flex: 1; min-width: 0; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+.cmd__copy { flex: none; min-height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.cmd__copy:hover { border-color: var(--primary); }
+.cmd__copy:focus-visible { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary); }
 ol { padding-left: 22px; margin: 0; }
 li { margin: 6px 0; }
 code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; }
 pre { margin: 8px 0; padding: 12px 14px; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); }
-.check pre, .install pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.install .meta code { overflow-wrap: anywhere; }
+.check { margin-top: 20px; border: 1px solid var(--border); border-radius: 18px; background: var(--card); padding: 0 28px; }
+.check summary { padding: 18px 0; font-weight: 600; cursor: pointer; }
+.check[open] { padding-bottom: 22px; }
+.check > .meta { margin: 0 0 14px; }
+.sums { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 20px; margin: 0; }
+.sums dt { color: var(--muted); font-size: 14px; }
+.sums dd { margin: 0; }
+.sums code { font-size: 13px; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .sums { grid-template-columns: minmax(0, 1fr); gap: 4px; } .sums dd { margin-bottom: 10px; } .dl, .install__card { padding: 22px; } .check { padding: 0 22px; } }
 
 /* FAQ */
 .faq { display: grid; gap: 12px; max-width: 820px; }
@@ -240,41 +266,73 @@ footer a { color: inherit; }
 
   <section id="download">
     <div class="wrap">
-      <h2>Download</h2>
-      <p class="section-lead">Version 0.2.0. Free, with no ads.</p>
+      <div class="section-head">
+        <h2>Download</h2>
+        <p class="section-lead">Version 0.2.0. Free, with no ads.</p>
+      </div>
       <div class="downloads">
         <article class="dl" data-os="linux">
-          <span class="tag" hidden>For this computer</span>
-          <h3>Linux</h3>
+          <div class="dl__head">
+            <span class="dl__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2.5"/><path d="m6.5 9 3 3-3 3M12 15h5"/></svg></span>
+            <h3>Linux</h3>
+            <span class="tag" hidden>For this computer</span>
+          </div>
           <p>Ubuntu 22.04 or newer, Debian 12, Linux Mint and Pop!_OS (64-bit).</p>
-          <a class="btn" href="/downloads/mocky-mail_0.2.0_amd64.deb" download>Download .deb</a>
-          <span class="meta">13.1 MB, or install with one command (below)</span>
+          <div class="dl__foot">
+            <a class="btn" href="/downloads/mocky-mail_0.2.0_amd64.deb" download>Download .deb</a>
+            <span class="meta">13.1 MB &middot; or <a href="#install-linux">one command</a></span>
+          </div>
         </article>
         <article class="dl" data-os="windows">
-          <span class="tag" hidden>For this computer</span>
-          <h3>Windows</h3>
+          <div class="dl__head">
+            <span class="dl__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg></span>
+            <h3>Windows</h3>
+            <span class="tag" hidden>For this computer</span>
+          </div>
           <p>Windows 10 and 11 (64-bit).</p>
-          <a class="btn" href="/downloads/mocky-mail_0.2.0_x64-setup.exe" download>Download for Windows</a>
-          <span class="meta">mocky-mail_0.2.0_x64-setup.exe, 10.7 MB</span>
+          <div class="dl__foot">
+            <a class="btn" href="/downloads/mocky-mail_0.2.0_x64-setup.exe" download>Download .exe</a>
+            <span class="meta">10.7 MB &middot; <a href="#install-windows">how to install</a></span>
+          </div>
         </article>
         <article class="dl" data-os="android">
-          <span class="tag" hidden>For this phone</span>
-          <h3>Android</h3>
+          <div class="dl__head">
+            <span class="dl__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M10.5 18.5h3"/></svg></span>
+            <h3>Android</h3>
+            <span class="tag" hidden>For this phone</span>
+          </div>
           <p>Android 7 or newer. Pick a Google account already on your phone; no typing.</p>
-          <a class="btn" href="https://play.google.com/store/apps/details?id=ke.co.mocky.mail" rel="noopener">Get it on Google Play</a>
-          <span class="meta">In review with Google; the link works once it's approved.</span>
+          <div class="dl__foot">
+            <a class="btn" href="https://play.google.com/store/apps/details?id=ke.co.mocky.mail" rel="noopener">Get it on Google Play</a>
+            <span class="meta">In review with Google; the link works once it's approved.</span>
+          </div>
         </article>
-        <article class="dl" data-os="mac">
-          <span class="tag" hidden>For this computer</span>
-          <h3>macOS</h3>
+        <article class="dl dl--soon" data-os="mac">
+          <div class="dl__head">
+            <span class="dl__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></svg></span>
+            <h3>macOS</h3>
+            <span class="tag" hidden>For this computer</span>
+          </div>
           <p>macOS 11 or newer, Apple Silicon and Intel.</p>
-          <span class="btn" aria-disabled="true">Coming soon</span>
-          <span class="meta">The installer is on its way.</span>
+          <div class="dl__foot">
+            <span class="btn" aria-disabled="true">Coming soon</span>
+            <span class="meta">The installer is on its way.</span>
+          </div>
         </article>
       </div>
 
       <div class="install">
-        <div>
+        <div class="install__card" id="install-linux">
+          <h3>Install on Linux</h3>
+          <p class="meta">On Ubuntu, Debian, Mint or Pop!_OS, paste this into a terminal:</p>
+          <div class="cmd">
+            <code id="linux-cmd">curl -fsSL https://raw.githubusercontent.com/mockydevs/mocky-mail/main/install.sh | bash</code>
+            <button type="button" class="cmd__copy" data-copy="linux-cmd">Copy</button>
+          </div>
+          <p class="meta">It downloads the latest version, checks its checksum and installs it with apt, asking for your password only for apt. Run it again any time to update. <a href="https://github.com/mockydevs/mocky-mail/blob/main/install.sh">Read the script</a> first if you like.</p>
+          <p class="meta">Or install the downloaded file yourself: <code>sudo apt install ./mocky-mail_0.2.0_amd64.deb</code>. To remove it: <code>sudo apt remove mocky-mail</code> (your mail and settings stay).</p>
+        </div>
+        <div class="install__card" id="install-windows">
           <h3>Install on Windows</h3>
           <ol>
             <li>Download <code>mocky-mail_0.2.0_x64-setup.exe</code> and open it.</li>
@@ -283,25 +341,16 @@ footer a { color: inherit; }
           </ol>
           <p class="meta">To update, run the newer installer. To remove it, use Settings, Apps, Installed apps.</p>
         </div>
-        <div>
-          <h3>Install on Linux</h3>
-          <p class="meta">On Ubuntu, Debian, Mint or Pop!_OS, paste this into a terminal:</p>
-          <pre>curl -fsSL https://raw.githubusercontent.com/mockydevs/mocky-mail/main/install.sh | bash</pre>
-          <p class="meta">It downloads the latest version, checks its checksum and installs it with apt, asking for your password only for apt. Run it again any time to update. <a href="https://github.com/mockydevs/mocky-mail/blob/main/install.sh">Read the script</a> first if you like.</p>
-          <p class="meta">Or install the downloaded file yourself:</p>
-          <pre>sudo apt install ./mocky-mail_0.2.0_amd64.deb</pre>
-          <p class="meta">To remove it: <code>sudo apt remove mocky-mail</code> (your mail and settings stay).</p>
-        </div>
-        <div class="check">
-          <h3>Check your download</h3>
-          <p class="meta">To confirm a file is genuine, compare its SHA-256 checksum. On Linux run <code>sha256sum</code>; on Windows run <code>certutil -hashfile mocky-mail_0.2.0_x64-setup.exe SHA256</code> in Command Prompt.</p>
-          <p class="meta">Windows installer:</p>
-          <pre><code>96fb4ef9e29e9a3eec438bd60c4def8cdfd4d7238c630348266d044b2bfff898</code></pre>
-          <p class="meta">Linux .deb:</p>
-          <pre><code>c97c0c0060b56b4ac4a5d7cc557065da9415c6b40f2b2dba2ee743ffd3b45008</code></pre>
-          <p class="meta">Also listed in <a href="/downloads/SHA256SUMS">SHA256SUMS</a>.</p>
-        </div>
       </div>
+
+      <details class="check">
+        <summary>Check your download (SHA-256)</summary>
+        <p class="meta">To confirm a file is genuine, compare its checksum. On Linux run <code>sha256sum mocky-mail_0.2.0_amd64.deb</code>; on Windows run <code>certutil -hashfile mocky-mail_0.2.0_x64-setup.exe SHA256</code> in Command Prompt. Also listed in <a href="/downloads/SHA256SUMS">SHA256SUMS</a>.</p>
+        <dl class="sums">
+          <dt>Windows .exe</dt><dd><code>96fb4ef9e29e9a3eec438bd60c4def8cdfd4d7238c630348266d044b2bfff898</code></dd>
+          <dt>Linux .deb</dt><dd><code>c97c0c0060b56b4ac4a5d7cc557065da9415c6b40f2b2dba2ee743ffd3b45008</code></dd>
+        </dl>
+      </details>
     </div>
   </section>
 
@@ -376,6 +425,17 @@ footer a { color: inherit; }
       document.getElementById('hero-note').textContent = 'Free. .deb for Ubuntu, Debian and Mint, 13.1 MB.';
     }
   })();
+  // Copy buttons for install commands.
+  document.querySelectorAll('[data-copy]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var text = document.getElementById(button.getAttribute('data-copy')).textContent;
+      var done = function () {
+        button.textContent = 'Copied';
+        setTimeout(function () { button.textContent = 'Copy'; }, 2000);
+      };
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, function () {});
+    });
+  });
 </script>
 </body>
 </html>
