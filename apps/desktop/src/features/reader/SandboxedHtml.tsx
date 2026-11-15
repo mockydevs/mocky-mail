@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { Theme } from '../../theme/useTheme';
+import { fitToPhone, PHONE_STYLE } from './phoneLayout';
 
 /**
  * Content-Security-Policy for an email body: no scripts, no frames and no
@@ -35,7 +36,12 @@ const DARK_STYLE =
  * Build the iframe document. The HTML must already be sanitized by the Rust
  * core; this is the second layer, not the first.
  */
-export function emailDocument(sanitizedHtml: string, theme: Theme = 'light', allowRemoteImages = false): string {
+export function emailDocument(
+  sanitizedHtml: string,
+  theme: Theme = 'light',
+  allowRemoteImages = false,
+  phone = false,
+): string {
   // A second lock on remote images: if the sanitizer ever misses a tracking
   // pixel, the page itself still refuses to fetch it.
   const csp = allowRemoteImages ? EMAIL_CSP_REMOTE_IMAGES : EMAIL_CSP;
@@ -46,7 +52,7 @@ export function emailDocument(sanitizedHtml: string, theme: Theme = 'light', all
     // Never let the app's colour scheme leak in; dark mode is applied below instead.
     '<meta name="color-scheme" content="light">',
     '<base target="_blank">',
-    `<style>${LIGHT_STYLE}${theme === 'dark' ? DARK_STYLE : ''}</style>`,
+    `<style>${LIGHT_STYLE}${theme === 'dark' ? DARK_STYLE : ''}${phone ? PHONE_STYLE : ''}</style>`,
     '</head><body>',
     sanitizedHtml,
     '</body></html>',
@@ -93,6 +99,8 @@ export function SandboxedHtml({
       setHeight(Math.ceil(doc.documentElement.scrollHeight));
     };
     const onLoad = () => {
+      // Phone: lay the email out for the narrow screen first, then size the frame to it.
+      if (element.contentDocument?.body) fitToPhone(element.contentDocument);
       measure();
       observer?.disconnect();
       // The frame's own ResizeObserver: it watches the email's layout, which
@@ -120,7 +128,7 @@ export function SandboxedHtml({
       title={title}
       sandbox={fitContent ? 'allow-popups allow-same-origin' : 'allow-popups'}
       referrerPolicy="no-referrer"
-      srcDoc={emailDocument(html, theme, allowRemoteImages)}
+      srcDoc={emailDocument(html, theme, allowRemoteImages, fitContent)}
       style={
         fitContent
           ? // As tall as the email; the page around it scrolls.
