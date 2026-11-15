@@ -13,6 +13,8 @@
   --muted: #5e5e58;
   --faint: #9a9a92;
   --input-bg: #ffffff;
+  /* Soft tint for fields that sit on white, such as compose's From and To. */
+  --field-tint: #f3f5f9;
   --input-border: #d6d6d0;
   --dashed: #c9c9c2;
   --primary: #2450c8;
@@ -61,6 +63,7 @@
   --muted: #a3a39d;
   --faint: #5f5f5a;
   --input-bg: #1f2024;
+  --field-tint: #202228;
   --input-border: #3a3c42;
   --dashed: #45474d;
   --primary: #2f5bd6;

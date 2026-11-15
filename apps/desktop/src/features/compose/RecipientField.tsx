@@ -230,7 +230,9 @@ export function RecipientField({ id, label, value, onChange, invalid, describedB
               }}
             >
               <span className="suggestion__name">{person.name ?? person.address}</span>
-              {person.name && <span className="suggestion__address">{person.address}</span>}
+              {person.name && person.name.toLowerCase() !== person.address.toLowerCase() && (
+                <span className="suggestion__address">{person.address}</span>
+              )}
             </div>
           ))}
         </div>

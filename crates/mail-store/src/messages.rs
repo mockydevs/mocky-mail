@@ -716,12 +716,13 @@ impl Store {
               LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![starts, word, limit], |row| {
-            Ok(Mailbox {
-                name: row
-                    .get::<_, Option<String>>(0)?
-                    .filter(|n| !n.trim().is_empty()),
-                address: row.get(1)?,
-            })
+            let address: String = row.get(1)?;
+            // A "name" that is just the address again adds nothing.
+            let name = row
+                .get::<_, Option<String>>(0)?
+                .map(|n| n.trim().trim_matches(['"', '\'']).to_owned())
+                .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&address));
+            Ok(Mailbox { name, address })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
