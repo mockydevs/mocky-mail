@@ -177,7 +177,14 @@ export interface Settings {
   notifications: boolean;
   /** A short chime with each new-mail notification. */
   sound: boolean;
+  /** Seconds Send waits so it can be undone; 0 sends at once. */
+  undoSendSecs: number;
+  /** When an opened message counts as read. */
+  markRead: MarkReadSetting;
 }
+
+/** "open": as soon as it is opened; "delay": after a few seconds open; "manual": only with Mark as read. */
+export type MarkReadSetting = 'open' | 'delay' | 'manual';
 
 export interface SyncStatus {
   accountId: string;
@@ -239,6 +246,8 @@ export type MailEventName = keyof MailEvents;
  */
 export interface MailApi {
   suggestServers(email: string): Promise<ServerSuggestion | null>;
+  /** People written to or heard from whose name or address starts with `query`. */
+  suggestRecipients(query: string): Promise<Mailbox[]>;
   addAccount(input: NewAccountInput): Promise<Account>;
   addOAuthAccount(input: OAuthAccountInput): Promise<Account>;
   updateAccount(id: string, patch: AccountPatch): Promise<Account>;

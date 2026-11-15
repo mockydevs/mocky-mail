@@ -5,6 +5,8 @@ import { useMailEvent } from '../../lib/useEvent';
 
 /** What the user is told about a message they just sent. */
 export type SendStatus =
+  /** Held for the undo window; `secs` is how long the window is. */
+  | { phase: 'scheduled'; id: string; secs: number }
   | { phase: 'sending' }
   | { phase: 'sent' }
   /** Not out yet (offline, or the server asked to wait); it retries by itself. */
@@ -24,8 +26,13 @@ export function sendStatusOf(entry: OutboxEntry): SendStatus {
     case 'sending':
       return { phase: 'sending' };
     case 'queued':
-      // A first attempt is on its way; after a failed attempt it waits to retry.
-      return entry.attempts > 0 || status.maybe_sent ? { phase: 'waiting' } : { phase: 'sending' };
+      // After a failed attempt it waits to retry.
+      if (entry.attempts > 0 || status.maybe_sent) return { phase: 'waiting' };
+      // Still inside the undo window it was queued with.
+      if (status.next_attempt_at > entry.createdAt) {
+        return { phase: 'scheduled', id: entry.id, secs: status.next_attempt_at - entry.createdAt };
+      }
+      return { phase: 'sending' };
   }
 }
 

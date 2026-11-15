@@ -17,6 +17,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export function createTauriMailApi(): MailApi {
   return {
     suggestServers: (email) => call('suggest_servers', { email }),
+    suggestRecipients: (query) => call('suggest_recipients', { query }),
     addAccount: (input) => call('add_account', { input }),
     addOAuthAccount: (input) => call('add_oauth_account', { input }),
     updateAccount: (id, patch) => call('update_account', { id, patch }),

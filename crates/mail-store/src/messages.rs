@@ -662,6 +662,71 @@ impl Store {
     }
 }
 
+/// How many recipient suggestions to offer at most.
+pub const MAX_SUGGESTIONS: usize = 8;
+
+impl Store {
+    /// People to suggest while typing a recipient: everyone the user has
+    /// written to (Sent, weighted higher) or heard from, matching `query` at
+    /// the start of the address, the name, or a word in the name. The user's
+    /// own addresses and automated senders (no-reply) are left out. Best
+    /// matches first: most messages, then most recent.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn suggest_recipients(&self, query: &str, limit: usize) -> Result<Vec<Mailbox>> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = needle
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let starts = format!("{escaped}%");
+        let word = format!("% {escaped}%");
+        let limit = i64::try_from(limit.min(MAX_SUGGESTIONS)).unwrap_or(8);
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "WITH people(name, address, weight, date) AS (
+                 SELECT m.from_name, m.from_address, 1, m.date
+                   FROM messages m JOIN folders f ON f.id = m.folder_id
+                  WHERE m.from_address IS NOT NULL AND f.role NOT IN ('sent', 'drafts', 'junk')
+                 UNION ALL
+                 SELECT json_extract(j.value, '$.name'), json_extract(j.value, '$.address'), 3, m.date
+                   FROM messages m JOIN folders f ON f.id = m.folder_id, json_each(m.to_json) j
+                  WHERE f.role = 'sent'
+                 UNION ALL
+                 SELECT json_extract(j.value, '$.name'), json_extract(j.value, '$.address'), 3, m.date
+                   FROM messages m JOIN folders f ON f.id = m.folder_id, json_each(m.cc_json) j
+                  WHERE f.role = 'sent'
+             )
+             SELECT MAX(name), MIN(address), SUM(weight) AS score, MAX(date) AS last
+               FROM people
+              WHERE address LIKE '%@%'
+                AND (lower(address) LIKE ?1 ESCAPE '\\' OR lower(name) LIKE ?1 ESCAPE '\\'
+                     OR lower(name) LIKE ?2 ESCAPE '\\')
+                AND lower(address) NOT IN (SELECT lower(email) FROM accounts)
+                AND lower(address) NOT LIKE '%noreply%'
+                AND lower(address) NOT LIKE '%no-reply%'
+                AND lower(address) NOT LIKE '%donotreply%'
+                AND lower(address) NOT LIKE 'mailer-daemon@%'
+              GROUP BY lower(address)
+              ORDER BY score DESC, last DESC
+              LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![starts, word, limit], |row| {
+            Ok(Mailbox {
+                name: row
+                    .get::<_, Option<String>>(0)?
+                    .filter(|n| !n.trim().is_empty()),
+                address: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects)]
 mod tests {
@@ -696,6 +761,58 @@ mod tests {
 
     fn subjects(page: &MessagePage) -> Vec<&str> {
         page.items.iter().map(|i| i.subject.as_str()).collect()
+    }
+
+    #[test]
+    fn suggests_people_written_to_before_people_heard_from() {
+        let f = fixture();
+        let sent = add_folder(&f.store, &f.account, "Sent", FolderRole::Sent);
+        // Heard from Alice twice; wrote to Bob once (counts more).
+        f.store
+            .upsert_message(&f.inbox, 1, &summary("one", 10), MessageFlags::default(), 1)
+            .unwrap();
+        f.store
+            .upsert_message(&f.inbox, 2, &summary("two", 20), MessageFlags::default(), 1)
+            .unwrap();
+        let mut to_bob = summary("hi bob", 30);
+        to_bob.from = Some(Mailbox {
+            name: None,
+            address: "a@example.com".into(),
+        });
+        f.store
+            .upsert_message(&sent, 1, &to_bob, MessageFlags::default(), 1)
+            .unwrap();
+        let mut robot = summary("receipt", 40);
+        robot.from = Some(Mailbox {
+            name: Some("Shop".into()),
+            address: "no-reply@shop.example".into(),
+        });
+        f.store
+            .upsert_message(&f.inbox, 3, &robot, MessageFlags::default(), 1)
+            .unwrap();
+
+        let by_address = |q: &str| -> Vec<String> {
+            f.store
+                .suggest_recipients(q, 8)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.address)
+                .collect()
+        };
+        assert_eq!(by_address("b"), ["bob@example.org"]);
+        // A word inside the name matches too ("Sender" in "Alice Sender").
+        assert_eq!(by_address("send"), ["alice@example.com"]);
+        assert_eq!(
+            f.store.suggest_recipients("Alice", 8).unwrap()[0]
+                .name
+                .as_deref(),
+            Some("Alice Sender")
+        );
+        // Not the user's own address, no-reply senders, or wildcards.
+        assert!(by_address("a@example").is_empty());
+        assert!(by_address("no-reply").is_empty());
+        assert!(by_address("%").is_empty());
+        assert!(by_address("  ").is_empty());
     }
 
     #[test]

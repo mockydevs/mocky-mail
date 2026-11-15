@@ -152,10 +152,14 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
     for attachment in &draft.attachments {
         let (path, _) = check_picked(state, attachment).await?;
         let file_name = safe_file_name(&attachment.file_name);
+        let data = tokio::fs::read(&path).await?;
+        // Again here: forwarded attachments and restored drafts weren't picked.
+        mail_core::attachment_policy::check_outgoing(&file_name, &data)
+            .map_err(|refusal| AppError::invalid(refusal.to_string()))?;
         attachments.push(OutgoingAttachment {
             mime_type: mime_for_file_name(&file_name).to_owned(),
             file_name,
-            data: tokio::fs::read(&path).await?,
+            data,
         });
     }
     let message = OutgoingMessage {
@@ -226,7 +230,10 @@ pub async fn send_message(
         message_id_header: Some(built.message_id),
         reply_to_message_id: draft.reply_to_message_id.clone(),
         sent_folder_hint: folder_path(&state, &account.id, FolderRole::Sent)?,
-        item: OutboxItem::new(created_at),
+        item: OutboxItem::scheduled(
+            created_at,
+            u64::from(crate::settings::load(&state)?.undo_send_secs),
+        ),
     })?;
     if let Some(old) = draft.draft_message_id.as_deref() {
         remove_saved_draft(&app, &state, &account.id, old)?;

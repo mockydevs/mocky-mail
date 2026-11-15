@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 
 import type { Account, AppError, FolderRole, MessageListItem, ReadFilter } from '../../api/types';
-import { formatListTime } from '../../lib/format';
+import { dayGroup, formatListTime } from '../../lib/format';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
 import { emptyCopy } from './selectors';
@@ -180,10 +180,14 @@ export function MessageList(props: Props) {
 
         {props.status === 'ready' && items.length > 0 && (
           <ul className="rows" aria-label={`${props.title} messages`}>
-            {items.map((m) => {
+            {items.map((m, i) => {
               const account = accounts.find((a) => a.id === m.accountId);
+              const group = dayGroup(m.date, now);
+              const previous = items[i - 1];
+              const startsGroup = !previous || dayGroup(previous.date, now) !== group;
               return (
                 <li key={m.id}>
+                  {startsGroup && <h2 className="rows__group">{group}</h2>}
                   <button
                     type="button"
                     data-id={m.id}

@@ -51,12 +51,27 @@ type Screen =
 
 /** How long a confirmation toast stays up. */
 const NOTICE_MS = 4000;
+/** "Mark as read after a few seconds": how long a message must stay open. */
+const MARK_READ_DELAY_MS = 3000;
 
 /** The toast for a message the user just sent, if one is being followed. */
-function sendNoticeOf(status: SendStatus | null): Notice | null {
+function sendNoticeOf(status: SendStatus | null, undo: (id: string) => void): Notice | null {
   switch (status?.phase) {
     case undefined:
       return null;
+    case 'scheduled':
+      return {
+        tone: 'info',
+        title: 'Sending…',
+        text: `You have ${String(status.secs)} seconds to undo.`,
+        sticky: true,
+        action: {
+          label: 'Undo',
+          run: () => {
+            undo(status.id);
+          },
+        },
+      };
     case 'sending':
       return { tone: 'info', title: 'Sending…', text: 'Your message is on its way.', sticky: true };
     case 'sent':
@@ -74,13 +89,22 @@ interface Notice {
   text: string;
   /** Stays up until replaced or dismissed (an action still under way). */
   sticky?: boolean;
+  /** One button beside the text, such as Undo. */
+  action?: { label: string; run: () => void };
 }
 
 function errorNotice(error: AppError, what: string): Notice {
   return { tone: 'error', title: `${what}: ${errorTitle(error.kind)}`, text: error.message };
 }
 
-const DEFAULT_SETTINGS: Settings = { theme: 'system', remoteImages: 'block', notifications: false, sound: false };
+const DEFAULT_SETTINGS: Settings = {
+  theme: 'system',
+  remoteImages: 'block',
+  notifications: false,
+  sound: false,
+  undoSendSecs: 5,
+  markRead: 'open',
+};
 
 /**
  * Back in compose behaves like Esc: it closes an untouched message, and asks
@@ -131,7 +155,19 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
 
   // Tell the user whether a message they sent actually went out.
   const sending = useSendStatus(api);
-  const sendNotice = sendNoticeOf(sending.status);
+  /** Undo send: take the message back out of the Outbox into compose. */
+  const undoSend = (id: string) => {
+    sending.clear();
+    api.outboxEdit(id).then(
+      (draft) => {
+        compose(draft, 'New message');
+      },
+      (e: unknown) => {
+        report(toAppError(e), 'Too late to undo; it is already sending');
+      },
+    );
+  };
+  const sendNotice = sendNoticeOf(sending.status, undoSend);
   const clearSending = sending.clear;
   const sendPhase = sending.status?.phase;
   /** A send in progress or just finished takes the toast slot. */
@@ -197,6 +233,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const page = useMessagePage(api, query, revision);
   const [overrides, setOverrides] = useState<Record<string, Override>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** An unread message opened under the "delay" setting, waiting to count as read. */
+  const [readPending, setReadPending] = useState<string | null>(null);
   const [pinned, setPinned] = useState<MessageListItem | null>(null);
   const [loaded, setLoaded] = useState<MessageDetail | null>(null);
   const [help, setHelp] = useState(false);
@@ -276,10 +314,31 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     const item = items.find((m) => m.id === id);
     if (!item) return;
     setPinned(item);
-    if (item.unread) {
-      optimistic([id], { unread: false }, () => api.setFlags([id], { seen: true }), 'Could not mark as read');
-    }
+    if (!item.unread) return;
+    const when = settings?.markRead ?? 'open';
+    if (when === 'open') markRead(id);
+    // "delay": only if it is still open a moment later (see the effect below).
+    else if (when === 'delay') setReadPending(id);
   };
+
+  const markRead = (id: string) => {
+    optimistic([id], { unread: false }, () => api.setFlags([id], { seen: true }), 'Could not mark as read');
+  };
+
+  // "Mark as read after a few seconds": a quick peek leaves it unread.
+  const markReadRef = useRef(markRead);
+  useEffect(() => {
+    markReadRef.current = markRead;
+  });
+  useEffect(() => {
+    if (readPending === null || readPending !== activeId) return;
+    const timer = window.setTimeout(() => {
+      markReadRef.current(readPending);
+    }, MARK_READ_DELAY_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [readPending, activeId]);
 
   const goTo = (next: MailView) => {
     setView(next);
@@ -304,6 +363,28 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       () => api.moveMessages([item.id], { role: target }),
       target === 'archive' ? 'Could not archive' : 'Could not delete',
       restore(item),
+    );
+    setNotice({
+      tone: 'info',
+      title: target === 'archive' ? 'Archived' : 'Moved to Trash',
+      text: item.subject || '(no subject)',
+      action: {
+        label: 'Undo',
+        run: () => {
+          undoRemove(item);
+        },
+      },
+    });
+  };
+
+  /** Undo archive or delete: put the message back where it was. */
+  const undoRemove = (item: MessageListItem) => {
+    setNotice(null);
+    optimistic(
+      [item.id],
+      { removed: false },
+      () => api.moveMessages([item.id], { folderId: item.folderId }),
+      'Could not undo',
     );
   };
 
@@ -666,6 +747,11 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             <p className="toast__title">{shownNotice.title}</p>
             <p className="toast__text">{shownNotice.text}</p>
           </div>
+          {shownNotice.action && (
+            <button type="button" className="btn btn--secondary btn--small toast__action" onClick={shownNotice.action.run}>
+              {shownNotice.action.label}
+            </button>
+          )}
           <button
             type="button"
             className="icon-btn"

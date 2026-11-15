@@ -279,7 +279,7 @@ describe('sync status and notifications', () => {
 
     cleanup();
     chime.mockClear();
-    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false } });
+    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false, undoSendSecs: 5, markRead: 'open' } });
     await rows();
     act(() => {
       quiet.api.emit('mail://new-mail', { accountId: 'work', count: 1 });

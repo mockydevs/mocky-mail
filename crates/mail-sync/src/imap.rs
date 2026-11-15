@@ -739,7 +739,10 @@ mod tests {
             token: "t",
             sent: false,
         };
-        assert_eq!(auth.process(b""), "user=a@gmail.com\x01auth=Bearer t\x01\x01");
+        assert_eq!(
+            auth.process(b""),
+            "user=a@gmail.com\x01auth=Bearer t\x01\x01"
+        );
         assert_eq!(auth.process(br#"{"status":"400"}"#), "");
     }
 

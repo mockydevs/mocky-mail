@@ -79,6 +79,25 @@ export function formatListTime(seconds: number | null, now: number, timeZone?: s
   return `${d.day} ${d.monthName} ${d.year}`;
 }
 
+/**
+ * Heading for the group a message falls in, newest first: "Today",
+ * "Yesterday", a weekday within the past week ("Monday"), then the month
+ * ("October", or "October 2025" in another year). Undated mail is "Earlier".
+ */
+export function dayGroup(seconds: number | null, now: number, timeZone?: string): string {
+  const date = toDate(seconds);
+  const nowDate = toDate(now);
+  if (!date || !nowDate) return 'Earlier';
+  const d = partsIn(date, timeZone);
+  const n = partsIn(nowDate, timeZone);
+  const daysAgo = dayNumber(n) - dayNumber(d);
+  if (daysAgo <= 0) return 'Today';
+  if (daysAgo === 1) return 'Yesterday';
+  if (daysAgo < 7) return new Intl.DateTimeFormat('en-GB', { timeZone, weekday: 'long' }).format(date);
+  const month = new Intl.DateTimeFormat('en-GB', { timeZone, month: 'long' }).format(date);
+  return d.year === n.year ? month : `${month} ${String(d.year)}`;
+}
+
 /** Reading-pane date: "Fri 13 Nov 2026, 09:42". */
 export function formatLongDate(seconds: number | null, timeZone?: string): string {
   const date = toDate(seconds);

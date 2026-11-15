@@ -1,4 +1,4 @@
-import { formatBytes, formatClock, formatListTime, formatLongDate } from './format';
+import { dayGroup, formatBytes, formatClock, formatListTime, formatLongDate } from './format';
 
 const s = (iso: string) => Date.parse(iso) / 1000;
 
@@ -56,5 +56,27 @@ describe('formatLongDate and formatClock', () => {
   it('returns nothing for missing dates', () => {
     expect(formatLongDate(null)).toBe('');
     expect(formatClock(null)).toBe('');
+  });
+});
+
+describe('dayGroup', () => {
+  const now = s('2026-11-13T10:15:00Z'); // a Friday
+
+  it('names today, yesterday and the past week by day', () => {
+    expect(dayGroup(s('2026-11-13T01:00:00Z'), now, 'UTC')).toBe('Today');
+    expect(dayGroup(s('2026-11-12T23:00:00Z'), now, 'UTC')).toBe('Yesterday');
+    expect(dayGroup(s('2026-11-09T09:00:00Z'), now, 'UTC')).toBe('Monday');
+  });
+
+  it('groups older mail by month, with the year when it differs', () => {
+    expect(dayGroup(s('2026-11-02T09:00:00Z'), now, 'UTC')).toBe('November');
+    expect(dayGroup(s('2026-10-20T09:00:00Z'), now, 'UTC')).toBe('October');
+    expect(dayGroup(s('2025-12-24T09:00:00Z'), now, 'UTC')).toBe('December 2025');
+  });
+
+  it('follows the time zone and handles missing dates', () => {
+    // 23:30 UTC on the 12th is already the 13th in Nairobi.
+    expect(dayGroup(s('2026-11-12T23:30:00Z'), now, 'Africa/Nairobi')).toBe('Today');
+    expect(dayGroup(null, now, 'UTC')).toBe('Earlier');
   });
 });

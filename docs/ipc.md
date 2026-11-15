@@ -99,12 +99,13 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `list_messages` | `{ query: ListQuery }` | `MessagePage` (newest first) |
 | `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read) |
 | `set_flags` | `{ ids, seen?: boolean, flagged?: boolean }` | `void` (local at once, server when online) |
-| `move_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` |
+| `move_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` (a message moved again before the server gave it a new UID is found by Message-ID) |
+| `suggest_recipients` | `{ query }` | `Mailbox[]` (up to 8 people written to or heard from, best first; own addresses and no-reply senders left out) |
 | `delete_forever` | `{ ids }` | `void` (only allowed for messages in Trash or Junk) |
 | `save_attachment` | `{ messageId, index }` | `string \| null` (shows a save dialog; null if cancelled) |
 | `pick_attachments` | | `DraftAttachment[]` (open-file dialog) |
 | `check_draft` | `{ draft }` | `{ estimatedBytes: number; limitBytes: number }` or rejects `invalid`/`too_large` |
-| `send_message` | `{ draft }` | `OutboxEntry` (validated, queued; outbox worker sends; removes the saved draft `draft.draftMessageId` if set) |
+| `send_message` | `{ draft }` | `OutboxEntry` (validated, queued and held for `Settings.undoSendSecs` so `outbox_edit`/`outbox_cancel` can undo it; outbox worker then sends; removes the saved draft `draft.draftMessageId` if set) |
 | `attachments_for_draft` | `{ messageId }` | `DraftAttachment[]` (copies of a message's attachments, usable in a Draft: forwarding, continuing a draft) |
 | `save_draft` | `{ draft }` | `{ draftMessageId: string }` (stored in Drafts; replaces `draft.draftMessageId` if set; pass the returned id on the next save) |
 | `list_outbox` | | `OutboxEntry[]` |

@@ -149,6 +149,7 @@ pub fn run() {
             mail::get_message,
             mail::set_flags,
             mail::move_messages,
+            mail::suggest_recipients,
             mail::delete_forever,
             mail::save_attachment,
             mail::pick_attachments,

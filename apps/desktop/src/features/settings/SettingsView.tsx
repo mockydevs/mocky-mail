@@ -2,12 +2,21 @@ import { useId, useRef, useState, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
-import type { Account, AppError, Settings, ThemeSetting } from '../../api/types';
+import type { Account, AppError, Settings, ThemeSetting, MarkReadSetting } from '../../api/types';
 import { ConfirmDialog } from '../../ui/Modal';
 import { Icon } from '../../ui/Icon';
 import { PasswordField } from '../../ui/PasswordField';
 import { playChime } from '../notifications/chime';
 import { accountErrorCopy } from '../accounts/providers';
+
+const MARK_READ: readonly [MarkReadSetting, string][] = [
+  ['open', 'Mark as read as soon as I open a message'],
+  ['delay', 'Mark as read after 3 seconds open (a quick peek stays unread)'],
+  ['manual', 'Only when I choose Mark as read'],
+];
+
+/** Same choices as the backend accepts (UNDO_SEND_CHOICES in settings.rs). */
+const UNDO_SEND = [0, 5, 10, 20, 30] as const;
 
 interface Props {
   settings: Settings;
@@ -74,6 +83,44 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
             />
             Always load images
           </label>
+        </fieldset>
+
+        <fieldset className="settings__group">
+          <legend className="settings__legend">Reading</legend>
+          {MARK_READ.map(([value, label]) => (
+            <label key={value} className="choice">
+              <input
+                type="radio"
+                name={`${id}-mark-read`}
+                checked={settings.markRead === value}
+                onChange={() => {
+                  onChange({ ...settings, markRead: value });
+                }}
+              />
+              {label}
+            </label>
+          ))}
+        </fieldset>
+
+        <fieldset className="settings__group">
+          <legend className="settings__legend">Sending</legend>
+          <label className="form-field">
+            <span className="form-field__label">Undo send</span>
+            <select
+              className="field"
+              value={settings.undoSendSecs}
+              onChange={(e) => {
+                onChange({ ...settings, undoSendSecs: Number(e.target.value) });
+              }}
+            >
+              {UNDO_SEND.map((secs) => (
+                <option key={secs} value={secs}>
+                  {secs === 0 ? 'Off: send at once' : `${String(secs)} seconds`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="form-hint">After you tap Send, you have this long to take a message back.</p>
         </fieldset>
 
         <fieldset className="settings__group">

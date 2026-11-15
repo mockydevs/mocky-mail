@@ -530,6 +530,16 @@ button:disabled {
 }
 
 
+/* Day group heading in the message list: Today, Yesterday, Monday, October. */
+.rows__group {
+  margin: 0;
+  padding: 14px 16px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .row {
   display: flex;
   gap: 12px;
@@ -1067,11 +1077,53 @@ button:disabled {
 }
 
 .recipients {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 4px 0;
+}
+
+/* People suggested while typing a recipient. */
+.suggestions {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  z-index: 30;
+  max-height: 280px;
+  margin-top: 2px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+}
+
+.suggestion {
+  display: flex;
+  flex-direction: column;
+  min-height: 44px;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.suggestion[aria-selected='true'],
+.suggestion:hover {
+  background: var(--row-sel);
+}
+
+.suggestion__name {
+  font-weight: 600;
+}
+
+.suggestion__address {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .recipients__list {
@@ -2327,6 +2379,12 @@ kbd {
 
 .toast .icon-btn {
   color: inherit;
+}
+
+.toast__action {
+  flex: none;
+  align-self: center;
+  margin-left: auto;
 }
 
 /* Phones: full width, above the New message button (comes after the base

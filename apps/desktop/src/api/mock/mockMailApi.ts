@@ -7,6 +7,7 @@ import type {
   DraftAttachment,
   DraftCheck,
   Folder,
+  Mailbox,
   MailApi,
   MailEventName,
   MailEvents,
@@ -116,13 +117,15 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const draftFiles = new Map<string, DraftAttachment[]>();
   const now = options.now ?? (() => MOCK_NOW);
   /** Play a sent message through sending and sent, then drop it, as Rust does. */
-  const deliver = (id: string) => {
+  const deliver = (id: string, holdSecs: number) => {
     const step = (status: OutboxEntry['status'], next?: () => void) => {
       outbox = outbox.map((e) => (e.id === id ? { ...e, status } : e));
       outboxChanged();
       next?.();
     };
     setTimeout(() => {
+      // Undone meanwhile: nothing to deliver.
+      if (!outbox.some((e) => e.id === id)) return;
       step({ state: 'sending', started_at: now() }, () =>
         setTimeout(() => {
           step({ state: 'sent', at: now() }, () => {
@@ -131,7 +134,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           });
         }, 1200),
       );
-    }, 400);
+    }, 400 + holdSecs * 1000);
   };
   type Handler = (payload: never) => void;
   const handlers = new Map<MailEventName, Set<Handler>>();
@@ -215,6 +218,23 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     failNext(method, error) {
       failures.set(method, error);
     },
+
+    suggestRecipients: (query) =>
+      run('suggestRecipients', () => {
+        const q = query.trim().toLowerCase();
+        if (!q) return [];
+        const own = new Set(accounts.map((a) => a.email.toLowerCase()));
+        const seen = new Map<string, Mailbox>();
+        for (const m of messages) {
+          for (const p of [m.from, ...m.to].filter((x): x is Mailbox => x !== null)) {
+            const key = p.address.toLowerCase();
+            const name = p.name?.toLowerCase() ?? '';
+            const hit = key.startsWith(q) || name.startsWith(q) || name.includes(` ${q}`);
+            if (hit && !own.has(key) && !seen.has(key)) seen.set(key, p);
+          }
+        }
+        return [...seen.values()].slice(0, 8);
+      }),
 
     suggestServers: (email) =>
       run('suggestServers', () => SUGGESTIONS[email.split('@')[1]?.toLowerCase() ?? ''] ?? null),
@@ -399,7 +419,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           preview: draft.bodyText.replace(/\s+/g, ' ').trim().slice(0, 160),
           createdAt: now(),
           attempts: 0,
-          status: { state: 'queued', next_attempt_at: now(), maybe_sent: false },
+          // Held for the undo window, as the real Outbox does.
+          status: { state: 'queued', next_attempt_at: now() + settings.undoSendSecs, maybe_sent: false },
           progress: null,
         };
         outboxDrafts.set(entry.id, clone({ ...draft, draftMessageId: null }));
@@ -412,7 +433,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           messages = messages.map((m) => (m.id === draft.replyToMessageId ? { ...m, answered: true } : m));
         }
         outboxChanged();
-        if (options.simulateDelivery) deliver(entry.id);
+        if (options.simulateDelivery) deliver(entry.id, settings.undoSendSecs);
         return entry;
       }),
 

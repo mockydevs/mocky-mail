@@ -20,7 +20,15 @@ pub struct Settings {
     pub notifications: bool,
     /// A short chime with each new-mail notification.
     pub sound: bool,
+    /// Seconds Send waits so it can be undone; 0 sends at once.
+    pub undo_send_secs: u32,
+    /// "open" (as soon as a message is opened), "delay" (after a few
+    /// seconds open) or "manual" (only with Mark as read).
+    pub mark_read: String,
 }
+
+/// Undo-send choices offered in Settings.
+pub const UNDO_SEND_CHOICES: [u32; 5] = [0, 5, 10, 20, 30];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -29,6 +37,8 @@ impl Default for Settings {
             remote_images: "block".into(),
             notifications: true,
             sound: true,
+            undo_send_secs: 5,
+            mark_read: "open".into(),
         }
     }
 }
@@ -40,6 +50,12 @@ impl Settings {
         }
         if !matches!(self.remote_images.as_str(), "block" | "allow") {
             self.remote_images = "block".into();
+        }
+        if !UNDO_SEND_CHOICES.contains(&self.undo_send_secs) {
+            self.undo_send_secs = 5;
+        }
+        if !matches!(self.mark_read.as_str(), "open" | "delay" | "manual") {
+            self.mark_read = "open".into();
         }
         self
     }
@@ -88,11 +104,15 @@ mod tests {
             remote_images: "maybe".into(),
             notifications: false,
             sound: false,
+            undo_send_secs: 7,
+            mark_read: "sometimes".into(),
         }
         .normalized();
         assert_eq!(s.theme, "system");
         assert_eq!(s.remote_images, "block");
         assert!(!s.notifications);
+        assert_eq!(s.undo_send_secs, 5);
+        assert_eq!(s.mark_read, "open");
     }
 
     #[test]

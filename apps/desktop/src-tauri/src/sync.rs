@@ -72,6 +72,18 @@ pub enum Op {
         /// Create the target first (it was made locally, e.g. Archive).
         create_target: bool,
     },
+    /// Move the messages with this Message-ID: one moved locally whose new
+    /// UID isn't known yet (moved again before the next sync, or Undo).
+    MoveByMessageId {
+        /// Source folder path.
+        from: String,
+        /// Message-ID without angle brackets.
+        message_id: String,
+        /// Target folder path.
+        to: String,
+        /// Create the target first.
+        create_target: bool,
+    },
     /// Delete permanently the messages with this Message-ID (an old draft
     /// copy whose UID may not be known yet).
     DeleteByMessageId {
@@ -96,7 +108,7 @@ pub enum Op {
 pub fn enqueue(state: &AppState, account_id: &str, op: &Op) -> AppResult<()> {
     let kind = match op {
         Op::SetFlags { .. } => OpKind::SetFlags,
-        Op::Move { .. } => OpKind::Move,
+        Op::Move { .. } | Op::MoveByMessageId { .. } => OpKind::Move,
         Op::Delete { .. } | Op::DeleteByMessageId { .. } => OpKind::Delete,
     };
     let payload = serde_json::to_value(op).map_err(|e| AppError::internal(e.to_string()))?;
@@ -253,6 +265,22 @@ async fn apply(conn: &mut ImapConnection, op: &Op) -> Result<(), mail_sync::Sync
                 let _ = conn.create_folder(to).await;
             }
             conn.move_messages(from, uids, to).await
+        }
+        Op::MoveByMessageId {
+            from,
+            message_id,
+            to,
+            create_target,
+        } => {
+            let uids = conn.uids_with_message_id(from, message_id).await?;
+            if uids.is_empty() {
+                // Already moved (or gone): nothing left to do.
+                return Ok(());
+            }
+            if *create_target {
+                let _ = conn.create_folder(to).await;
+            }
+            conn.move_messages(from, &uids, to).await
         }
         Op::Delete { folder, uids } => conn.delete_forever(folder, uids).await,
         Op::DeleteByMessageId { folder, message_id } => {

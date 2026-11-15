@@ -230,6 +230,20 @@ fn resolve_target(
     }
 }
 
+/// `suggest_recipients`: people to offer while typing an address.
+///
+/// # Errors
+/// Database errors.
+#[tauri::command]
+pub fn suggest_recipients(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+) -> AppResult<Vec<Mailbox>> {
+    Ok(state
+        .store
+        .suggest_recipients(&query, mail_store::MAX_SUGGESTIONS)?)
+}
+
 /// `move_messages`: archive, trash, junk or any folder.
 #[tauri::command]
 pub fn move_messages(
@@ -253,12 +267,28 @@ pub fn move_messages(
                 &state,
                 &account_id,
                 &Op::Move {
-                    from: source.path,
+                    from: source.path.clone(),
                     uids,
                     to: target_folder.path.clone(),
                     create_target,
                 },
             )?;
+        }
+        // Moved locally before the server's new UID arrived (moved twice in
+        // a row, or Undo): find them on the server by Message-ID instead.
+        for (id, _) in messages.iter().filter(|(_, uid)| uid.is_none()) {
+            if let Some(message_id) = state.store.get_message(id)?.message_id_header {
+                sync::enqueue(
+                    &state,
+                    &account_id,
+                    &Op::MoveByMessageId {
+                        from: source.path.clone(),
+                        message_id: message_id.trim_matches(['<', '>']).to_owned(),
+                        to: target_folder.path.clone(),
+                        create_target,
+                    },
+                )?;
+            }
         }
         let message_ids: Vec<&String> = messages.iter().map(|(id, _)| id).collect();
         state.store.move_local(&message_ids, &target_folder.id)?;
@@ -367,6 +397,10 @@ pub async fn pick_attachments(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         );
+        // Programs and scripts can't be sent; say so now, not at Send.
+        let data = tokio::fs::read(&path).await?;
+        mail_core::attachment_policy::check_outgoing(&file_name, &data)
+            .map_err(|refusal| AppError::invalid(format!("{file_name}: {refusal}")))?;
         lock(&state.picked_files).insert(path.clone());
         out.push(DraftAttachment {
             path: path.display().to_string(),

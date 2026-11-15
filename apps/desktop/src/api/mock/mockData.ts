@@ -227,4 +227,11 @@ export const MOCK_OUTBOX: OutboxEntry[] = [
   },
 ];
 
-export const MOCK_SETTINGS: Settings = { theme: 'system', remoteImages: 'block', notifications: true, sound: true };
+export const MOCK_SETTINGS: Settings = {
+  theme: 'system',
+  remoteImages: 'block',
+  notifications: true,
+  sound: true,
+  undoSendSecs: 5,
+  markRead: 'open',
+};

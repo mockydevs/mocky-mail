@@ -176,6 +176,20 @@ impl OutboxItem {
         }
     }
 
+    /// A newly queued message held for `delay` seconds first, so the user can
+    /// still take it back ("Undo send"). The sender skips it until then, and
+    /// it survives a restart like any queued message.
+    #[must_use]
+    pub const fn scheduled(now: UnixSeconds, delay: UnixSeconds) -> Self {
+        Self {
+            attempts: 0,
+            state: OutboxState::Queued {
+                next_attempt_at: now.saturating_add(delay),
+                maybe_sent: false,
+            },
+        }
+    }
+
     fn refuse(&self, action: &'static str) -> TransitionError {
         TransitionError::NotAllowed {
             action,
@@ -380,6 +394,21 @@ impl OutboxItem {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::arithmetic_side_effects, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn a_scheduled_message_waits_for_its_undo_window_and_can_be_cancelled() {
+        let mut item = OutboxItem::scheduled(1_000, 5);
+        assert!(!item.is_due(1_004));
+        assert!(item.is_due(1_005));
+        assert!(matches!(
+            item.clone().begin_send(1_002),
+            Err(TransitionError::NotDue {
+                next_attempt_at: 1_005
+            })
+        ));
+        assert!(item.cancel().is_ok());
+    }
+
     use super::*;
     use proptest::prelude::*;
 

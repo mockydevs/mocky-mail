@@ -33,7 +33,8 @@ pub use accounts::{Account, AuthKind, NewAccount, Security, ServerConfig};
 pub use error::{Result, StoreError};
 pub use folders::{Folder, NewFolder};
 pub use messages::{
-    ListFilter, ListQuery, MAX_PAGE_SIZE, MessageFlags, MessageListItem, MessagePage, StoredMessage,
+    ListFilter, ListQuery, MAX_PAGE_SIZE, MAX_SUGGESTIONS, MessageFlags, MessageListItem,
+    MessagePage, StoredMessage,
 };
 pub use ops::{OpKind, PendingOp};
 pub use outbox::{NewOutbox, OutboxEntry, OutboxMessage};

@@ -621,6 +621,8 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
   const [error, setError] = useState<AppError | null>(null);
   const sending = useSendStatus(api);
   const sendPhase = sending.status?.phase;
+  /** What was typed, so Undo can put it back. */
+  const lastSent = useRef('');
   const [focused, setFocused] = useState(false);
   const box = useRef<HTMLTextAreaElement>(null);
   const isSheet = sheet !== undefined;
@@ -639,6 +641,22 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
   }, [sendPhase, clearSending]);
   const firstName = (message.from?.name ?? message.from?.address ?? '').split(' ')[0] ?? '';
 
+  /** Undo send: take the reply back out of the Outbox and restore the text. */
+  const undo = () => {
+    const status = sending.status;
+    if (status?.phase !== 'scheduled') return;
+    sending.clear();
+    api.outboxCancel(status.id).then(
+      () => {
+        setText(lastSent.current);
+        box.current?.focus();
+      },
+      (e: unknown) => {
+        setError(toAppError(e));
+      },
+    );
+  };
+
   const submit = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!text.trim() || busy) return;
@@ -652,6 +670,7 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
       .then(() => api.sendMessage(draft))
       .then(
         (entry) => {
+          lastSent.current = text;
           setText('');
           sending.track(entry);
         },
@@ -708,6 +727,14 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
           className={`quick-reply__status ${sending.status.phase === 'failed' ? 'form-error' : 'form-hint'}`}
           role={sending.status.phase === 'failed' ? 'alert' : 'status'}
         >
+          {sending.status.phase === 'scheduled' && (
+            <>
+              Sending your reply…{' '}
+              <button type="button" className="btn btn--link btn--small" onClick={undo}>
+                Undo
+              </button>
+            </>
+          )}
           {sending.status.phase === 'sending' && 'Sending your reply…'}
           {sending.status.phase === 'sent' && 'Reply sent.'}
           {sending.status.phase === 'waiting' && 'No connection right now. Your reply will send by itself when you are back online.'}
