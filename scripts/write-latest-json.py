@@ -6,6 +6,11 @@ downloads folder, then upload latest.json next to them:
 
     scripts/write-latest-json.py path/to/downloads --notes "Faster, more reliable sync."
 
+The manifest is signed with Mocky Digital's update key (Ed25519), kept off the
+server at ~/.config/mocky-mail-release/update-signing.key; apps only believe a
+manifest signed by the key whose public half is in
+apps/desktop/src-tauri/update-key.pub.
+
 It reads the version from apps/desktop/src-tauri/tauri.conf.json, finds that
 version's installers in SHA256SUMS and checks each file's SHA-256 before
 writing. Installers that aren't there are left out; those installs are sent to
@@ -13,6 +18,7 @@ the download page instead.
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import pathlib
@@ -20,6 +26,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "apps/desktop/src-tauri/tauri.conf.json"
+PUBLIC_KEY = ROOT / "apps/desktop/src-tauri/update-key.pub"
+DEFAULT_KEY = pathlib.Path.home() / ".config/mocky-mail-release/update-signing.key"
 INSTALLERS = {
     "linux-deb": "mocky-mail_{version}_amd64.deb",
     "windows-nsis": "mocky-mail_{version}_x64-setup.exe",
@@ -31,6 +39,7 @@ def main() -> int:
     parser.add_argument("downloads", type=pathlib.Path, help="folder with the installers and SHA256SUMS")
     parser.add_argument("--notes", default="", help="one or two lines on what's new, shown in the app")
     parser.add_argument("--base-url", default="https://mailer.co.ke/downloads")
+    parser.add_argument("--key", type=pathlib.Path, default=DEFAULT_KEY, help="the private update-signing key (PEM)")
     args = parser.parse_args()
 
     version = json.loads(CONFIG.read_text())["version"]
@@ -56,9 +65,20 @@ def main() -> int:
     if not installers:
         print(f"error: no installers for {version} in {args.downloads}", file=sys.stderr)
         return 1
-    manifest = {"version": version, "notes": args.notes.strip(), "installers": installers}
+    manifest = json.dumps(
+        {"version": version, "notes": args.notes.strip(), "installers": installers}, separators=(",", ":")
+    )
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    key = serialization.load_pem_private_key(args.key.read_bytes(), None)
+    signature = key.sign(manifest.encode())
+    # Never publish what the apps would refuse.
+    trusted = Ed25519PublicKey.from_public_bytes(base64.b64decode(PUBLIC_KEY.read_text().strip()))
+    trusted.verify(signature, manifest.encode())
     out = args.downloads / "latest.json"
-    out.write_text(json.dumps(manifest, indent=2) + "\n")
+    signed = {"manifest": manifest, "signature": base64.b64encode(signature).decode()}
+    out.write_text(json.dumps(signed, indent=2) + "\n")
     print(f"wrote {out} for {version}: {', '.join(installers)}")
     return 0
 

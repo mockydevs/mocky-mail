@@ -24,12 +24,30 @@ const MANIFEST_URL: &str = match option_env!("MOCKY_MAIL_UPDATE_URL") {
     None => "https://mailer.co.ke/downloads/latest.json",
 };
 
+/// Keys that may sign `latest.json` (Ed25519, base64). The private key is
+/// kept offline by Mocky Digital, never on the download server, so someone
+/// who takes over the server still can't offer an update. A test build can
+/// trust another key with `MOCKY_MAIL_UPDATE_KEY` at compile time.
+const SIGNING_KEYS: &[&str] = &[match option_env!("MOCKY_MAIL_UPDATE_KEY") {
+    Some(key) => key,
+    None => include_str!("../update-key.pub"),
+}];
+
 /// Largest installer accepted.
 const MAX_INSTALLER_BYTES: u64 = 300 * 1024 * 1024;
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(15);
 
-/// The published manifest (`latest.json`).
+/// `latest.json` as published: the manifest as text, and its signature.
+#[derive(Debug, Clone, Deserialize)]
+struct Signed {
+    /// The manifest, as the JSON text that was signed.
+    manifest: String,
+    /// Ed25519 signature of `manifest`, base64.
+    signature: String,
+}
+
+/// The update manifest, once its signature checks out.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     /// The newest version, `major.minor.patch`.
@@ -170,15 +188,56 @@ fn client(timeout: Duration) -> AppResult<reqwest::Client> {
 async fn fetch_manifest() -> AppResult<Manifest> {
     let unavailable =
         |e: reqwest::Error| AppError::new("connect", format!("Couldn't check for updates: {e}"));
-    client(MANIFEST_TIMEOUT)?
+    let signed = client(MANIFEST_TIMEOUT)?
         .get(MANIFEST_URL)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(unavailable)?
-        .json::<Manifest>()
+        .json::<Signed>()
         .await
-        .map_err(unavailable)
+        .map_err(unavailable)?;
+    open_manifest(&signed, SIGNING_KEYS, MANIFEST_URL)
+}
+
+fn not_genuine() -> AppError {
+    AppError::invalid(
+        "The update notice wasn't signed by Mocky Digital, so it was ignored. Download new versions from mailer.co.ke.",
+    )
+}
+
+/// Check the signature and that every installer comes from the same site
+/// as the manifest, then read it.
+fn open_manifest(signed: &Signed, keys: &[&str], manifest_url: &str) -> AppResult<Manifest> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let signature = b64
+        .decode(signed.signature.trim())
+        .map_err(|_| not_genuine())?;
+    let genuine = keys.iter().any(|key| {
+        b64.decode(key.trim()).is_ok_and(|public| {
+            ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public)
+                .verify(signed.manifest.as_bytes(), &signature)
+                .is_ok()
+        })
+    });
+    if !genuine {
+        return Err(not_genuine());
+    }
+    let manifest: Manifest = serde_json::from_str(&signed.manifest).map_err(|_| not_genuine())?;
+    // Installers only from the manifest's own folder on the same site.
+    let folder = manifest_url
+        .rsplit_once('/')
+        .map_or(manifest_url, |(dir, _)| dir);
+    let prefix = format!("{folder}/");
+    if manifest
+        .installers
+        .values()
+        .any(|i| !i.url.starts_with(&prefix) || i.url.contains(".."))
+    {
+        return Err(not_genuine());
+    }
+    Ok(manifest)
 }
 
 /// `check_for_update`: the newer version this install can move to, if any.
@@ -396,6 +455,73 @@ mod tests {
         assert!(verify(data, &good).is_ok());
         assert!(verify(data, &good.to_uppercase()).is_ok());
         assert!(verify(b"tampered bytes", &good).is_err());
+    }
+
+    #[test]
+    fn only_signed_manifests_from_our_site_are_believed() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap_or_else(|_| panic!("key"));
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .unwrap_or_else(|_| panic!("key"));
+        let public = b64.encode(ring::signature::KeyPair::public_key(&pair).as_ref());
+        let url = "https://mailer.co.ke/downloads/latest.json";
+        let sign = |manifest: &str| Signed {
+            manifest: manifest.to_owned(),
+            signature: b64.encode(pair.sign(manifest.as_bytes()).as_ref()),
+        };
+        let good = r#"{"version":"0.3.0","installers":{"linux-deb":{"url":"https://mailer.co.ke/downloads/a.deb","sha256":"ab"}}}"#;
+        let opened =
+            open_manifest(&sign(good), &[&public], url).unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(opened.version, "0.3.0");
+
+        // Changed after signing, or signed by someone else: ignored.
+        let mut tampered = sign(good);
+        tampered.manifest = tampered.manifest.replace("0.3.0", "9.9.9");
+        assert!(open_manifest(&tampered, &[&public], url).is_err());
+        let other = b64.encode([7u8; 32]);
+        assert!(open_manifest(&sign(good), &[&other], url).is_err());
+        assert!(
+            open_manifest(
+                &Signed {
+                    manifest: good.into(),
+                    signature: "nope".into()
+                },
+                &[&public],
+                url
+            )
+            .is_err()
+        );
+
+        // Even signed, an installer from another site or folder is refused.
+        for bad in [
+            "https://evil.example/downloads/a.deb",
+            "https://mailer.co.ke/elsewhere/a.deb",
+            "https://mailer.co.ke/downloads/../x.deb",
+            "http://mailer.co.ke/downloads/a.deb",
+        ] {
+            let m = good.replace("https://mailer.co.ke/downloads/a.deb", bad);
+            assert!(open_manifest(&sign(&m), &[&public], url).is_err(), "{bad}");
+        }
+        // The real key is built in.
+        assert_eq!(
+            b64.decode(SIGNING_KEYS[0].trim()).map(|k| k.len()).ok(),
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn reads_signatures_made_by_the_release_script() {
+        // Made by scripts/write-latest-json.py's library (Python cryptography).
+        let signed = Signed {
+            manifest: r#"{"version":"0.3.0","notes":"","installers":{"linux-deb":{"url":"https://mailer.co.ke/downloads/mocky-mail_0.3.0_amd64.deb","sha256":"ab"}}}"#.to_owned(),
+            signature: "kaaiYdBdYzg54iABvzmkR3gRXKjRAoyoO2wkaFmVUccIXi9rIG1cScxyqfZookPgTZeGDuN9yZeKu09x3veQAg==".to_owned(),
+        };
+        let key = "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=";
+        let url = "https://mailer.co.ke/downloads/latest.json";
+        assert!(open_manifest(&signed, &[key], url).is_ok());
     }
 
     #[test]

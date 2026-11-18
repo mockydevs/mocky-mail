@@ -2916,9 +2916,10 @@ dependencies = [
 
 [[package]]
 name = "mocky-mail-desktop"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "android-bridge",
+ "base64 0.23.1",
  "chrono",
  "futures",
  "mail-auth",
@@ -2926,6 +2927,7 @@ dependencies = [
  "mail-store",
  "mail-sync",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.10.9",
