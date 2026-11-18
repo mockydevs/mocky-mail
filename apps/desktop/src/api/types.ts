@@ -353,6 +353,8 @@ export interface MailApi {
   listMessages(query: ListQuery & { threads?: boolean }): Promise<MessagePage>;
   /** Always put mail from this sender (or anyone at its domain) in Focused or Other; null removes the rule. */
   setFocusRule(sender: string, focus: Focus | null, wholeDomain: boolean): Promise<void>;
+  /** The HTML recipients will see for this compose text (formatting marks rendered). */
+  previewBody(body: string): Promise<string>;
   /** Every message in this message's conversation, oldest first (Trash and Spam left out). */
   getThread(id: string): Promise<MessageListItem[]>;
   getMessage(id: string, allowRemote: boolean): Promise<MessageDetail>;

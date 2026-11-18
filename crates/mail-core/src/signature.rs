@@ -304,10 +304,19 @@ fn text_block(text: &str, out: &mut String) {
 pub fn html_with_signature(body: &str, signature: &Signature) -> Option<String> {
     let body = body.replace("\r\n", "\n");
     let (start, end) = find_block(&body, &signature.text)?;
+    // Bold, lists, links… typed in compose come out formatted.
+    let formatted = crate::formatting::has_formatting(&body);
+    let block = |text: &str, out: &mut String| {
+        if formatted && !text.trim().is_empty() {
+            out.push_str(&crate::formatting::render_markdown(text));
+        } else {
+            text_block(text, out);
+        }
+    };
     let mut html = String::from(
         "<!doctype html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family:Arial,Helvetica,sans-serif;font-size:14px\">",
     );
-    text_block(body.get(..start)?.trim_end_matches('\n'), &mut html);
+    block(body.get(..start)?.trim_end_matches('\n'), &mut html);
     let _ = write!(
         html,
         "<div class=\"signature\" style=\"margin-top:16px\">{}",
@@ -323,7 +332,7 @@ pub fn html_with_signature(body: &str, signature: &Signature) -> Option<String> 
         );
     }
     html.push_str("</div>");
-    text_block(body.get(end..)?.trim_start_matches('\n'), &mut html);
+    block(body.get(end..)?.trim_start_matches('\n'), &mut html);
     html.push_str("</body></html>");
     Some(html)
 }
@@ -452,5 +461,18 @@ mod tests {
         assert_eq!(allowed_width(480, 300), 300);
         assert_eq!(allowed_width(5000, 2000), 600);
         assert_eq!(allowed_width(240, 1200), 240);
+    }
+
+    #[test]
+    fn formatting_typed_above_the_signature_is_kept() {
+        let s = clean_signature("<b>Don</b>").unwrap().unwrap();
+        let body = format!(
+            "Please **confirm**:\n\n- Paint\n\n{}",
+            signature_block(&s.text)
+        );
+        let html = html_with_signature(&body, &s).unwrap();
+        assert!(html.contains("<strong>confirm</strong>"));
+        assert!(html.contains("<li>Paint</li>"));
+        assert!(html.contains("<b>Don</b>"));
     }
 }

@@ -64,6 +64,16 @@ pub fn set_focus_rule(
     Ok(state.store.set_focus_rule(&key, focus)?)
 }
 
+/// `preview_body`: the HTML recipients will see for what is typed in
+/// compose (formatting marks rendered, typed HTML escaped).
+#[tauri::command]
+pub fn preview_body(body: String) -> AppResult<String> {
+    if body.len() > 2 * 1024 * 1024 {
+        return Err(AppError::invalid("This message is too long to preview."));
+    }
+    Ok(mail_core::formatting::html_document(&body))
+}
+
 /// `get_thread`: every message in a message's conversation, oldest first.
 #[tauri::command]
 pub fn get_thread(state: State<'_, Arc<AppState>>, id: String) -> AppResult<Vec<MessageListItem>> {

@@ -3418,3 +3418,52 @@ button.contact-row:hover,
   border-bottom-color: var(--primary);
   color: var(--text);
 }
+
+/* Formatting toolbar above the message body. */
+.compose__format {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.compose__format-btn {
+  min-width: 36px;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.compose__format-btn:hover:not(:disabled) {
+  background: var(--list);
+  color: var(--text);
+}
+
+.compose__format-btn:disabled {
+  opacity: 0.4;
+}
+
+.compose__format-preview {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+.compose__format-preview[aria-pressed='true'] {
+  color: var(--primary);
+}
+
+.compose__preview {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 200px;
+  overflow: auto;
+}

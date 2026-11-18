@@ -164,6 +164,7 @@ pub fn run() {
             mail::list_messages,
             mail::get_thread,
             mail::set_focus_rule,
+            mail::preview_body,
             mail::get_message,
             mail::set_flags,
             mail::move_messages,

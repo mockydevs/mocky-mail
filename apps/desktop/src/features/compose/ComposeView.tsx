@@ -8,7 +8,9 @@ import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
 import { RecipientField } from './RecipientField';
 import { parseRecipients } from './recipients';
+import { link, prefixLines, wrap, type Edit } from './formatting';
 import { signatureBlock, swapSignature } from './seed';
+import { SandboxedHtml } from '../reader/SandboxedHtml';
 
 interface Props {
   initial: Draft;
@@ -215,7 +217,49 @@ export function ComposeView({
     else onClose();
   };
 
+  // Formatting: marks typed or added by the toolbar; Preview shows the result.
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const format = (make: (value: string, start: number, end: number) => Edit) => {
+    const box = bodyRef.current;
+    if (!box) return;
+    const edit = make(box.value, box.selectionStart, box.selectionEnd);
+    update({ bodyText: edit.value });
+    // After React writes the new value, put the cursor where the edit says.
+    requestAnimationFrame(() => {
+      box.focus();
+      box.setSelectionRange(edit.start, edit.end);
+    });
+  };
+  const tools: { label: string; key?: string; text: string; make: (v: string, s: number, e: number) => Edit }[] = [
+    { label: 'Bold', key: 'b', text: 'B', make: (v, s, e) => wrap(v, s, e, '**', 'bold text') },
+    { label: 'Italic', key: 'i', text: 'I', make: (v, s, e) => wrap(v, s, e, '*', 'italic text') },
+    { label: 'Link', key: 'k', text: 'Link', make: link },
+    { label: 'Bulleted list', text: '•', make: (v, s, e) => prefixLines(v, s, e, '- ') },
+    { label: 'Numbered list', text: '1.', make: (v, s, e) => prefixLines(v, s, e, '', true) },
+    { label: 'Quote', text: '❝', make: (v, s, e) => prefixLines(v, s, e, '> ') },
+    { label: 'Code', text: '</>', make: (v, s, e) => wrap(v, s, e, '`', 'code') },
+  ];
+  const togglePreview = () => {
+    if (preview !== null) {
+      setPreview(null);
+      return;
+    }
+    api.previewBody(draft.bodyText).then(setPreview, (e: unknown) => {
+      setError(toAppError(e));
+    });
+  };
+
   const onKeyDown = (event: KeyboardEvent) => {
+    const shortcut =
+      (event.ctrlKey || event.metaKey) && !event.altKey && event.target === bodyRef.current
+        ? tools.find((t) => t.key === event.key.toLowerCase())
+        : undefined;
+    if (shortcut) {
+      event.preventDefault();
+      format(shortcut.make);
+      return;
+    }
     if (event.key === 'Escape' && !confirmClose) {
       event.stopPropagation();
       requestClose();
@@ -370,11 +414,45 @@ export function ComposeView({
         <span className="compose__hint">Ctrl+Enter to send</span>
       </div>
 
+      <div className="compose__format" role="toolbar" aria-label="Formatting">
+        {tools.map((tool) => (
+          <button
+            key={tool.label}
+            type="button"
+            className="compose__format-btn"
+            style={tool.label === 'Italic' ? { fontStyle: 'italic', fontFamily: 'Georgia, serif' } : undefined}
+            aria-label={tool.label}
+            title={tool.key ? `${tool.label} (Ctrl+${tool.key.toUpperCase()})` : tool.label}
+            disabled={preview !== null}
+            onClick={() => {
+              format(tool.make);
+            }}
+          >
+            {tool.text}
+          </button>
+        ))}
+        <button
+          type="button"
+          className="compose__format-btn compose__format-preview"
+          aria-pressed={preview !== null}
+          onClick={togglePreview}
+        >
+          {preview !== null ? 'Edit' : 'Preview'}
+        </button>
+      </div>
+
+      {preview !== null && (
+        <div className="compose__preview">
+          <SandboxedHtml title="Preview of your message" html={preview} fitContent />
+        </div>
+      )}
       <label htmlFor={`${id}-body`} className="visually-hidden">
         Message
       </label>
       <textarea
+        ref={bodyRef}
         id={`${id}-body`}
+        hidden={preview !== null}
         className="compose__body"
         value={draft.bodyText}
         // Replies start in the body, since To is already filled.

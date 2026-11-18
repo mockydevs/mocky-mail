@@ -529,6 +529,13 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         else focusRules.delete(key);
       }),
 
+    previewBody: (body) =>
+      run('previewBody', () => {
+        // The backend renders Markdown; the mock only shows bold and escapes the rest.
+        const escaped = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return `<!doctype html><html><body>${escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>')}</body></html>`;
+      }),
+
     getThread: (id) =>
       run('getThread', () => {
         const message = stored(id);

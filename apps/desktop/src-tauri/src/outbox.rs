@@ -173,7 +173,12 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
     let signature = crate::signatures::in_body(state, &account.id, &draft.body_text)?;
     let body_html = signature
         .as_ref()
-        .and_then(|signature| html_with_signature(&draft.body_text, signature));
+        .and_then(|signature| html_with_signature(&draft.body_text, signature))
+        // No signature: formatted writing still goes out as HTML too.
+        .or_else(|| {
+            mail_core::formatting::has_formatting(&draft.body_text)
+                .then(|| mail_core::formatting::html_document(&draft.body_text))
+        });
     let inline_images = match (&body_html, &signature) {
         (Some(_), Some(signature)) => crate::signatures::inline_image(signature)
             .into_iter()
