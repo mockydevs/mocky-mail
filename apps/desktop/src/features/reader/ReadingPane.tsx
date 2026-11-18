@@ -10,6 +10,8 @@ import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
 import { formatMailbox, formatMailboxes, replyDraft, toolbarActions, withSignature } from '../compose/seed';
 import { useSendStatus } from '../outbox/useSendStatus';
+import { printMessage } from '../../lib/print';
+import { Modal } from '../../ui/Modal';
 import { AttachmentViewer } from './AttachmentViewer';
 import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
@@ -71,6 +73,10 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
   const [notice, setNotice] = useState<{ error: AppError | null; text: string | null }>({ error: null, text: null });
   // The attachment shown full screen, if any.
   const [viewing, setViewing] = useState<AttachmentMeta | null>(null);
+  // "View source": the message as received.
+  const [source, setSource] = useState<string | null>(null);
+  // Desktop "More actions" menu.
+  const [more, setMore] = useState(false);
   // Phone layout only.
   const [details, setDetails] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -190,6 +196,73 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
     />
   );
 
+  const failed = (e: unknown) => {
+    setNotice({ error: toAppError(e), text: null });
+  };
+
+  // Whole-message actions, in the More menu on both layouts.
+  const extras: { key: string; label: string; icon: 'print' | 'download' | 'code'; run: () => void }[] = [
+    {
+      key: 'print',
+      label: 'Print',
+      icon: 'print',
+      run: () => {
+        printMessage(api, message).catch(failed);
+      },
+    },
+    {
+      key: 'eml',
+      label: 'Save as .eml',
+      icon: 'download',
+      run: () => {
+        setNotice({ error: null, text: null });
+        api.saveMessage(message.id).then((path) => {
+          if (path !== null) setNotice({ error: null, text: `Saved: ${path}` });
+        }, failed);
+      },
+    },
+    {
+      key: 'source',
+      label: 'View source',
+      icon: 'code',
+      run: () => {
+        api.messageSource(message.id).then(setSource, failed);
+      },
+    },
+  ];
+
+  const sourceDialog = source !== null && (
+    <Modal
+      title="Message source"
+      description="The message exactly as it arrived: headers first, then the body."
+      onClose={() => {
+        setSource(null);
+      }}
+    >
+      <pre className="source-view">{source}</pre>
+      <div className="modal__actions">
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={() => {
+            void navigator.clipboard.writeText(source).catch(() => undefined);
+          }}
+        >
+          Copy
+        </button>
+        <button
+          type="button"
+          className="btn btn--primary"
+          onClick={() => {
+            setSource(null);
+          }}
+        >
+          Close
+        </button>
+      </div>
+    </Modal>
+  );
+
   const notices = (
     <>
       {notice.text && (
@@ -256,7 +329,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
               <Icon name="trash" />
             </button>
           )}
-          {(actions.includes('flag') || actions.includes('read')) && (
+          {
             <div className="phone-menu">
               <button
                 type="button"
@@ -297,10 +370,24 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
                       {item.unread ? 'Mark as read' : 'Mark as unread'}
                     </button>
                   )}
+                  {extras.map((extra) => (
+                    <button
+                      key={extra.key}
+                      type="button"
+                      className="phone-menu__item"
+                      onClick={() => {
+                        setMenu(false);
+                        extra.run();
+                      }}
+                    >
+                      <Icon name={extra.icon} />
+                      {extra.label}
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
-          )}
+          }
         </div>
 
         <div
@@ -381,6 +468,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
             )}
             {attachmentList}
             {viewer}
+            {sourceDialog}
             {notices}
           </div>
           {isHtml ? (
@@ -557,6 +645,38 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
             <Icon name={item.unread ? 'envelopeOpen' : 'mail'} />
           </button>
         )}
+        <div className="phone-menu toolbar__more">
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="More actions"
+            aria-expanded={more}
+            title="Print, save, view source"
+            onClick={() => {
+              setMore((on) => !on);
+            }}
+          >
+            <Icon name="more" />
+          </button>
+          {more && (
+            <div className="phone-menu__list">
+              {extras.map((extra) => (
+                <button
+                  key={extra.key}
+                  type="button"
+                  className="phone-menu__item"
+                  onClick={() => {
+                    setMore(false);
+                    extra.run();
+                  }}
+                >
+                  <Icon name={extra.icon} />
+                  {extra.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className={isHtml ? 'reader__head' : 'reader__scroll'}>
@@ -628,6 +748,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
 
         {attachmentList}
         {viewer}
+        {sourceDialog}
 
         {notices}
 

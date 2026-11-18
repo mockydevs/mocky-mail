@@ -2,6 +2,11 @@ package ke.co.mocky.mail
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.Context
+import android.print.PrintAttributes
+import android.print.PrintManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -26,6 +31,12 @@ class PickArgs {
 }
 
 @InvokeArg
+class PrintArgs {
+  lateinit var html: String
+  var title: String = "Email"
+}
+
+@InvokeArg
 class FileArgs {
   lateinit var path: String
   var fileName: String = ""
@@ -42,6 +53,8 @@ class FileArgs {
  * - saveFile: the system "Save to" screen, then the file is copied there.
  * - openFile: hands a file to another app (PDF reader, Word, Gallery) with
  *   read access to that one file only.
+ *
+ * - printHtml: the system print screen for a page (print, or save as PDF).
  *
  * Only files inside the app's own cache are ever read, saved or opened.
  * Called from Rust only.
@@ -172,6 +185,33 @@ class FilesPlugin(private val activity: Activity) : Plugin(activity) {
       invoke.reject("No app on this phone can open this file. Save it instead.", "no_app")
     } catch (e: Exception) {
       invoke.reject("The file couldn't be opened: ${e.message}")
+    }
+  }
+
+  /** Kept until printing has its pages, or it would be collected mid-print. */
+  private var printing: WebView? = null
+
+  @Command
+  fun printHtml(invoke: Invoke) {
+    val args = invoke.parseArgs(PrintArgs::class.java)
+    activity.runOnUiThread {
+      try {
+        val view = WebView(activity)
+        // The page is already cleaned; it never needs scripts.
+        view.settings.javaScriptEnabled = false
+        view.webViewClient = object : WebViewClient() {
+          override fun onPageFinished(page: WebView, url: String?) {
+            val manager = activity.getSystemService(Context.PRINT_SERVICE) as PrintManager
+            val title = args.title.ifBlank { "Email" }
+            manager.print(title, page.createPrintDocumentAdapter(title), PrintAttributes.Builder().build())
+            invoke.resolve()
+          }
+        }
+        printing = view
+        view.loadDataWithBaseURL(null, args.html, "text/html", "utf-8", null)
+      } catch (e: Exception) {
+        invoke.reject("Printing isn't available: ${e.message}")
+      }
     }
   }
 

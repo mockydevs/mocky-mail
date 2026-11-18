@@ -132,3 +132,21 @@ pub async fn open_file(path: &Path, file_name: &str, mime_type: &str) -> AppResu
         .map_err(plugin_error)?;
     Ok(())
 }
+
+#[derive(Serialize)]
+struct PrintArgs<'a> {
+    html: &'a str,
+    title: &'a str,
+}
+
+/// Show the system print screen for a page (print or save as PDF).
+///
+/// # Errors
+/// When printing isn't available on this phone.
+pub async fn print_html(html: &str, title: &str) -> AppResult<()> {
+    handle()?
+        .run_mobile_plugin_async::<serde_json::Value>("printHtml", PrintArgs { html, title })
+        .await
+        .map_err(plugin_error)?;
+    Ok(())
+}

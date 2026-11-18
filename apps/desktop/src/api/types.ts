@@ -327,6 +327,12 @@ export interface MailApi {
   deleteForever(ids: string[]): Promise<void>;
   /** Where it was saved, or null if the user cancelled. */
   saveAttachment(messageId: string, index: number): Promise<string | null>;
+  /** Save the whole message as an .eml file; where it was saved, or null if cancelled. */
+  saveMessage(messageId: string): Promise<string | null>;
+  /** The message as received (headers and body), as text. */
+  messageSource(messageId: string): Promise<string>;
+  /** Android only: the system print screen (print or save as PDF) for a page. */
+  printHtml(html: string, title: string): Promise<void>;
   /** The file's bytes for the in-app preview. Rejects with `invalid` if it isn't really a photo, PDF or text. */
   previewAttachment(messageId: string, index: number): Promise<ArrayBuffer>;
   /** Opens it in the device's app for that type (PDF reader, Word, Gallery). */

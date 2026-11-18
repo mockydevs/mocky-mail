@@ -37,18 +37,14 @@ async fn load(
         .ok_or_else(|| AppError::new("not_found", "That attachment no longer exists."))
 }
 
-/// Write a copy to `cache/opened/<message>-<index>/<name>` and return its path.
+/// Write a copy to `cache/opened/<slot>/<name>` and return its path.
 async fn write_copy(
     state: &AppState,
-    message_id: &str,
-    index: usize,
+    slot: &str,
     info: &AttachmentInfo,
     bytes: &[u8],
 ) -> AppResult<PathBuf> {
-    let dir = state
-        .cache_dir
-        .join(OPENED_DIR)
-        .join(format!("{}-{index}", safe_file_name(message_id)));
+    let dir = state.cache_dir.join(OPENED_DIR).join(safe_file_name(slot));
     tokio::fs::create_dir_all(&dir).await?;
     let path = dir.join(&info.file_name);
     tokio::fs::write(&path, bytes).await?;
@@ -101,7 +97,7 @@ pub async fn open_attachment(
 ) -> AppResult<()> {
     let (info, bytes) = load(&state, &message_id, index).await?;
     check_openable(&info, &bytes)?;
-    let path = write_copy(&state, &message_id, index, &info, &bytes).await?;
+    let path = write_copy(&state, &format!("{message_id}-{index}"), &info, &bytes).await?;
     open_path(&app, &path, &info).await
 }
 
@@ -131,28 +127,26 @@ pub async fn save_attachment(
     index: usize,
 ) -> AppResult<Option<String>> {
     let (info, bytes) = load(&state, &message_id, index).await?;
-    save(&app, &state, &message_id, index, &info, bytes).await
+    save(&app, &state, &format!("{message_id}-{index}"), &info, bytes).await
 }
 
 #[cfg(target_os = "android")]
-async fn save(
+pub(crate) async fn save(
     _app: &AppHandle,
     state: &AppState,
-    message_id: &str,
-    index: usize,
+    slot: &str,
     info: &AttachmentInfo,
     bytes: Vec<u8>,
 ) -> AppResult<Option<String>> {
-    let path = write_copy(state, message_id, index, info, &bytes).await?;
+    let path = write_copy(state, slot, info, &bytes).await?;
     crate::files_android::save_file(&path, &info.file_name, &info.mime_type).await
 }
 
 #[cfg(not(target_os = "android"))]
-async fn save(
+pub(crate) async fn save(
     app: &AppHandle,
     _state: &AppState,
-    _message_id: &str,
-    _index: usize,
+    _slot: &str,
     info: &AttachmentInfo,
     bytes: Vec<u8>,
 ) -> AppResult<Option<String>> {

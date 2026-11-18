@@ -59,6 +59,8 @@ export interface MockMailApi extends MailApi {
   readonly opened: string[];
   /** File names passed to openAttachment, for assertions. */
   readonly openedFiles: string[];
+  /** Pages passed to printHtml, for assertions. */
+  readonly printed: string[];
 }
 
 /** 1x1 PNG, a one-line PDF and some text: what the dev preview shows. */
@@ -189,6 +191,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const failures = new Map<Method, AppError>();
   const opened: string[] = [];
   const openedFiles: string[] = [];
+  const printed: string[] = [];
   let seq = 1;
 
   const emit = <E extends MailEventName>(event: E, payload: MailEvents[E]) => {
@@ -264,6 +267,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const api: MockMailApi = {
     opened,
     openedFiles,
+    printed,
     emit,
     failNext(method, error) {
       failures.set(method, error);
@@ -448,6 +452,20 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         const file = stored(messageId).attachments.find((a) => a.index === index);
         if (!file) throw appError('not_found', 'That attachment is no longer available.');
         return `/home/you/Downloads/${file.fileName}`;
+      }),
+
+    saveMessage: (messageId) =>
+      run('saveMessage', () => `/home/you/Downloads/${stored(messageId).subject || 'message'}.eml`),
+
+    messageSource: (messageId) =>
+      run('messageSource', () => {
+        const m = stored(messageId);
+        return `From: ${m.from?.address ?? ''}\r\nSubject: ${m.subject}\r\n\r\n${m.text ?? ''}`;
+      }),
+
+    printHtml: (html) =>
+      run('printHtml', () => {
+        printed.push(html);
       }),
 
     previewAttachment: (messageId, index) =>

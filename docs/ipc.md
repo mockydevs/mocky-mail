@@ -106,6 +106,9 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `suggest_recipients` | `{ query }` | `Mailbox[]` (up to 8 people written to or heard from, best first; own addresses and no-reply senders left out) |
 | `delete_forever` | `{ ids }` | `void` (only allowed for messages in Trash or Junk) |
 | `save_attachment` | `{ messageId, index }` | `string \| null` (shows a save dialog, Android's "Save to" screen on phones; where it was saved, null if cancelled) |
+| `save_message` | `{ messageId }` | `string \| null` (the whole message as an `.eml` file named after its subject; save dialog, Android's "Save to" screen on phones; null if cancelled) |
+| `message_source` | `{ messageId }` | `string` (the message as received, headers and body; cut after 2 MB with a note) |
+| `print_html` | `{ html, title }` | `void` (Android only: the system print screen, which can also save a PDF; desktop prints the page from a sandboxed frame instead and gets `invalid` here) |
 | `preview_attachment` | `{ messageId, index }` | raw bytes (`ArrayBuffer`) for the in-app preview; rejects `invalid` unless the file's own bytes are a PNG/JPEG/GIF/WebP photo, a PDF or plain text, up to 30 MB |
 | `open_attachment` | `{ messageId, index }` | `void` (copies it to the app cache and opens it in the device's app for its type; programs and scripts are refused with `invalid`) |
 | `pick_attachments` | | `DraftAttachment[]` (open-file dialog; on Android the system picker, each file copied into the app cache) |

@@ -19,6 +19,7 @@ mod files_android;
 #[cfg(target_os = "android")]
 mod google_android;
 mod mail;
+mod message_tools;
 mod outbox;
 mod settings;
 mod signatures;
@@ -166,6 +167,9 @@ pub fn run() {
             attachments::pick_attachments,
             attachments::preview_attachment,
             attachments::open_attachment,
+            message_tools::save_message,
+            message_tools::message_source,
+            message_tools::print_html,
             mail::sync_now,
             mail::open_external,
             outbox::check_draft,
