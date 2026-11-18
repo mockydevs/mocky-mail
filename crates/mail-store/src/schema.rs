@@ -223,8 +223,33 @@ CREATE TABLE focus_rules (
 );
 ";
 
+/// Version 6: calendars (`CalDAV`). Events are kept as the server's
+/// iCalendar text; `starts_at`/`ends_at` (Unix seconds, `NULL` for a
+/// series without an end) find a month's events without reading them all.
+const V6: &str = r"
+CREATE TABLE calendars (
+    id         TEXT PRIMARY KEY NOT NULL,
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    url        TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    color      TEXT,
+    UNIQUE (account_id, url)
+);
+CREATE TABLE calendar_events (
+    id          TEXT PRIMARY KEY NOT NULL,
+    calendar_id TEXT NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
+    href        TEXT NOT NULL,
+    etag        TEXT,
+    ics         TEXT NOT NULL,
+    starts_at   INTEGER,
+    ends_at     INTEGER,
+    UNIQUE (calendar_id, href)
+);
+CREATE INDEX calendar_events_time ON calendar_events (starts_at, ends_at);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {

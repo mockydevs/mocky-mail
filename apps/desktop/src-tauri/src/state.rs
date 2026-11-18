@@ -35,6 +35,8 @@ pub struct AppState {
     pub cache_dir: PathBuf,
     /// Held while contacts sync, so two syncs never send the same change.
     pub contacts_sync: tokio::sync::Mutex<()>,
+    /// Held while calendars sync.
+    pub calendar_sync: tokio::sync::Mutex<()>,
 }
 
 /// Lock a mutex, recovering from a panic elsewhere instead of failing.
@@ -54,6 +56,7 @@ impl AppState {
             picked_files: Mutex::new(HashSet::new()),
             cache_dir,
             contacts_sync: tokio::sync::Mutex::new(()),
+            calendar_sync: tokio::sync::Mutex::new(()),
         }
     }
 

@@ -3,6 +3,8 @@ import { parseRecipients } from '../../features/compose/recipients';
 import type {
   Account,
   AddressBookStatus,
+  CalendarInfo,
+  CalendarStatus,
   Contact,
   AttachmentMeta,
   Focus,
@@ -25,6 +27,7 @@ import type {
   ServerSuggestion,
   Settings,
 } from '../types';
+import { MOCK_CALENDARS, MOCK_EVENTS, mockOccurrences, mockSave, type MockEvent } from './mockCalendar';
 import { foldersFor, MOCK_ACCOUNTS, MOCK_FOLDERS, MOCK_MESSAGES, MOCK_NOW, MOCK_OUTBOX, MOCK_SETTINGS } from './mockData';
 
 /** A stored message; `remoteHtml` is what get_message returns when remote images are allowed. */
@@ -49,6 +52,12 @@ export interface MockOptions {
   signatureSets?: Record<string, SignatureSet>;
   /** Saved contacts. */
   contacts?: Contact[];
+  /** Calendars; default: sample calendars for the sample accounts. */
+  calendars?: CalendarInfo[];
+  /** Stored events; default: a few sample events. */
+  events?: MockEvent[];
+  /** Calendar status per account; default: every account synced. */
+  calendarStatus?: CalendarStatus[];
   /** Address book status per account; default: every account synced. */
   books?: AddressBookStatus[];
   /** Dev preview: new messages go sending, then sent, like the real Outbox. */
@@ -214,6 +223,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
       .join('\n');
   };
   let contacts: Contact[] = clone(options.contacts ?? []);
+  const calendars: CalendarInfo[] = clone(options.calendars ?? MOCK_CALENDARS);
+  let events: MockEvent[] = clone(options.events ?? MOCK_EVENTS);
   const outboxDrafts = new Map<string, Draft>();
   /** Attachments of drafts saved in this session, by message id. */
   const draftFiles = new Map<string, DraftAttachment[]>();
@@ -872,6 +883,60 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         contacts = contacts.map((c) => ({ ...c, state: 'synced' as const }));
         return options.books ?? accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null }));
       }),
+
+    listCalendars: () =>
+      run('listCalendars', () => calendars.filter((c) => accounts.some((a) => a.id === c.accountId))),
+
+    listEvents: (from, to) =>
+      run('listEvents', () => {
+        if (to <= from || to - from > 400 * 86_400) throw appError('invalid', 'That date range is too long.');
+        const shown = new Set(calendars.filter((c) => accounts.some((a) => a.id === c.accountId)).map((c) => c.id));
+        return mockOccurrences(
+          events.filter((e) => shown.has(e.event.calendarId)),
+          from,
+          to,
+        );
+      }),
+
+    getEvent: (id) =>
+      run('getEvent', () => {
+        const found = events.find((e) => e.event.id === id);
+        if (!found) throw appError('not_found', 'That event no longer exists.');
+        return found.event;
+      }),
+
+    saveEvent: (input) =>
+      run('saveEvent', () => {
+        if (input.end < input.start) throw appError('invalid', 'The event ends before it starts.');
+        if (!calendars.some((c) => c.id === input.calendarId)) throw appError('not_found', 'That calendar no longer exists.');
+        const old = input.id ? events.find((e) => e.event.id === input.id) : undefined;
+        if (input.id && !old) throw appError('not_found', 'That event no longer exists.');
+        const saved = mockSave(old?.event, input, old?.event.id ?? `e${String(seq++)}`);
+        events = old
+          ? events.map((e) => (e === old ? { event: saved, skipped: e.skipped } : e))
+          : [...events, { event: saved, skipped: [] }];
+        emit('mail://calendar-changed', { calendars: [] });
+        return saved;
+      }),
+
+    deleteEvent: (id, occurrence) =>
+      run('deleteEvent', () => {
+        const found = events.find((e) => e.event.id === id);
+        if (!found) throw appError('not_found', 'That event no longer exists.');
+        events =
+          occurrence !== null && found.event.recurring
+            ? events.map((e) => (e === found ? { ...e, skipped: [...e.skipped, occurrence] } : e))
+            : events.filter((e) => e !== found);
+        emit('mail://calendar-changed', { calendars: [] });
+      }),
+
+    syncCalendars: () =>
+      run(
+        'syncCalendars',
+        () =>
+          options.calendarStatus ??
+          accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null })),
+      ),
 
     getSignature: (accountId, reply) =>
       run('getSignature', () => {

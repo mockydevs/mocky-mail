@@ -1,5 +1,5 @@
-//! `WebDAV` client for address books (`CardDAV`, RFC 6352), sharing its
-//! plumbing with calendars later.
+//! `WebDAV` client for address books (`CardDAV`, RFC 6352) and calendars
+//! (`CalDAV`, RFC 4791).
 //!
 //! Servers such as `SOGo` use the account's mail password with HTTP Basic
 //! auth, over HTTPS only. The address book is found the standard way:
@@ -65,6 +65,10 @@ pub struct DavResponse {
     pub calendar_home: Option<String>,
     /// `address-data` or `calendar-data`.
     pub data: Option<String>,
+    /// Apple's `calendar-color`, such as `#3A87ADFF`.
+    pub color: Option<String>,
+    /// `supported-calendar-component-set`: `VEVENT`, `VTODO`, ...
+    pub components: Vec<String>,
     /// The resource itself answered 404 (deleted).
     pub missing: bool,
 }
@@ -103,6 +107,13 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>, SyncError> {
                 let name = local(e.local_name().as_ref());
                 if let Some(r) = current.as_mut() {
                     mark_type(r, &path, &name);
+                    if name == "comp"
+                        && path.last().map(String::as_str)
+                            == Some("supported-calendar-component-set")
+                        && let Ok(Some(attr)) = e.try_get_attribute("name")
+                    {
+                        r.components.push(attr.value.to_ascii_uppercase());
+                    }
                 }
             }
             Event::Text(t) => text.push_str(&unescape_xml(t.as_ref())),
@@ -122,6 +133,7 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>, SyncError> {
                         ("response", "status") if value.contains(" 404") => r.missing = true,
                         (_, "getetag") if !value.is_empty() => r.etag = Some(value),
                         (_, "displayname") if !value.is_empty() => r.display_name = Some(value),
+                        (_, "calendar-color") if !value.is_empty() => r.color = Some(value),
                         ("current-user-principal", "href") => r.principal = Some(value),
                         ("addressbook-home-set", "href") => r.addressbook_home = Some(value),
                         ("calendar-home-set", "href") => r.calendar_home = Some(value),
@@ -184,6 +196,17 @@ pub struct AddressBook {
     pub url: Url,
     /// Its name, if the server gave one.
     pub name: Option<String>,
+}
+
+/// A calendar on the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarCollection {
+    /// Its URL.
+    pub url: Url,
+    /// Its name, if the server gave one.
+    pub name: Option<String>,
+    /// Its colour (`#RRGGBB` or `#RRGGBBAA`), if the server gave one.
+    pub color: Option<String>,
 }
 
 /// A card as read from the server.
@@ -327,6 +350,44 @@ impl DavClient {
         Ok((url, parse_multistatus(&text)?))
     }
 
+    /// The collections in this login's home of one kind: the server's
+    /// `/.well-known/<service>`, then the user's principal, then the home
+    /// it names, then what's in it.
+    async fn home_collections(
+        &self,
+        server: &Url,
+        service: &str,
+        what: &str,
+        pick_home: fn(&DavResponse) -> Option<String>,
+    ) -> Result<(Url, Vec<DavResponse>), SyncError> {
+        let start = server
+            .join(&format!("/.well-known/{service}"))
+            .map_err(|e| SyncError::Config(e.to_string()))?;
+        let (at, found) = self
+            .xml_request("PROPFIND", start, "0", PROPFIND_PRINCIPAL)
+            .await?;
+        let principal = found
+            .iter()
+            .find_map(|r| r.principal.clone())
+            .ok_or_else(|| {
+                SyncError::Config(format!("this server doesn't offer {what} (no principal)"))
+            })?;
+        let principal = at
+            .join(&principal)
+            .map_err(|e| SyncError::Protocol(e.to_string()))?;
+        let (at, found) = self
+            .xml_request("PROPFIND", principal, "0", PROPFIND_HOMES)
+            .await?;
+        let home = found.iter().find_map(pick_home).ok_or_else(|| {
+            SyncError::Config(format!("this server doesn't offer {what} (no home)"))
+        })?;
+        let home = at
+            .join(&home)
+            .map_err(|e| SyncError::Protocol(e.to_string()))?;
+        self.xml_request("PROPFIND", home, "1", PROPFIND_COLLECTIONS)
+            .await
+    }
+
     /// Find the address books for this login, starting from the server's
     /// address (for example `https://mail.example.com`).
     ///
@@ -337,39 +398,10 @@ impl DavClient {
         &self,
         server: &Url,
     ) -> Result<Vec<AddressBook>, SyncError> {
-        let start = server
-            .join("/.well-known/carddav")
-            .map_err(|e| SyncError::Config(e.to_string()))?;
         let (at, found) = self
-            .xml_request("PROPFIND", start, "0", PROPFIND_PRINCIPAL)
-            .await?;
-        let principal = found
-            .iter()
-            .find_map(|r| r.principal.clone())
-            .ok_or_else(|| {
-                SyncError::Config(
-                    "this server doesn't offer contacts (no CardDAV principal)".to_owned(),
-                )
-            })?;
-        let principal = at
-            .join(&principal)
-            .map_err(|e| SyncError::Protocol(e.to_string()))?;
-        let (at, found) = self
-            .xml_request("PROPFIND", principal, "0", PROPFIND_HOMES)
-            .await?;
-        let home = found
-            .iter()
-            .find_map(|r| r.addressbook_home.clone())
-            .ok_or_else(|| {
-                SyncError::Config(
-                    "this server doesn't offer contacts (no address book home)".to_owned(),
-                )
-            })?;
-        let home = at
-            .join(&home)
-            .map_err(|e| SyncError::Protocol(e.to_string()))?;
-        let (at, found) = self
-            .xml_request("PROPFIND", home, "1", PROPFIND_COLLECTIONS)
+            .home_collections(server, "carddav", "contacts", |r| {
+                r.addressbook_home.clone()
+            })
             .await?;
         Ok(found
             .into_iter()
@@ -383,18 +415,57 @@ impl DavClient {
             .collect())
     }
 
+    /// Find the calendars that hold events for this login.
+    ///
+    /// # Errors
+    /// [`SyncError::Auth`] for a refused password; others when the server
+    /// has no calendar service.
+    pub async fn discover_calendars(
+        &self,
+        server: &Url,
+    ) -> Result<Vec<CalendarCollection>, SyncError> {
+        let (at, found) = self
+            .home_collections(server, "caldav", "calendars", |r| r.calendar_home.clone())
+            .await?;
+        Ok(found
+            .into_iter()
+            .filter(|r| r.is_calendar)
+            .filter(|r| r.components.is_empty() || r.components.iter().any(|c| c == "VEVENT"))
+            .filter_map(|r| {
+                Some(CalendarCollection {
+                    url: at.join(&r.href).ok()?,
+                    name: r.display_name,
+                    color: r.color,
+                })
+            })
+            .collect())
+    }
+
     /// Every card's path and version tag in an address book.
     ///
     /// # Errors
     /// Network or server errors.
     pub async fn list_cards(&self, book: &Url) -> Result<Vec<(String, Option<String>)>, SyncError> {
+        self.list_resources(book).await
+    }
+
+    /// Every item's path and version tag in a collection (address book
+    /// or calendar).
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn list_resources(
+        &self,
+        collection: &Url,
+    ) -> Result<Vec<(String, Option<String>)>, SyncError> {
+        let book = collection;
         let (_, found) = self
             .xml_request("PROPFIND", book.clone(), "1", PROPFIND_ETAGS)
             .await?;
         let own_path = book.path().trim_end_matches('/').to_owned();
         Ok(found
             .into_iter()
-            .filter(|r| !r.missing && !r.is_addressbook)
+            .filter(|r| !r.missing && !r.is_addressbook && !r.is_calendar)
             .filter(|r| r.href.trim_end_matches('/') != own_path && !r.href.ends_with('/'))
             .map(|r| (r.href, r.etag))
             .collect())
@@ -409,16 +480,47 @@ impl DavClient {
         book: &Url,
         hrefs: &[String],
     ) -> Result<Vec<RemoteCard>, SyncError> {
+        self.multiget(book, hrefs, MULTIGET_HEAD, "</c:addressbook-multiget>")
+            .await
+    }
+
+    /// Fetch calendar items (`.ics` text in `vcard`) by path, in batches.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn fetch_events(
+        &self,
+        calendar: &Url,
+        hrefs: &[String],
+    ) -> Result<Vec<RemoteCard>, SyncError> {
+        self.multiget(
+            calendar,
+            hrefs,
+            CALENDAR_MULTIGET_HEAD,
+            "</c:calendar-multiget>",
+        )
+        .await
+    }
+
+    async fn multiget(
+        &self,
+        collection: &Url,
+        hrefs: &[String],
+        head: &str,
+        tail: &str,
+    ) -> Result<Vec<RemoteCard>, SyncError> {
         let mut out = Vec::new();
         for batch in hrefs.chunks(MULTIGET_BATCH) {
-            let mut body = String::from(MULTIGET_HEAD);
+            let mut body = String::from(head);
             for href in batch {
                 body.push_str("<d:href>");
                 body.push_str(&escape_xml(href));
                 body.push_str("</d:href>");
             }
-            body.push_str("</c:addressbook-multiget>");
-            let (_, found) = self.xml_request("REPORT", book.clone(), "1", &body).await?;
+            body.push_str(tail);
+            let (_, found) = self
+                .xml_request("REPORT", collection.clone(), "1", &body)
+                .await?;
             out.extend(found.into_iter().filter_map(|r| {
                 Some(RemoteCard {
                     vcard: r.data?,
@@ -445,16 +547,42 @@ impl DavClient {
         vcard: &str,
         if_match: Option<&str>,
     ) -> Result<(String, Option<String>), SyncError> {
+        self.put(book, href, uid, vcard, if_match, Kind::Card).await
+    }
+
+    /// Store a calendar item, like [`Self::put_card`].
+    ///
+    /// # Errors
+    /// [`SyncError::Refused`] when the server's copy changed since
+    /// `if_match` (412) or the event was refused.
+    pub async fn put_event(
+        &self,
+        calendar: &Url,
+        href: Option<&str>,
+        uid: &str,
+        ics: &str,
+        if_match: Option<&str>,
+    ) -> Result<(String, Option<String>), SyncError> {
+        self.put(calendar, href, uid, ics, if_match, Kind::Event)
+            .await
+    }
+
+    async fn put(
+        &self,
+        book: &Url,
+        href: Option<&str>,
+        uid: &str,
+        vcard: &str,
+        if_match: Option<&str>,
+        kind: Kind,
+    ) -> Result<(String, Option<String>), SyncError> {
         let url = match href {
             Some(href) => book.join(href),
-            None => book.join(&format!("{}.vcf", safe_name(uid))),
+            None => book.join(&format!("{}.{}", safe_name(uid), kind.extension())),
         }
         .map_err(|e| SyncError::Invalid(e.to_string()))?;
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/vcard; charset=utf-8"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(kind.content_type()));
         match (href, if_match) {
             (None, _) => {
                 headers.insert("If-None-Match", HeaderValue::from_static("*"));
@@ -478,7 +606,8 @@ impl DavClient {
             return Ok((path, etag));
         }
         Err(SyncError::Refused(format!(
-            "the server didn't save the contact ({status}): {}",
+            "the server didn't save the {} ({status}): {}",
+            kind.noun(),
             text.chars().take(200).collect::<String>()
         )))
     }
@@ -493,6 +622,30 @@ impl DavClient {
         href: &str,
         if_match: Option<&str>,
     ) -> Result<(), SyncError> {
+        self.delete(book, href, if_match, Kind::Card).await
+    }
+
+    /// Delete a calendar item. One already gone counts as deleted.
+    ///
+    /// # Errors
+    /// Network or server errors; [`SyncError::Refused`] when it changed
+    /// on the server since `if_match`.
+    pub async fn delete_event(
+        &self,
+        calendar: &Url,
+        href: &str,
+        if_match: Option<&str>,
+    ) -> Result<(), SyncError> {
+        self.delete(calendar, href, if_match, Kind::Event).await
+    }
+
+    async fn delete(
+        &self,
+        book: &Url,
+        href: &str,
+        if_match: Option<&str>,
+        kind: Kind,
+    ) -> Result<(), SyncError> {
         let url = book
             .join(href)
             .map_err(|e| SyncError::Invalid(e.to_string()))?;
@@ -505,8 +658,39 @@ impl DavClient {
             Ok(())
         } else {
             Err(SyncError::Refused(format!(
-                "the server didn't delete the contact ({status})"
+                "the server didn't delete the {} ({status})",
+                kind.noun()
             )))
+        }
+    }
+}
+
+/// What is being stored.
+#[derive(Debug, Clone, Copy)]
+enum Kind {
+    Card,
+    Event,
+}
+
+impl Kind {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Card => "vcf",
+            Self::Event => "ics",
+        }
+    }
+
+    fn content_type(self) -> &'static str {
+        match self {
+            Self::Card => "text/vcard; charset=utf-8",
+            Self::Event => "text/calendar; charset=utf-8",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Card => "contact",
+            Self::Event => "event",
         }
     }
 }
@@ -533,8 +717,9 @@ fn escape_xml(text: &str) -> String {
 
 const PROPFIND_PRINCIPAL: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#;
 const PROPFIND_HOMES: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav" xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:prop><card:addressbook-home-set/><cal:calendar-home-set/></d:prop></d:propfind>"#;
-const PROPFIND_COLLECTIONS: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:displayname/></d:prop></d:propfind>"#;
+const PROPFIND_COLLECTIONS: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:resourcetype/><d:displayname/><a:calendar-color/><cal:supported-calendar-component-set/></d:prop></d:propfind>"#;
 const PROPFIND_ETAGS: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><d:resourcetype/></d:prop></d:propfind>"#;
+const CALENDAR_MULTIGET_HEAD: &str = r#"<?xml version="1.0" encoding="utf-8"?><c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop>"#;
 const MULTIGET_HEAD: &str = r#"<?xml version="1.0" encoding="utf-8"?><c:addressbook-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:prop><d:getetag/><c:address-data/></d:prop>"#;
 
 #[cfg(test)]
@@ -594,6 +779,16 @@ mod tests {
         assert!(data.contains("FN:Kamau & Sons"));
         assert!(data.contains("VERSION:3.0\r\n"));
         assert!(r[1].missing);
+    }
+
+    #[test]
+    fn finds_event_calendars_with_colour() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:" xmlns:b="http://apple.com/ns/ical/"><D:response><D:href>/SOGo/dav/u/Calendar/personal/</D:href><D:propstat><D:status>HTTP/1.1 200 OK</D:status><D:prop><D:resourcetype><D:collection/><calendar xmlns="urn:ietf:params:xml:ns:caldav"/></D:resourcetype><D:displayname>Personal Calendar</D:displayname><b:calendar-color>#AAAAAAFF</b:calendar-color><n1:supported-calendar-component-set xmlns:n1="urn:ietf:params:xml:ns:caldav"><n1:comp name="VEVENT"/><n1:comp name="VTODO"/></n1:supported-calendar-component-set></D:prop></D:propstat></D:response><D:response><D:href>/SOGo/dav/u/Calendar/inbox/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/><schedule-inbox xmlns="urn:ietf:params:xml:ns:caldav"/></D:resourcetype></D:prop></D:propstat></D:response></D:multistatus>"#;
+        let r = parse_multistatus(xml).unwrap();
+        assert!(r[0].is_calendar);
+        assert_eq!(r[0].color.as_deref(), Some("#AAAAAAFF"));
+        assert_eq!(r[0].components, ["VEVENT", "VTODO"]);
+        assert!(!r[1].is_calendar);
     }
 
     #[test]

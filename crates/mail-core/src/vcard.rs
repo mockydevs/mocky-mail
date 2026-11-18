@@ -37,15 +37,15 @@ const MANAGED: &[&str] = &[
 ];
 
 /// One content line: name (no group, upper case), parameters, raw value.
-struct Line<'a> {
-    name: String,
-    params: &'a str,
-    value: &'a str,
+pub(crate) struct Line<'a> {
+    pub(crate) name: String,
+    pub(crate) params: &'a str,
+    pub(crate) value: &'a str,
 }
 
 /// Undo line folding (RFC 6350 3.2): a line starting with a space or tab
 /// continues the one before.
-fn unfold(text: &str) -> String {
+pub(crate) fn unfold(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
@@ -61,7 +61,7 @@ fn unfold(text: &str) -> String {
     out
 }
 
-fn split_line(line: &str) -> Option<Line<'_>> {
+pub(crate) fn split_line(line: &str) -> Option<Line<'_>> {
     // The value starts at the first colon outside a quoted parameter.
     let mut quoted = false;
     let colon = line.char_indices().find_map(|(i, c)| match c {
@@ -89,7 +89,7 @@ fn split_line(line: &str) -> Option<Line<'_>> {
 }
 
 /// Text value with vCard escapes undone.
-fn unescape(value: &str) -> String {
+pub(crate) fn unescape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(c) = chars.next() {
@@ -106,7 +106,7 @@ fn unescape(value: &str) -> String {
     out
 }
 
-fn escape(value: &str) -> String {
+pub(crate) fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
@@ -226,7 +226,7 @@ fn clean(text: &str) -> String {
 }
 
 /// Fold a content line at 75 octets (RFC 6350 3.2), on character bounds.
-fn fold(line: &str, out: &mut String) {
+pub(crate) fn fold(line: &str, out: &mut String) {
     let mut width = 0usize;
     for c in line.chars() {
         let len = c.len_utf8();

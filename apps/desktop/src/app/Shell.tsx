@@ -28,6 +28,7 @@ import { playChime } from '../features/notifications/chime';
 import { ReadingPane } from '../features/reader/ReadingPane';
 import { SettingsView } from '../features/settings/SettingsView';
 import { ContactsView } from '../features/contacts/ContactsView';
+import { CalendarView } from '../features/calendar/CalendarView';
 import { ManageFolders } from '../features/mailbox/ManageFolders';
 import { HelpSheet } from '../features/shortcuts/HelpSheet';
 import { shortcutFor, type ShortcutAction } from '../features/shortcuts/shortcuts';
@@ -52,6 +53,7 @@ type Screen =
   | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null; signature: boolean }
   | { kind: 'settings' }
   | { kind: 'contacts' }
+  | { kind: 'calendar' }
   | { kind: 'addAccount' };
 
 /** How long a confirmation toast stays up. */
@@ -300,6 +302,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   usePhoneBack(phone ? Number(drawer) + Number(screen.kind !== 'mail') + Number(reading) : 0, () => {
     if (drawer) setDrawer(false);
     else if (screen.kind === 'compose') pressEscape(document.querySelector('form.compose'));
+    else if (screen.kind === 'calendar') {
+      // The calendar closes an open event or the editor first.
+      const section = document.querySelector('section.calendar');
+      const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      if (!section || section.dispatchEvent(escape)) setScreen({ kind: 'mail' });
+    }
     else if (screen.kind !== 'mail') setScreen({ kind: 'mail' });
     else closeMessage();
   });
@@ -525,7 +533,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     handlerRef.current = (action, event) => {
       if (help || confirmForever) return;
       if (action === 'close') {
-        if (screen.kind === 'settings' || screen.kind === 'contacts' || screen.kind === 'addAccount') {
+        if (
+          screen.kind === 'settings' ||
+          screen.kind === 'contacts' ||
+          screen.kind === 'calendar' ||
+          screen.kind === 'addAccount'
+        ) {
           setScreen({ kind: 'mail' });
         }
         return;
@@ -685,6 +698,21 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             setSearchInput(address);
             setSelectedId(null);
             setPinned(null);
+          }}
+        />
+      );
+      break;
+    case 'calendar':
+      main = (
+        <CalendarView
+          accounts={accounts}
+          phone={phone}
+          onClose={() => {
+            setScreen({ kind: 'mail' });
+          }}
+          onWrite={(to) => {
+            const accountId = view.type === 'folder' ? view.accountId : (accounts[0]?.id ?? '');
+            compose({ ...blankDraft(accountId), to }, 'New message', null, true);
           }}
         />
       );
@@ -851,6 +879,10 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               onContacts={() => {
                 setDrawer(false);
                 setScreen({ kind: 'contacts' });
+              }}
+              onCalendar={() => {
+                setDrawer(false);
+                setScreen({ kind: 'calendar' });
               }}
               onManageFolders={(accountId) => {
                 setDrawer(false);

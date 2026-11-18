@@ -9,6 +9,7 @@
 
 mod accounts;
 mod attachments;
+mod calendar;
 mod contacts;
 mod convert;
 mod credentials;
@@ -123,6 +124,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         sync::start(&handle, &state, &account.id);
     }
     contacts::start(handle.clone(), Arc::clone(&state));
+    calendar::start(handle.clone(), Arc::clone(&state));
     tauri::async_runtime::spawn(outbox::run(handle, state));
     Ok(())
 }
@@ -204,6 +206,12 @@ pub fn run() {
             contacts::save_contact,
             contacts::delete_contact,
             contacts::sync_contacts,
+            calendar::list_calendars,
+            calendar::list_events,
+            calendar::get_event,
+            calendar::save_event,
+            calendar::delete_event,
+            calendar::sync_calendars,
             signatures::get_signature,
             signatures::list_signatures,
             signatures::save_signature,

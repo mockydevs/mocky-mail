@@ -10,6 +10,7 @@ pub mod compose;
 pub mod focus;
 pub mod folders;
 pub mod formatting;
+pub mod ical;
 pub mod limits;
 pub mod mailto;
 pub mod message;

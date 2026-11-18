@@ -10,6 +10,7 @@
 //! SQL is ever built from user text.
 
 mod accounts;
+mod calendar;
 mod contacts;
 mod error;
 mod folders;
@@ -31,6 +32,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub use accounts::{Account, AuthKind, NewAccount, Security, ServerConfig};
+pub use calendar::{Calendar, FoundCalendar, StoredEvent, new_event_uid};
 pub use contacts::{Contact, ContactState, ContactSync, MAX_CONTACTS};
 pub use error::{Result, StoreError};
 pub use folders::{Folder, NewFolder};

@@ -189,6 +189,73 @@ export interface AddressBookStatus {
   message: string | null;
 }
 
+/** A calendar on an account's mail server. */
+export interface CalendarInfo {
+  id: string;
+  accountId: string;
+  name: string;
+  /** `#RRGGBB` or `#RRGGBBAA` from the server, if it has one. */
+  color: string | null;
+}
+
+/** How an event repeats. `custom`: a rule the editor can't show (kept as it is). */
+export type Repeat = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
+
+/** Someone on an event. */
+export interface EventPerson {
+  email: string;
+  name: string | null;
+  /** `accepted`, `declined`, `tentative`, `needs-action`. */
+  status: string | null;
+}
+
+/** One occurrence of an event: a single event, or one date of a series. */
+export interface CalendarEvent {
+  /** The stored event (a whole series shares it). */
+  id: string;
+  calendarId: string;
+  accountId: string;
+  color: string | null;
+  uid: string;
+  /** One date of a series: its original start, which names it. */
+  recurrenceId: number | null;
+  title: string;
+  location: string;
+  notes: string;
+  /** Unix seconds. All-day: midnight UTC of the first day. */
+  start: number;
+  /** Unix seconds, exclusive. All-day: midnight UTC after the last day. */
+  end: number;
+  allDay: boolean;
+  repeat: Repeat;
+  recurring: boolean;
+  organizer: EventPerson | null;
+  attendees: EventPerson[];
+  tentative: boolean;
+}
+
+/** An event from the editor. `repeat: 'keep'` leaves a series' rule alone. */
+export interface EventInput {
+  id?: string;
+  calendarId: string;
+  title: string;
+  location: string;
+  notes: string;
+  allDay: boolean;
+  start: number;
+  end: number;
+  repeat: Exclude<Repeat, 'custom'> | 'keep';
+  /** The device's time zone, such as `Africa/Nairobi`. */
+  timeZone: string;
+}
+
+/** Whether an account's calendars sync with its server. */
+export interface CalendarStatus {
+  accountId: string;
+  state: 'synced' | 'unavailable' | 'error';
+  message: string | null;
+}
+
 /** A picture under the signature (PNG, JPEG or GIF), sent inside the message. */
 export interface SignatureImage {
   mimeType: string;
@@ -339,6 +406,8 @@ export interface MailEvents {
   'mail://new-mail': { accountId: string; count: number };
   'mail://accounts-changed': Record<string, never>;
   'mail://contacts-changed': { books: AddressBookStatus[] };
+  /** After a calendar sync (with each account's status) or a change made here (empty). */
+  'mail://calendar-changed': { calendars: CalendarStatus[] };
   /** A mailto: link opened while the app runs (desktop). */
   'mail://mailto': { url: string };
 }
@@ -416,6 +485,17 @@ export interface MailApi {
   deleteContact(id: string): Promise<void>;
   /** Sync every account's address book now. */
   syncContacts(): Promise<AddressBookStatus[]>;
+  listCalendars(): Promise<CalendarInfo[]>;
+  /** Occurrences between two times (Unix seconds, at most about a year apart). */
+  listEvents(from: number, to: number): Promise<CalendarEvent[]>;
+  /** The event itself (a series' first date and rule), for editing. */
+  getEvent(id: string): Promise<CalendarEvent>;
+  /** Create or change an event on the server (needs a connection). Returns the event itself. */
+  saveEvent(event: EventInput): Promise<CalendarEvent>;
+  /** Delete an event or whole series; with `occurrence` (a `recurrenceId`), only that date. */
+  deleteEvent(id: string, occurrence: number | null): Promise<void>;
+  /** Sync every account's calendars now. */
+  syncCalendars(): Promise<CalendarStatus[]>;
   /** The signature a new message (or, with `reply`, a reply or forward) starts with. */
   getSignature(accountId: string, reply?: boolean): Promise<Signature | null>;
   listSignatures(accountId: string): Promise<SignatureSet>;
