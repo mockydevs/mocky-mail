@@ -2167,22 +2167,43 @@ kbd {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 24px 32px;
-  max-width: 760px;
+  padding: 20px 24px 32px;
+}
+
+/* Wide windows: sections flow into columns instead of one narrow strip. */
+.settings__columns {
+  columns: 420px auto;
+  column-gap: 16px;
+}
+
+@media (max-width: 640px) {
+  .settings__body {
+    padding: 12px 12px 24px;
+  }
 }
 
 
 .settings__group {
-  margin: 0;
-  padding: 20px 0;
-  border: 0;
-  border-bottom: 1px solid var(--border-soft);
+  margin: 0 0 16px;
+  padding: 16px 20px 20px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: var(--surface);
+  break-inside: avoid;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
+/* Accounts and signatures need the room: across every column. */
+.settings__group--wide {
+  column-span: all;
+}
+
 .settings__legend {
+  /* Floated, a fieldset's legend sits inside its box, not on the border. */
+  float: left;
+  width: 100%;
   padding: 0;
   margin-bottom: 8px;
   font-size: 15px;
