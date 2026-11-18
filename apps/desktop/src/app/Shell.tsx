@@ -56,8 +56,6 @@ type Screen =
 
 /** How long a confirmation toast stays up. */
 const NOTICE_MS = 4000;
-/** "Mark as read after a few seconds": how long a message must stay open. */
-const MARK_READ_DELAY_MS = 3000;
 
 /** The messages a list row stands for: the whole conversation when grouped. */
 function idsOf(item: MessageListItem | undefined, fallback = ''): string[] {
@@ -117,6 +115,8 @@ const DEFAULT_SETTINGS: Settings = {
   markRead: 'open',
   threads: true,
   focusedInbox: false,
+  checkEveryMins: 2,
+  markReadDelaySecs: 3,
 };
 
 /**
@@ -357,6 +357,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
 
   // "Mark as read after a few seconds": a quick peek leaves it unread.
+  const readDelayMs = (settings?.markReadDelaySecs ?? 3) * 1000;
   const markReadRef = useRef(markRead);
   useEffect(() => {
     markReadRef.current = markRead;
@@ -365,11 +366,11 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     if (readPending === null || readPending !== activeId) return;
     const timer = window.setTimeout(() => {
       markReadRef.current(readPending);
-    }, MARK_READ_DELAY_MS);
+    }, readDelayMs);
     return () => {
       window.clearTimeout(timer);
     };
-  }, [readPending, activeId]);
+  }, [readPending, activeId, readDelayMs]);
 
   const goTo = (next: MailView) => {
     setView(next);

@@ -278,6 +278,10 @@ export interface Settings {
   threads: boolean;
   /** Split the Inbox into Focused and Other. */
   focusedInbox: boolean;
+  /** Minutes between checks for servers that can't announce new mail. */
+  checkEveryMins: number;
+  /** Seconds a message must stay open to count as read (markRead "delay"). */
+  markReadDelaySecs: number;
 }
 
 /** "open": as soon as it is opened; "delay": after a few seconds open; "manual": only with Mark as read. */

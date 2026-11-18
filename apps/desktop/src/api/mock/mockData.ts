@@ -236,4 +236,6 @@ export const MOCK_SETTINGS: Settings = {
   markRead: 'open',
   threads: true,
   focusedInbox: false,
+  checkEveryMins: 2,
+  markReadDelaySecs: 3,
 };

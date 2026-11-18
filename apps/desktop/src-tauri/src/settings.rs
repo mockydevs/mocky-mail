@@ -32,7 +32,17 @@ pub struct Settings {
     /// Split the Inbox into Focused (people) and Other (newsletters,
     /// notifications). Off until the user turns it on.
     pub focused_inbox: bool,
+    /// Minutes between checks for servers that can't announce new mail
+    /// (no IDLE); all folders are checked at least every 10 minutes.
+    pub check_every_mins: u32,
+    /// Seconds a message must stay open to count as read ("delay").
+    pub mark_read_delay_secs: u32,
 }
+
+/// Check-interval choices offered in Settings, minutes.
+pub const CHECK_EVERY_CHOICES: [u32; 6] = [1, 2, 5, 10, 15, 30];
+/// Mark-as-read delay choices offered in Settings, seconds.
+pub const MARK_READ_DELAY_CHOICES: [u32; 4] = [1, 3, 5, 10];
 
 /// Undo-send choices offered in Settings.
 pub const UNDO_SEND_CHOICES: [u32; 5] = [0, 5, 10, 20, 30];
@@ -48,6 +58,8 @@ impl Default for Settings {
             mark_read: "open".into(),
             threads: true,
             focused_inbox: false,
+            check_every_mins: 2,
+            mark_read_delay_secs: 3,
         }
     }
 }
@@ -65,6 +77,12 @@ impl Settings {
         }
         if !matches!(self.mark_read.as_str(), "open" | "delay" | "manual") {
             self.mark_read = "open".into();
+        }
+        if !CHECK_EVERY_CHOICES.contains(&self.check_every_mins) {
+            self.check_every_mins = 2;
+        }
+        if !MARK_READ_DELAY_CHOICES.contains(&self.mark_read_delay_secs) {
+            self.mark_read_delay_secs = 3;
         }
         self
     }
@@ -117,6 +135,8 @@ mod tests {
             mark_read: "sometimes".into(),
             threads: false,
             focused_inbox: true,
+            check_every_mins: 7,
+            mark_read_delay_secs: 0,
         }
         .normalized();
         assert_eq!(s.theme, "system");
@@ -124,6 +144,8 @@ mod tests {
         assert!(!s.notifications);
         assert_eq!(s.undo_send_secs, 5);
         assert_eq!(s.mark_read, "open");
+        assert_eq!(s.check_every_mins, 2);
+        assert_eq!(s.mark_read_delay_secs, 3);
     }
 
     #[test]

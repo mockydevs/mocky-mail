@@ -38,8 +38,6 @@ const BODY_PREFETCH: u32 = 40;
 const INBOX_BODY_PREFETCH: u32 = 200;
 /// How often every folder is checked, not just the inbox.
 const FULL_SYNC_EVERY: Duration = Duration::from_mins(10);
-/// Check interval when the server has no IDLE.
-const POLL_INTERVAL: Duration = Duration::from_mins(2);
 /// First retry delay after a network error; doubles up to `MAX_BACKOFF`.
 const FIRST_BACKOFF: Duration = Duration::from_secs(15);
 /// Longest retry delay.
@@ -243,7 +241,12 @@ async fn session(
         }
         events::sync_status(app, &account.id, "idle", None);
 
-        let remaining = FULL_SYNC_EVERY.saturating_sub(started.elapsed());
+        // Settings > Check for new mail every (servers without IDLE).
+        let poll = Duration::from_secs(
+            u64::from(crate::settings::load(state).map_or(2, |s| s.check_every_mins))
+                .saturating_mul(60),
+        );
+        let remaining = FULL_SYNC_EVERY.max(poll).saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return Ok(());
         }
@@ -261,7 +264,7 @@ async fn session(
             }
             _ => {
                 tokio::select! {
-                    () = tokio::time::sleep(POLL_INTERVAL.min(remaining)) => {}
+                    () = tokio::time::sleep(poll.min(remaining)) => {}
                     () = wake.notified() => return Ok(()),
                 }
             }

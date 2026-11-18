@@ -20,6 +20,16 @@ describe('settings', () => {
     expect(document.documentElement.dataset['theme']).toBe('light');
   });
 
+  it('sets how often to check for mail, and the read delay when it applies', async () => {
+    const { user, api, region } = await openSettings();
+    await user.selectOptions(region.getByRole('combobox', { name: 'Check for new mail every' }), '5 minutes');
+    expect((await api.getSettings()).checkEveryMins).toBe(5);
+    expect(region.queryByRole('combobox', { name: 'Mark as read after' })).not.toBeInTheDocument();
+    await user.click(region.getByRole('radio', { name: /after a few seconds/ }));
+    await user.selectOptions(region.getByRole('combobox', { name: 'Mark as read after' }), '10 seconds');
+    expect((await api.getSettings()).markReadDelaySecs).toBe(10);
+  });
+
   it('rolls back a setting the backend refuses', async () => {
     const { user, api, region } = await openSettings();
     api.failNext('setSettings', { kind: 'storage', message: 'Disk full.' });

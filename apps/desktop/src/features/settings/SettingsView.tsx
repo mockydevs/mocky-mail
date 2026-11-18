@@ -12,9 +12,13 @@ import { SignatureEditor } from './SignatureEditor';
 
 const MARK_READ: readonly [MarkReadSetting, string][] = [
   ['open', 'Mark as read as soon as I open a message'],
-  ['delay', 'Mark as read after 3 seconds open (a quick peek stays unread)'],
+  ['delay', 'Mark as read after a few seconds open (a quick peek stays unread)'],
   ['manual', 'Only when I choose Mark as read'],
 ];
+
+/** Same choices as the backend accepts (settings.rs). */
+const CHECK_EVERY = [1, 2, 5, 10, 15, 30] as const;
+const READ_DELAY = [1, 3, 5, 10] as const;
 
 /** Same choices as the backend accepts (UNDO_SEND_CHOICES in settings.rs). */
 const UNDO_SEND = [0, 5, 10, 20, 30] as const;
@@ -121,6 +125,48 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
             />
             Focused Inbox: put newsletters and notifications in a separate Other tab
           </label>
+          {settings.markRead === 'delay' && (
+            <label className="form-field">
+              <span className="form-field__label">Mark as read after</span>
+              <select
+                className="field"
+                value={settings.markReadDelaySecs}
+                onChange={(e) => {
+                  onChange({ ...settings, markReadDelaySecs: Number(e.target.value) });
+                }}
+              >
+                {READ_DELAY.map((secs) => (
+                  <option key={secs} value={secs}>
+                    {secs === 1 ? '1 second' : `${String(secs)} seconds`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </fieldset>
+
+        <fieldset className="settings__group">
+          <legend className="settings__legend">Checking for mail</legend>
+          <label className="form-field">
+            <span className="form-field__label">Check for new mail every</span>
+            <select
+              className="field"
+              value={settings.checkEveryMins}
+              onChange={(e) => {
+                onChange({ ...settings, checkEveryMins: Number(e.target.value) });
+              }}
+            >
+              {CHECK_EVERY.map((mins) => (
+                <option key={mins} value={mins}>
+                  {mins === 1 ? '1 minute' : `${String(mins)} minutes`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="form-hint">
+            Most servers tell Mocky Mail about new mail straight away; this is for those that can't. Other folders are
+            checked at least every 10 minutes.
+          </p>
         </fieldset>
 
         <fieldset className="settings__group">
