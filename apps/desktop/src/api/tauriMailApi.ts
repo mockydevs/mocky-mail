@@ -30,6 +30,8 @@ export function createTauriMailApi(): MailApi {
     listMessages: ({ threads, ...query }) => call('list_messages', { query, threads: threads ?? false }),
     getThread: (id) => call('get_thread', { id }),
     previewBody: (body) => call('preview_body', { body }),
+    takeMailto: () => call('take_mailto'),
+    parseMailto: (url) => call('parse_mailto', { url }),
     setFocusRule: (sender, focus, wholeDomain) => call('set_focus_rule', { sender, focus, wholeDomain }),
     getMessage: (id, allowRemote) => call('get_message', { id, allowRemote }),
     setFlags: (ids, change) => call('set_flags', { ids, ...change }),

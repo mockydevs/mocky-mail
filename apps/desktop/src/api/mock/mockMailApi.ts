@@ -6,6 +6,7 @@ import type {
   Contact,
   AttachmentMeta,
   Focus,
+  Mailto,
   AppError,
   Draft,
   Signature,
@@ -65,6 +66,8 @@ export interface MockMailApi extends MailApi {
   readonly openedFiles: string[];
   /** Pages passed to printHtml, for assertions. */
   readonly printed: string[];
+  /** Make takeMailto return this link once, as if the app were opened with it. */
+  launchWith(url: string): void;
 }
 
 /** 1x1 PNG, a one-line PDF and some text: what the dev preview shows. */
@@ -150,6 +153,21 @@ function listItem(m: MockMessage): MessageListItem {
   };
 }
 
+/** Read a mailto: link the way the backend does (simplified). */
+function parseMailtoLink(url: string): Mailto | null {
+  if (!/^mailto:/i.test(url)) return null;
+  const [addresses = '', query = ''] = url.slice(7).split('?');
+  const params = new URLSearchParams(query.replace(/\+/g, '%2B'));
+  const decode = (s: string) => decodeURIComponent(s);
+  return {
+    to: [decode(addresses), params.get('to') ?? ''].filter(Boolean).join(', '),
+    cc: params.get('cc') ?? '',
+    bcc: params.get('bcc') ?? '',
+    subject: params.get('subject') ?? '',
+    body: params.get('body') ?? '',
+  };
+}
+
 /** The conversation a message belongs to, from its reply headers (as the backend does). */
 function threadKey(m: MockMessage): string {
   return (m.references[0] ?? m.inReplyTo ?? m.messageIdHeader ?? m.id).toLowerCase();
@@ -226,6 +244,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const opened: string[] = [];
   const openedFiles: string[] = [];
   const printed: string[] = [];
+  let launchLink: string | null = null;
   /** Focused Inbox rules: address or @domain to focus. */
   const focusRules = new Map<string, Focus>();
   let seq = 1;
@@ -318,6 +337,9 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     opened,
     openedFiles,
     printed,
+    launchWith: (url) => {
+      launchLink = url;
+    },
     emit,
     failNext(method, error) {
       failures.set(method, error);
@@ -528,6 +550,15 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         if (focus) focusRules.set(key, focus);
         else focusRules.delete(key);
       }),
+
+    takeMailto: () =>
+      run('takeMailto', () => {
+        const url = launchLink;
+        launchLink = null;
+        return url ? parseMailtoLink(url) : null;
+      }),
+
+    parseMailto: (url) => run('parseMailto', () => parseMailtoLink(url)),
 
     previewBody: (body) =>
       run('previewBody', () => {

@@ -20,6 +20,7 @@ mod folders;
 #[cfg(target_os = "android")]
 mod google_android;
 mod mail;
+mod mailto;
 mod message_tools;
 mod outbox;
 mod settings;
@@ -32,7 +33,7 @@ use std::sync::Arc;
 
 use mail_sync::secrets::KeyringStore;
 use tauri::webview::NewWindowResponse;
-use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::state::{AppState, now};
@@ -130,13 +131,18 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 /// returning an error; we print it and exit non-zero instead of panicking.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    mailto::remember_launch_link();
     let builder = tauri::Builder::default();
     // Must be first: a second copy would sync and send in parallel.
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.unminimize();
             let _ = window.set_focus();
+        }
+        // A mailto: link opened while the app runs: start a message.
+        if let Some(url) = mailto::from_args(args.iter().map(String::as_str)) {
+            let _ = app.emit("mail://mailto", serde_json::json!({ "url": url }));
         }
     }));
     // Android: Gmail sign-in with the phone's own Google accounts.
@@ -165,6 +171,8 @@ pub fn run() {
             mail::get_thread,
             mail::set_focus_rule,
             mail::preview_body,
+            mailto::take_mailto,
+            mailto::parse_mailto,
             mail::get_message,
             mail::set_flags,
             mail::move_messages,

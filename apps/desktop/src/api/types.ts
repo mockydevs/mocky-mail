@@ -124,6 +124,15 @@ export interface ListQuery {
   focus?: Focus | null;
 }
 
+/** What a mailto: link asks to fill in a new message with. */
+export interface Mailto {
+  to: string;
+  cc: string;
+  bcc: string;
+  subject: string;
+  body: string;
+}
+
 /** Focused Inbox halves: people, and newsletters and notifications. */
 export type Focus = 'focused' | 'other';
 
@@ -326,6 +335,8 @@ export interface MailEvents {
   'mail://new-mail': { accountId: string; count: number };
   'mail://accounts-changed': Record<string, never>;
   'mail://contacts-changed': { books: AddressBookStatus[] };
+  /** A mailto: link opened while the app runs (desktop). */
+  'mail://mailto': { url: string };
 }
 export type MailEventName = keyof MailEvents;
 
@@ -353,6 +364,10 @@ export interface MailApi {
   listMessages(query: ListQuery & { threads?: boolean }): Promise<MessagePage>;
   /** Always put mail from this sender (or anyone at its domain) in Focused or Other; null removes the rule. */
   setFocusRule(sender: string, focus: Focus | null, wholeDomain: boolean): Promise<void>;
+  /** The mailto: link the app was started with, once (desktop). */
+  takeMailto(): Promise<Mailto | null>;
+  /** Read a mailto: link (from Android, or the mail://mailto event). */
+  parseMailto(url: string): Promise<Mailto | null>;
   /** The HTML recipients will see for this compose text (formatting marks rendered). */
   previewBody(body: string): Promise<string>;
   /** Every message in this message's conversation, oldest first (Trash and Spam left out). */

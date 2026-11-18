@@ -11,6 +11,7 @@ pub mod focus;
 pub mod folders;
 pub mod formatting;
 pub mod limits;
+pub mod mailto;
 pub mod message;
 pub mod outbox;
 pub mod preview;

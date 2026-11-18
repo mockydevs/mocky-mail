@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useMailApi } from '../api/MailApiContext';
 import { errorTitle, toAppError } from '../api/errors';
-import type { AppError, Draft, Focus, Folder, MessageDetail, MessageListItem, OutboxEntry, ReadFilter, Settings, SyncStatus } from '../api/types';
+import type { AppError, Draft, Focus, Folder, Mailto, MessageDetail, MessageListItem, OutboxEntry, ReadFilter, Settings, SyncStatus } from '../api/types';
 import { AddAccountForm } from '../features/accounts/AddAccountForm';
 import { Welcome } from '../features/accounts/Welcome';
 import { ComposeView } from '../features/compose/ComposeView';
@@ -468,6 +468,55 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     const accountId = view.type === 'folder' ? view.accountId : (accounts[0]?.id ?? '');
     compose(blankDraft(accountId), 'New message', null, true);
   };
+
+  // mailto: links from other apps and web pages start a new message,
+  // once accounts are loaded so it has a From.
+  const pendingMailto = useRef<Mailto | null>(null);
+  const openMailtoRef = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    openMailtoRef.current = () => {
+      const link = pendingMailto.current;
+      const first = accounts[0];
+      if (!link || !first) return;
+      pendingMailto.current = null;
+      const accountId = view.type === 'folder' ? view.accountId : first.id;
+      compose(
+        { ...blankDraft(accountId), to: link.to, cc: link.cc, bcc: link.bcc, subject: link.subject, bodyText: link.body },
+        'New message',
+        null,
+        true,
+      );
+    };
+  });
+  const firstAccountId = accounts[0]?.id;
+  useEffect(() => {
+    openMailtoRef.current();
+  }, [firstAccountId]);
+  useEffect(() => {
+    const show = (link: Mailto | null) => {
+      if (!link) return;
+      pendingMailto.current = link;
+      openMailtoRef.current();
+    };
+    api.takeMailto().then(show, () => undefined);
+    const off = api.on('mail://mailto', ({ url }) => {
+      api.parseMailto(url).then(show, () => undefined);
+    });
+    // Android hands the link over through MockyIntents when the app opens or comes back.
+    const bridge = (window as { MockyIntents?: { takeMailto: () => string | null } }).MockyIntents;
+    const check = () => {
+      const url = bridge?.takeMailto();
+      if (url) api.parseMailto(url).then(show, () => undefined);
+    };
+    check();
+    document.addEventListener('visibilitychange', check);
+    window.addEventListener('focus', check);
+    return () => {
+      off();
+      document.removeEventListener('visibilitychange', check);
+      window.removeEventListener('focus', check);
+    };
+  }, [api]);
 
   // Keyboard shortcuts.
   const handlerRef = useRef<(action: ShortcutAction, event: KeyboardEvent) => void>(() => undefined);
