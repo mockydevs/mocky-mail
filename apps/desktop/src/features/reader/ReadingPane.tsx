@@ -835,7 +835,7 @@ function QuickReply({ message, account, sheet }: { message: MessageDetail; accou
     sending.clear();
     let draft = base;
     api
-      .getSignature(account.id)
+      .getSignature(account.id, true)
       // A quick reply carries the signature like any other reply.
       .catch(() => null)
       .then((signature) => {

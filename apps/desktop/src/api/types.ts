@@ -189,6 +189,16 @@ export interface Signature {
   image?: SignatureImage;
 }
 
+/** One of an account's signatures. */
+export type NamedSignature = Signature & { id: string; name: string };
+
+/** An account's signatures, and which ones new messages and replies start with. */
+export interface SignatureSet {
+  items: NamedSignature[];
+  defaultNew: string | null;
+  defaultReply: string | null;
+}
+
 export interface Draft {
   accountId: string;
   /** As typed; the backend validates. */
@@ -367,16 +377,19 @@ export interface MailApi {
   deleteContact(id: string): Promise<void>;
   /** Sync every account's address book now. */
   syncContacts(): Promise<AddressBookStatus[]>;
-  /** The account's email signature, if it has one. */
-  getSignature(accountId: string): Promise<Signature | null>;
-  /** Clean and store a signature (pasted HTML or typed text); empty clears it. Returns what was stored. */
-  setSignature(accountId: string, html: string): Promise<Signature | null>;
-  /** Choose a picture (PNG, JPG or GIF, up to 1 MB) for the signature; null if cancelled. */
-  setSignatureImage(accountId: string): Promise<Signature | null>;
-  /** How wide the signature picture shows, px. */
-  setSignatureImageWidth(accountId: string, width: number): Promise<Signature | null>;
-  /** Drop the picture, keep the words. */
-  removeSignatureImage(accountId: string): Promise<Signature | null>;
+  /** The signature a new message (or, with `reply`, a reply or forward) starts with. */
+  getSignature(accountId: string, reply?: boolean): Promise<Signature | null>;
+  listSignatures(accountId: string): Promise<SignatureSet>;
+  /** Create (`id` null) or change a signature's name and words (pasted HTML or typed). Keeps its picture. */
+  saveSignature(accountId: string, id: string | null, name: string, html: string): Promise<SignatureSet>;
+  deleteSignature(accountId: string, id: string): Promise<SignatureSet>;
+  setSignatureDefaults(accountId: string, defaultNew: string | null, defaultReply: string | null): Promise<SignatureSet>;
+  /** Choose a picture (PNG, JPG or GIF, up to 1 MB) for a signature; null if cancelled. */
+  setSignatureImage(accountId: string, id: string): Promise<SignatureSet | null>;
+  /** How wide a signature's picture shows, px. */
+  setSignatureImageWidth(accountId: string, id: string, width: number): Promise<SignatureSet>;
+  /** Drop a signature's picture, keep its words. */
+  removeSignatureImage(accountId: string, id: string): Promise<SignatureSet>;
   getSettings(): Promise<Settings>;
   setSettings(settings: Settings): Promise<Settings>;
   openExternal(url: string): Promise<void>;

@@ -8,6 +8,7 @@ import type {
   AppError,
   Draft,
   Signature,
+  SignatureSet,
   UpdateInfo,
   DraftAttachment,
   DraftCheck,
@@ -40,8 +41,10 @@ export interface MockOptions {
   picked?: DraftAttachment[];
   /** A newer version for checkForUpdate to report. */
   update?: UpdateInfo;
-  /** Signatures by account id. */
+  /** One signature per account (the default for new messages and replies), by account id. */
   signatures?: Record<string, Signature>;
+  /** Full signature sets by account id; wins over `signatures`. */
+  signatureSets?: Record<string, SignatureSet>;
   /** Saved contacts. */
   contacts?: Contact[];
   /** Address book status per account; default: every account synced. */
@@ -160,7 +163,31 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   let messages = clone(options.messages ?? MOCK_MESSAGES).filter(known);
   let outbox = clone(options.outbox ?? MOCK_OUTBOX).filter(known);
   let settings = clone(options.settings ?? MOCK_SETTINGS);
-  const signatures = new Map<string, Signature>(Object.entries(options.signatures ?? {}));
+  const signatures = new Map<string, SignatureSet>(
+    Object.entries(options.signatures ?? {}).map(([accountId, signature]) => [
+      accountId,
+      { items: [{ ...signature, id: 'main', name: 'Signature' }], defaultNew: 'main', defaultReply: 'main' },
+    ]),
+  );
+  for (const [accountId, set] of Object.entries(options.signatureSets ?? {})) signatures.set(accountId, clone(set));
+  const setOf = (accountId: string): SignatureSet =>
+    signatures.get(accountId) ?? { items: [], defaultNew: null, defaultReply: null };
+  /** Plain text of signature HTML, as the backend derives it. */
+  const signatureText = (html: string): string => {
+    const holder = document.createElement('div');
+    holder.innerHTML = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+    holder.querySelectorAll('br').forEach((br) => {
+      br.replaceWith('\n');
+    });
+    holder.querySelectorAll('div,p').forEach((block) => {
+      block.append('\n');
+    });
+    return holder.textContent
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join('\n');
+  };
   let contacts: Contact[] = clone(options.contacts ?? []);
   const outboxDrafts = new Map<string, Draft>();
   /** Attachments of drafts saved in this session, by message id. */
@@ -743,72 +770,109 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         return options.books ?? accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null }));
       }),
 
-    getSignature: (accountId) => run('getSignature', () => signatures.get(accountId) ?? null),
-
-    setSignature: (accountId, html) =>
-      run('setSignature', () => {
-        // The backend sanitizes; the mock only drops scripts and derives the text.
-        const holder = document.createElement('div');
-        holder.innerHTML = html.replace(/<script[\s\S]*?<\/script>/gi, '');
-        const clean = holder.innerHTML.trim();
-        holder.querySelectorAll('br').forEach((br) => {
-          br.replaceWith('\n');
-        });
-        holder.querySelectorAll('div,p').forEach((block) => {
-          block.append('\n');
-        });
-        const text = holder.textContent
-          .split('\n')
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .join('\n');
-        const image = signatures.get(accountId)?.image;
-        if (text === '') {
-          if (image) {
-            const only = { html: '', text: account(accountId).displayName, image };
-            signatures.set(accountId, only);
-            return only;
-          }
-          signatures.delete(accountId);
-          return null;
-        }
-        const signature: Signature = image ? { html: clean, text, image } : { html: clean, text };
-        signatures.set(accountId, signature);
-        return signature;
+    getSignature: (accountId, reply) =>
+      run('getSignature', () => {
+        const set = setOf(accountId);
+        const id = reply ? set.defaultReply : set.defaultNew;
+        const found = set.items.find((s) => s.id === id);
+        if (!found) return null;
+        const { html, text, image } = found;
+        return image ? { html, text, image } : { html, text };
       }),
 
-    setSignatureImage: (accountId) =>
+    listSignatures: (accountId) => run('listSignatures', () => setOf(accountId)),
+
+    saveSignature: (accountId, id, name, html) =>
+      run('saveSignature', () => {
+        const set = setOf(accountId);
+        let items = set.items;
+        let target = id;
+        if (target === null) {
+          target = `s${String(seq++)}`;
+          items = [...items, { id: target, name: `Signature ${String(items.length + 1)}`, html: '', text: '' }];
+        }
+        const old = items.find((s) => s.id === target);
+        if (!old) throw appError('not_found', 'That signature no longer exists.');
+        const clean = html.replace(/<script[\s\S]*?<\/script>/gi, '').trim();
+        const text = signatureText(clean);
+        const picture = old.image ? account(accountId).displayName : '';
+        const next = {
+          ...old,
+          name: name.trim() || old.name,
+          html: text ? clean : '',
+          text: text || picture,
+        };
+        const first = set.items.length === 0;
+        const saved: SignatureSet = {
+          items: items.map((s) => (s.id === target ? next : s)),
+          defaultNew: first ? target : set.defaultNew,
+          defaultReply: first ? target : set.defaultReply,
+        };
+        signatures.set(accountId, saved);
+        return saved;
+      }),
+
+    deleteSignature: (accountId, id) =>
+      run('deleteSignature', () => {
+        const set = setOf(accountId);
+        const saved: SignatureSet = {
+          items: set.items.filter((s) => s.id !== id),
+          defaultNew: set.defaultNew === id ? null : set.defaultNew,
+          defaultReply: set.defaultReply === id ? null : set.defaultReply,
+        };
+        signatures.set(accountId, saved);
+        return saved;
+      }),
+
+    setSignatureDefaults: (accountId, defaultNew, defaultReply) =>
+      run('setSignatureDefaults', () => {
+        const saved = { ...setOf(accountId), defaultNew, defaultReply };
+        signatures.set(accountId, saved);
+        return saved;
+      }),
+
+    setSignatureImage: (accountId, id) =>
       run('setSignatureImage', () => {
         const image = { mimeType: 'image/png', data: MOCK_PNG_BASE64, width: 320, naturalWidth: 640, naturalHeight: 160 };
-        const old = signatures.get(accountId);
-        const signature: Signature = old?.html
-          ? { ...old, image }
-          : { html: '', text: account(accountId).displayName, image };
-        signatures.set(accountId, signature);
-        return signature;
+        const set = setOf(accountId);
+        if (!set.items.some((s) => s.id === id)) throw appError('not_found', 'That signature no longer exists.');
+        const saved: SignatureSet = {
+          ...set,
+          items: set.items.map((s) =>
+            s.id === id ? { ...s, image, text: s.html ? s.text : account(accountId).displayName } : s,
+          ),
+        };
+        signatures.set(accountId, saved);
+        return saved;
       }),
 
-    setSignatureImageWidth: (accountId, width) =>
+    setSignatureImageWidth: (accountId, id, width) =>
       run('setSignatureImageWidth', () => {
-        const old = signatures.get(accountId);
-        if (!old) return null;
-        const signature: Signature = old.image
-          ? { ...old, image: { ...old.image, width: Math.min(Math.max(width, 40), 600, old.image.naturalWidth) } }
-          : old;
-        signatures.set(accountId, signature);
-        return signature;
+        const set = setOf(accountId);
+        const saved: SignatureSet = {
+          ...set,
+          items: set.items.map((s) =>
+            s.id === id && s.image
+              ? { ...s, image: { ...s.image, width: Math.min(Math.max(width, 40), 600, s.image.naturalWidth) } }
+              : s,
+          ),
+        };
+        signatures.set(accountId, saved);
+        return saved;
       }),
 
-    removeSignatureImage: (accountId) =>
+    removeSignatureImage: (accountId, id) =>
       run('removeSignatureImage', () => {
-        const old = signatures.get(accountId);
-        if (!old?.html) {
-          signatures.delete(accountId);
-          return null;
-        }
-        const signature = { html: old.html, text: old.text };
-        signatures.set(accountId, signature);
-        return signature;
+        const set = setOf(accountId);
+        const saved: SignatureSet = {
+          ...set,
+          items: set.items.map((s) => {
+            if (s.id !== id) return s;
+            return { id: s.id, name: s.name, html: s.html, text: s.html ? s.text : '' };
+          }),
+        };
+        signatures.set(accountId, saved);
+        return saved;
       }),
 
     getSettings: () => run('getSettings', () => settings),

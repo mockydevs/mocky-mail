@@ -137,7 +137,9 @@ async fn measure(state: &AppState, draft: &Draft) -> AppResult<(Account, u64, u6
         sizes.push(check_picked(state, attachment).await?.1);
     }
     // The signature picture travels inside the message.
-    if let Some(image) = crate::signatures::load(state, &account.id)?.and_then(|s| s.image) {
+    if let Some(image) =
+        crate::signatures::in_body(state, &account.id, &draft.body_text)?.and_then(|s| s.image)
+    {
         sizes.push(u64::try_from(image.data.len()).unwrap_or(u64::MAX));
     }
     let estimated = estimate_message_size(
@@ -167,8 +169,8 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
             data,
         });
     }
-    let signature = crate::signatures::load(state, &account.id)?;
-    // The full signature, if its block is still in the body as compose put it.
+    // The account signature whose block is still in the body as compose put it.
+    let signature = crate::signatures::in_body(state, &account.id, &draft.body_text)?;
     let body_html = signature
         .as_ref()
         .and_then(|signature| html_with_signature(&draft.body_text, signature));

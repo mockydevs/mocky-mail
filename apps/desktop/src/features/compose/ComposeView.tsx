@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type SyntheticE
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, Draft, DraftAttachment, OutboxEntry, SignatureImage } from '../../api/types';
+import type { Account, AppError, Draft, DraftAttachment, OutboxEntry, SignatureImage, SignatureSet } from '../../api/types';
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
@@ -89,26 +89,38 @@ export function ComposeView({
     };
   }, [api, attachmentsFrom]);
 
-  // The signature now in the body, so changing From can swap it.
+  // The signature now in the body, so changing From or the picker can swap it.
   const signature = useRef<string | null>(null);
   const signatureLoaded = useRef(false);
+  // The From account's signatures, for the picker.
+  const [signatures, setSignatures] = useState<SignatureSet | null>(null);
+  const [signatureId, setSignatureId] = useState<string | null>(null);
   // Its picture, previewed under the body; it is added when the message is sent.
   const [signatureImage, setSignatureImage] = useState<{ text: string; image: SignatureImage } | null>(null);
+  // Replies and forwards start with the reply signature.
+  const isReply = initial.inReplyTo !== null || attachmentsFrom !== null;
+
+  /** Put signature `id` (null: none) in the body in place of the current one. */
+  const applySignature = (set: SignatureSet, id: string | null, atStart: boolean) => {
+    const next = set.items.find((s) => s.id === id) ?? null;
+    const previous = signature.current;
+    const text = next && next.text !== '' ? next.text : null;
+    signature.current = text;
+    setSignatureId(next?.id ?? null);
+    setSignatureImage(next?.image && text !== null ? { text, image: next.image } : null);
+    setDraft((d) => ({ ...d, bodyText: swapSignature(d.bodyText, previous, text) }));
+    // Adding it at the start isn't a change the user made.
+    if (atStart) setBaseline((b) => ({ ...b, bodyText: swapSignature(b.bodyText, previous, text) }));
+  };
+
   useEffect(() => {
     if (!addSignature) return;
     let active = true;
-    api.getSignature(draft.accountId).then(
-      (next) => {
+    api.listSignatures(draft.accountId).then(
+      (set) => {
         if (!active) return;
-        const previous = signature.current;
-        const text = next?.text ?? null;
-        signature.current = text;
-        setSignatureImage(next?.image && text !== null ? { text, image: next.image } : null);
-        setDraft((d) => ({ ...d, bodyText: swapSignature(d.bodyText, previous, text) }));
-        // Adding it at the start isn't a change the user made.
-        if (!signatureLoaded.current) {
-          setBaseline((b) => ({ ...b, bodyText: swapSignature(b.bodyText, previous, text) }));
-        }
+        setSignatures(set);
+        applySignature(set, isReply ? set.defaultReply : set.defaultNew, !signatureLoaded.current);
         signatureLoaded.current = true;
       },
       () => undefined,
@@ -116,7 +128,8 @@ export function ComposeView({
     return () => {
       active = false;
     };
-  }, [api, addSignature, draft.accountId]);
+    // applySignature only reads refs and setters; reloading on its identity would loop.
+  }, [api, addSignature, draft.accountId, isReply]);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const account = accounts.find((a) => a.id === draft.accountId);
@@ -335,6 +348,25 @@ export function ComposeView({
           <Icon name="paperclip" />
           Attach files
         </button>
+        {signatures && signatures.items.length > 0 && (
+          <label className="compose__signature-pick">
+            <span>Signature</span>
+            <select
+              className="field"
+              value={signatureId ?? ''}
+              onChange={(e) => {
+                applySignature(signatures, e.target.value || null, false);
+              }}
+            >
+              {signatures.items.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+              <option value="">None</option>
+            </select>
+          </label>
+        )}
         <span className="compose__hint">Ctrl+Enter to send</span>
       </div>
 

@@ -3285,3 +3285,35 @@ button.contact-row:hover,
 .folder-manage__rename .field {
   flex: 1 1 160px;
 }
+
+/* Signature picker beside Attach files. */
+.compose__signature-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.compose__signature-pick .field {
+  width: auto;
+  min-width: 120px;
+  padding-block: 4px;
+}
+
+.signature-editor__item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.signature-editor__defaults {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}

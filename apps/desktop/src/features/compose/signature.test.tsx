@@ -66,28 +66,61 @@ describe('signature in the app', () => {
   it('is pasted from webmail in Settings, cleaned by the backend, and saved', async () => {
     const { user, api } = renderApp();
     await rows();
-    const save = vi.spyOn(api, 'setSignature');
+    const save = vi.spyOn(api, 'saveSignature');
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    const editors = await screen.findAllByRole('textbox', { name: 'Signature' });
-    const editor = editors[0];
-    if (!editor) throw new Error('no signature editor');
-    await waitFor(() => {
-      expect(editor).toHaveAttribute('contenteditable', 'true');
-    });
+    const settings = within(screen.getByRole('region', { name: 'Settings' }));
+    const [add] = await settings.findAllByRole('button', { name: 'Add a signature' });
+    if (!add) throw new Error('no Add a signature button');
+    await user.click(add);
+    const item = within(await settings.findByRole('region', { name: 'Signature: Signature 1' }));
+    const editor = item.getByRole('textbox', { name: 'Words' });
     fireEvent.paste(editor, {
       clipboardData: {
         getData: (type: string) => (type === 'text/html' ? '<b>Don</b><script>steal()</script>' : 'Don'),
       },
     });
-    await screen.findByText('Signature pasted and saved.');
-    expect(save).toHaveBeenCalledWith(expect.any(String), '<b>Don</b><script>steal()</script>');
+    await settings.findByText('Signature pasted and saved.');
+    expect(save).toHaveBeenLastCalledWith(expect.any(String), expect.any(String), 'Signature 1', '<b>Don</b><script>steal()</script>');
     // What is shown is what the backend returned, never the raw paste.
-    expect(editor.innerHTML).toBe('<b>Don</b>');
-    const [remove] = screen.getAllByRole('button', { name: 'Remove signature' });
-    if (!remove) throw new Error('no remove button');
-    await user.click(remove);
-    await screen.findByText('Signature removed.');
-    expect(editor.innerHTML).toBe('');
+    await waitFor(() => {
+      expect(editor.innerHTML).toBe('<b>Don</b>');
+    });
+    await user.click(item.getByRole('button', { name: 'Delete signature' }));
+    await user.click(within(screen.getByRole('dialog', { name: 'Delete Signature 1?' })).getByRole('button', { name: 'Delete signature' }));
+    await settings.findByText('Signature deleted.');
+  });
+
+  it('can be one of several, chosen per message with a picker', async () => {
+    const SHORT = { id: 'short', name: 'Short', html: 'Don', text: 'Don' };
+    const FULL = { id: 'full', name: 'Full', html: WORK.html, text: WORK.text };
+    const set = { items: [FULL, SHORT], defaultNew: 'full', defaultReply: 'short' };
+    const { user } = renderApp({ signatureSets: { work: set, personal: set } });
+    await rows();
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    const form = within(screen.getByRole('form', { name: 'New message' }));
+    const body = form.getByLabelText<HTMLTextAreaElement>('Message');
+    await waitFor(() => {
+      expect(body.value).toBe(withSignature('', FULL.text));
+    });
+    const picker = form.getByRole('combobox', { name: 'Signature' });
+    await user.selectOptions(picker, 'Short');
+    expect(body.value).toBe(withSignature('', SHORT.text));
+    await user.selectOptions(picker, 'None');
+    expect(body.value).toBe('');
+  });
+
+  it('starts replies with the reply signature', async () => {
+    const SHORT = { id: 'short', name: 'Short', html: 'Don', text: 'Don' };
+    const FULL = { id: 'full', name: 'Full', html: WORK.html, text: WORK.text };
+    const set = { items: [FULL, SHORT], defaultNew: 'full', defaultReply: 'short' };
+    const { user } = renderApp({ signatureSets: { work: set, personal: set } });
+    await rows();
+    await user.click(await within(reader()).findByRole('button', { name: 'Reply' }));
+    const form = within(await screen.findByRole('form', { name: /^Reply/ }));
+    await waitFor(() => {
+      expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain(signatureBlock(SHORT.text));
+    });
+    expect(form.getByRole('combobox', { name: 'Signature' })).toHaveDisplayValue('Short');
   });
 });
 
@@ -103,23 +136,23 @@ describe('signature picture', () => {
   }
 
   it('can be added, resized and removed in Settings', async () => {
-    const { user, region } = await signatureSettings();
+    const { user, region } = await signatureSettings({ signatures: { work: WORK } });
     const [add] = await region.findAllByRole('button', { name: 'Add a picture' });
     if (!add) throw new Error('no Add a picture button');
     await user.click(add);
-    const img = await region.findByRole('img', { name: 'Your signature' });
+    const img = await region.findByRole('img', { name: 'Signature design: Signature' });
     expect(img.getAttribute('src')).toMatch(/^data:image\/png;base64,/);
     expect(await region.findByText(/Picture added/)).toBeInTheDocument();
 
     const size = region.getByRole('combobox', { name: 'Size in messages' });
     await user.selectOptions(size, '160');
     await waitFor(() => {
-      expect(region.getByRole('img', { name: 'Your signature' })).toHaveStyle({ width: '160px' });
+      expect(region.getByRole('img', { name: 'Signature design: Signature' })).toHaveStyle({ width: '160px' });
     });
 
     await user.click(region.getByRole('button', { name: 'Remove picture' }));
     await waitFor(() => {
-      expect(region.queryByRole('img', { name: 'Your signature' })).not.toBeInTheDocument();
+      expect(region.queryByRole('img', { name: 'Signature design: Signature' })).not.toBeInTheDocument();
     });
   });
 
@@ -132,15 +165,15 @@ describe('signature picture', () => {
         },
       },
     });
-    expect(await region.findByRole('img', { name: 'Your signature' })).toBeInTheDocument();
+    expect(await region.findByRole('img', { name: 'Signature design: Signature' })).toBeInTheDocument();
     api.failNext('setSignatureImage', {
       kind: 'invalid',
       message: 'Use a PNG, JPG or GIF picture. From Illustrator, use File > Export > Export As > PNG.',
     });
     await user.click(region.getByRole('button', { name: 'Replace picture' }));
     expect(await region.findByRole('alert')).toHaveTextContent('Export As > PNG');
-    const saved = await api.setSignature('work', '<b>Don</b>');
-    expect(saved?.image?.width).toBe(240);
+    const saved = await api.saveSignature('work', 'main', 'Signature', '<b>Don</b>');
+    expect(saved.items[0]?.image?.width).toBe(240);
   });
 
   it('is previewed under a new message while its block is there', async () => {
