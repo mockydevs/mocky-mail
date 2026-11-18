@@ -32,8 +32,10 @@ mod updates;
 use std::sync::Arc;
 
 use mail_sync::secrets::KeyringStore;
+#[cfg(desktop)]
+use tauri::Emitter;
 use tauri::webview::NewWindowResponse;
-use tauri::{Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::state::{AppState, now};
