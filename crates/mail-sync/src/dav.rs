@@ -567,6 +567,24 @@ impl DavClient {
             .await
     }
 
+    /// Whether the server emails organisers and attendees itself when a
+    /// calendar changes (`calendar-auto-schedule` in its `DAV` header,
+    /// RFC 6638), as `SOGo` does. Then the app must not email them too.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn auto_schedules(&self, calendar: &Url) -> Result<bool, SyncError> {
+        let (_, _, headers, _) = self
+            .send(&Method::OPTIONS, calendar.clone(), HeaderMap::new(), None)
+            .await?;
+        Ok(headers
+            .get_all("dav")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .any(|v| v.trim().eq_ignore_ascii_case("calendar-auto-schedule")))
+    }
+
     /// Store an answered invitation in a calendar, asking the server not to
     /// email the organiser itself (`Schedule-Reply: F`, RFC 6638): the app
     /// sends that answer.

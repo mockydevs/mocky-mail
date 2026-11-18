@@ -155,6 +155,11 @@ pub async fn get_message(
             .attachments
             .into_iter()
             .enumerate()
+            // The invitation card stands for the calendar part.
+            .filter(|(_, a)| {
+                invitation.is_none()
+                    || !matches!(a.mime_type.as_str(), "text/calendar" | "application/ics")
+            })
             .map(|(index, a)| AttachmentMeta {
                 index,
                 preview: crate::attachments::preview_for(&a),

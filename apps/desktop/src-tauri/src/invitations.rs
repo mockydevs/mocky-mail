@@ -137,37 +137,48 @@ pub async fn answer_invitation(
 
     // Your calendar first: if that fails, nothing has been sent.
     let existing = stored_event(&state, &account.id, &uid)?;
+    let mut server_tells_organiser = false;
     if let Some(target) = target_calendar(&state, &account, existing.as_ref())? {
         let (client, url) = crate::calendar::client_for(&state, &target).await?;
-        match (answer, &existing) {
-            (Answer::Declined, Some(stored)) => {
+        // Servers like SOGo email the organiser themselves when your answer
+        // is saved (and ignore requests not to), so the app must not too.
+        let auto = notify && client.auto_schedules(&url).await.unwrap_or(false);
+        let copy = || {
+            ical::calendar_copy(&calendar, &account.email, name, answer)
+                .ok_or_else(|| AppError::invalid("This invitation has no event."))
+        };
+        let href = existing.as_ref().map(|e| e.href.as_str());
+        let etag = existing.as_ref().and_then(|e| e.etag.as_deref());
+        if auto {
+            // The decline is saved too (and hidden in the calendar), so the
+            // server sends it.
+            let copy = copy()?;
+            let (href, etag) = client.put_event(&url, href, &uid, &copy, etag).await?;
+            state
+                .store
+                .put_calendar_event(&target.id, &href, etag.as_deref(), &copy)?;
+            server_tells_organiser = true;
+        } else if answer == Answer::Declined {
+            if let Some(stored) = &existing {
                 client
                     .delete_answered_event(&url, &stored.href, stored.etag.as_deref())
                     .await?;
                 state.store.delete_calendar_event(&stored.id)?;
             }
-            (Answer::Declined, None) => {}
-            (_, _) => {
-                let copy = ical::calendar_copy(&calendar, &account.email, name, answer)
-                    .ok_or_else(|| AppError::invalid("This invitation has no event."))?;
-                let (href, etag) = client
-                    .put_answered_event(
-                        &url,
-                        existing.as_ref().map(|e| e.href.as_str()),
-                        &uid,
-                        &copy,
-                        existing.as_ref().and_then(|e| e.etag.as_deref()),
-                    )
-                    .await?;
-                state
-                    .store
-                    .put_calendar_event(&target.id, &href, etag.as_deref(), &copy)?;
-            }
+        } else {
+            let copy = copy()?;
+            let (href, etag) = client
+                .put_answered_event(&url, href, &uid, &copy, etag)
+                .await?;
+            state
+                .store
+                .put_calendar_event(&target.id, &href, etag.as_deref(), &copy)?;
         }
         crate::calendar::changed(&app, &[]);
     }
 
     if notify
+        && !server_tells_organiser
         && let Some(organizer) = invitation.invitation.event.organizer.clone()
         && !organizer.email.eq_ignore_ascii_case(&account.email)
     {

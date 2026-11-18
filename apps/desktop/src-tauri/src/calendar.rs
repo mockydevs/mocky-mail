@@ -128,13 +128,27 @@ pub fn list_events(
         return Err(AppError::invalid("That date range is too long."));
     }
     let calendars = state.store.list_calendars()?;
+    let accounts = state.store.list_accounts()?;
     let mut out = Vec::new();
     for stored in state.store.calendar_events_between(from, to)? {
         let Some(calendar) = calendars.iter().find(|c| c.id == stored.calendar_id) else {
             continue;
         };
+        let me = accounts
+            .iter()
+            .find(|a| a.id == calendar.account_id)
+            .map(|a| a.email.as_str());
         for occurrence in ical::occurrences(&stored.ics, from, to) {
-            out.push(with_place(calendar, stored.id.clone(), occurrence));
+            // Invitations you declined stay on the server (so it could tell
+            // the organiser) but aren't shown.
+            let declined = me.is_some_and(|me| {
+                occurrence.attendees.iter().any(|p| {
+                    p.email.eq_ignore_ascii_case(me) && p.status.as_deref() == Some("declined")
+                })
+            });
+            if !declined {
+                out.push(with_place(calendar, stored.id.clone(), occurrence));
+            }
         }
     }
     out.sort_by(|a, b| {

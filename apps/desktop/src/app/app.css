@@ -4006,3 +4006,26 @@ button.contact-row:hover,
 .invite__notify {
   font-size: 14px;
 }
+
+.invite__done {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-weight: 600;
+}
+
+.invite__answer {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.invite__answer[aria-pressed='true']:disabled {
+  opacity: 1;
+  cursor: default;
+}
