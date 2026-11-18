@@ -1115,6 +1115,325 @@ pub fn skip_occurrence(original: &str, recurrence_id: i64) -> Option<String> {
     Some(finish(&out))
 }
 
+// ------------------------------------------------------------ invitations
+
+/// An invitation or an answer to one, found in an email (iMIP, RFC 6047).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Invitation {
+    /// `REQUEST` (an invitation or update), `CANCEL`, `REPLY` (someone's
+    /// answer), `PUBLISH`, ...
+    pub method: String,
+    /// The event (a series, or one changed date of it).
+    pub event: Occurrence,
+    /// `SEQUENCE`: higher is newer.
+    pub sequence: u32,
+    /// Your answer as listed in it, if you are an attendee.
+    pub my_status: Option<String>,
+    /// For a `REPLY`: who answered, with their answer in `status`.
+    pub replier: Option<Person>,
+}
+
+/// Your answer to an invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Answer {
+    /// Yes.
+    Accepted,
+    /// Maybe.
+    Tentative,
+    /// No.
+    Declined,
+}
+
+impl Answer {
+    fn partstat(self) -> &'static str {
+        match self {
+            Self::Accepted => "ACCEPTED",
+            Self::Tentative => "TENTATIVE",
+            Self::Declined => "DECLINED",
+        }
+    }
+}
+
+fn same_address(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+fn calendar_method(ics: &str) -> String {
+    parse(ics)
+        .into_iter()
+        .find(|c| c.name == "VCALENDAR")
+        .and_then(|c| {
+            c.prop("METHOD")
+                .map(|p| p.value.trim().to_ascii_uppercase())
+        })
+        .unwrap_or_else(|| "PUBLISH".to_owned())
+}
+
+/// The invitation in a calendar part. `me` is the account's address.
+#[must_use]
+pub fn invitation(ics: &str, me: &str) -> Option<Invitation> {
+    let events = vevents(ics);
+    let event = events
+        .iter()
+        .find(|e| e.prop("RECURRENCE-ID").is_none())
+        .or_else(|| events.first())?;
+    let mut occurrence = base(event)?.occurrence;
+    if let Some((rid, _)) = event.prop("RECURRENCE-ID").and_then(when) {
+        occurrence.recurrence_id = Some(rid.timestamp());
+    }
+    if occurrence.uid.is_empty() {
+        return None;
+    }
+    let method = calendar_method(ics);
+    let my_status = occurrence
+        .attendees
+        .iter()
+        .find(|p| same_address(&p.email, me))
+        .and_then(|p| p.status.clone());
+    let replier = (method == "REPLY")
+        .then(|| occurrence.attendees.first().cloned())
+        .flatten();
+    Some(Invitation {
+        method,
+        sequence: event
+            .prop("SEQUENCE")
+            .and_then(|p| p.value.trim().parse().ok())
+            .unwrap_or(0),
+        event: occurrence,
+        my_status,
+        replier,
+    })
+}
+
+/// Lines from `lines[from..=to]`.
+fn copy_block(lines: &[&str], from: usize, to: usize) -> Vec<String> {
+    lines
+        .get(from..=to)
+        .unwrap_or_default()
+        .iter()
+        .map(|l| (*l).to_owned())
+        .collect()
+}
+
+/// `VTIMEZONE` blocks (start and end line), at the top of the calendar.
+fn zone_blocks(lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut open = None;
+    for (i, raw) in lines.iter().enumerate() {
+        let Some(line) = split_line(raw) else {
+            continue;
+        };
+        match line.name.as_str() {
+            "BEGIN" => {
+                depth = depth.saturating_add(1);
+                if depth == 2 && line.value.trim().eq_ignore_ascii_case("VTIMEZONE") {
+                    open = Some(i);
+                }
+            }
+            "END" => {
+                if depth == 2
+                    && let Some(start) = open.take()
+                {
+                    out.push((start, i));
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn quote_param(value: &str) -> String {
+    let clean: String = value
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .collect();
+    if clean.contains([':', ';', ',']) {
+        format!("\"{clean}\"")
+    } else {
+        clean
+    }
+}
+
+/// An `ATTENDEE` line for `me` with this answer.
+fn my_attendee(me: &str, name: Option<&str>, answer: Answer) -> String {
+    let mut line = format!("ATTENDEE;PARTSTAT={}", answer.partstat());
+    if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+        line.push_str(";CN=");
+        line.push_str(&quote_param(name));
+    }
+    line.push_str(":mailto:");
+    line.push_str(me.trim());
+    line
+}
+
+/// An `ATTENDEE` line with its answer changed and `RSVP` dropped.
+fn answered_line(raw: &str, answer: Answer) -> Option<String> {
+    let line = split_line(raw)?;
+    let mut params: Vec<String> = param_list(line.params)
+        .into_iter()
+        .filter(|(k, _)| k != "PARTSTAT" && k != "RSVP")
+        .map(|(k, v)| format!("{k}={}", quote_param(&v)))
+        .collect();
+    params.insert(0, format!("PARTSTAT={}", answer.partstat()));
+    Some(format!("ATTENDEE;{}:{}", params.join(";"), line.value))
+}
+
+fn is_me(raw: &str, me: &str) -> bool {
+    split_line(raw).is_some_and(|l| {
+        l.name == "ATTENDEE"
+            && person(&Prop {
+                name: l.name.clone(),
+                params: l.params.to_owned(),
+                value: l.value.to_owned(),
+            })
+            .is_some_and(|p| same_address(&p.email, me))
+    })
+}
+
+/// What a reply keeps of each event.
+const REPLY_KEEPS: &[&str] = &[
+    "UID",
+    "SEQUENCE",
+    "RECURRENCE-ID",
+    "DTSTART",
+    "DTEND",
+    "DURATION",
+    "SUMMARY",
+    "ORGANIZER",
+];
+
+/// The answer to send the organiser (`METHOD:REPLY`): each event in the
+/// invitation with only you as attendee, and your answer.
+#[must_use]
+pub fn reply(
+    ics: &str,
+    me: &str,
+    my_name: Option<&str>,
+    answer: Answer,
+    now: i64,
+) -> Option<String> {
+    let unfolded = unfold(ics);
+    let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
+    let events = blocks(&lines);
+    if events.is_empty() {
+        return None;
+    }
+    let mut out = vec![
+        "BEGIN:VCALENDAR".to_owned(),
+        "VERSION:2.0".to_owned(),
+        PRODID.to_owned(),
+        "METHOD:REPLY".to_owned(),
+    ];
+    for (from, to) in zone_blocks(&lines) {
+        out.extend(copy_block(&lines, from, to));
+    }
+    for block in &events {
+        out.push("BEGIN:VEVENT".to_owned());
+        let mut depth = 0usize;
+        let mut found_me: Option<String> = None;
+        for raw in lines
+            .get(block.begin.saturating_add(1)..block.end)
+            .unwrap_or_default()
+        {
+            let name = split_line(raw).map(|l| l.name).unwrap_or_default();
+            match name.as_str() {
+                "BEGIN" => depth = depth.saturating_add(1),
+                "END" => depth = depth.saturating_sub(1),
+                _ if depth > 0 => {}
+                "ATTENDEE" if is_me(raw, me) => found_me = answered_line(raw, answer),
+                n if REPLY_KEEPS.contains(&n) => out.push((*raw).to_owned()),
+                _ => {}
+            }
+        }
+        out.push(found_me.unwrap_or_else(|| my_attendee(me, my_name, answer)));
+        out.push(format!("DTSTAMP:{}", utc_stamp(now)));
+        out.push("END:VEVENT".to_owned());
+    }
+    out.push("END:VCALENDAR".to_owned());
+    Some(finish(&out))
+}
+
+/// The invitation as it goes in your calendar: without `METHOD`, and with
+/// your answer on your `ATTENDEE` line (added if you weren't listed).
+#[must_use]
+pub fn calendar_copy(ics: &str, me: &str, my_name: Option<&str>, answer: Answer) -> Option<String> {
+    let unfolded = unfold(ics);
+    let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
+    let events = blocks(&lines);
+    if events.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut listed = false;
+    for raw in &lines {
+        let name = split_line(raw).map(|l| l.name).unwrap_or_default();
+        match name.as_str() {
+            "BEGIN" => depth = depth.saturating_add(1),
+            "END" => {
+                // Not listed (invited through a group): add yourself.
+                if depth == 2 && !listed && raw.trim().eq_ignore_ascii_case("END:VEVENT") {
+                    out.push(my_attendee(me, my_name, answer));
+                }
+                if depth == 2 {
+                    listed = false;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            "METHOD" if depth == 1 => continue,
+            "ATTENDEE" if depth == 2 && is_me(raw, me) => {
+                listed = true;
+                if let Some(line) = answered_line(raw, answer) {
+                    out.push(line);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        out.push((*raw).to_owned());
+    }
+    Some(finish(&out))
+}
+
+/// Your calendar copy updated with someone's answer (`REPLY`): their
+/// `ATTENDEE` line takes the answer. `None` when nothing changes.
+#[must_use]
+pub fn apply_reply(stored: &str, reply: &str) -> Option<String> {
+    let answer = invitation(reply, "")?;
+    let who = answer.replier?;
+    let status = who.status?.to_ascii_uppercase();
+    let unfolded = unfold(stored);
+    let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut changed = false;
+    let out: Vec<String> = lines
+        .iter()
+        .map(|raw| {
+            if is_me(raw, &who.email)
+                && let Some(line) = split_line(raw)
+            {
+                let mut params: Vec<String> = param_list(line.params)
+                    .into_iter()
+                    .filter(|(k, _)| k != "PARTSTAT" && k != "RSVP")
+                    .map(|(k, v)| format!("{k}={}", quote_param(&v)))
+                    .collect();
+                params.insert(0, format!("PARTSTAT={status}"));
+                let new = format!("ATTENDEE;{}:{}", params.join(";"), line.value);
+                if new != *raw {
+                    changed = true;
+                }
+                return new;
+            }
+            (*raw).to_owned()
+        })
+        .collect();
+    changed.then(|| finish(&out))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -1344,6 +1663,102 @@ mod tests {
         );
     }
 
+    const INVITE: &str = "BEGIN:VCALENDAR\r\nPRODID:-//Google Inc//Google Calendar 70.9054//EN\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:Africa/Nairobi\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:+0300\r\nTZOFFSETTO:+0300\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nDTSTART;TZID=Africa/Nairobi:20261124T140000\r\nDTEND;TZID=Africa/Nairobi:20261124T150000\r\nDTSTAMP:20261118T090000Z\r\nORGANIZER;CN=Peter Mwangi:mailto:peter@client.example\r\nUID:abc123@google.com\r\nATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=info@mocky.co.ke:mailto:info@mocky.co.ke\r\nATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE;CN=Peter Mwangi:mailto:peter@client.example\r\nSEQUENCE:0\r\nSTATUS:CONFIRMED\r\nSUMMARY:Site visit: Kilimani\r\nLOCATION:Kilimani\\, Nairobi\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn reads_an_invitation() {
+        let inv = invitation(INVITE, "INFO@mocky.co.ke").unwrap();
+        assert_eq!(inv.method, "REQUEST");
+        assert_eq!(inv.event.title, "Site visit: Kilimani");
+        assert_eq!(inv.event.location, "Kilimani, Nairobi");
+        assert_eq!(inv.event.start, ts("2026-11-24T11:00:00Z"));
+        assert_eq!(
+            inv.event.organizer.as_ref().unwrap().email,
+            "peter@client.example"
+        );
+        assert_eq!(inv.my_status.as_deref(), Some("needs-action"));
+        assert!(inv.replier.is_none());
+        assert!(invitation("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "x@y").is_none());
+    }
+
+    #[test]
+    fn replies_name_only_you_with_your_answer() {
+        let text = reply(
+            INVITE,
+            "info@mocky.co.ke",
+            Some("Mocky Digital"),
+            Answer::Accepted,
+            ts("2026-11-18T10:00:00Z"),
+        )
+        .unwrap();
+        assert!(text.contains("METHOD:REPLY\r\n"));
+        assert!(text.contains("UID:abc123@google.com\r\n"));
+        assert!(text.contains("ORGANIZER;CN=Peter Mwangi:mailto:peter@client.example\r\n"));
+        assert!(text.contains("BEGIN:VTIMEZONE"));
+        // Long lines are folded; compare the unfolded text.
+        assert!(unfold(&text).contains("ATTENDEE;PARTSTAT=ACCEPTED;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;CN=info@mocky.co.ke:mailto:info@mocky.co.ke\n"));
+        assert!(!text.contains("peter@client.example\r\nATTENDEE"));
+        assert_eq!(text.matches("ATTENDEE").count(), 1);
+        assert!(!text.contains("VALARM"));
+        let back = invitation(&text, "peter@client.example").unwrap();
+        assert_eq!(back.method, "REPLY");
+        assert_eq!(back.replier.unwrap().status.as_deref(), Some("accepted"));
+
+        // Not listed by name (a group invite): you are added.
+        let group = INVITE.replace("mailto:info@mocky.co.ke", "mailto:team@mocky.co.ke");
+        let text = reply(
+            &group,
+            "info@mocky.co.ke",
+            Some("Mocky, Digital"),
+            Answer::Declined,
+            0,
+        )
+        .unwrap();
+        assert!(text.contains(
+            "ATTENDEE;PARTSTAT=DECLINED;CN=\"Mocky, Digital\":mailto:info@mocky.co.ke\r\n"
+        ));
+    }
+
+    #[test]
+    fn the_calendar_copy_keeps_the_invitation_with_your_answer() {
+        let copy = calendar_copy(INVITE, "info@mocky.co.ke", None, Answer::Tentative).unwrap();
+        assert!(!copy.contains("METHOD:"));
+        assert!(copy.contains("PARTSTAT=TENTATIVE"));
+        assert!(!copy.contains("RSVP=TRUE;CN=info"));
+        assert!(copy.contains("BEGIN:VALARM"));
+        assert_eq!(copy.matches("ATTENDEE").count(), 2);
+        let shown = master(&copy).unwrap();
+        assert_eq!(shown.title, "Site visit: Kilimani");
+        assert_eq!(
+            invitation(&copy, "info@mocky.co.ke")
+                .unwrap()
+                .my_status
+                .as_deref(),
+            Some("tentative")
+        );
+
+        // An answer from Peter updates his line in your copy.
+        let answer = reply(
+            &copy.replace(
+                "PARTSTAT=ACCEPTED;RSVP=TRUE;CN=Peter",
+                "PARTSTAT=NEEDS-ACTION;CN=Peter",
+            ),
+            "peter@client.example",
+            None,
+            Answer::Declined,
+            0,
+        )
+        .unwrap();
+        let updated = apply_reply(&copy, &answer).unwrap();
+        let people = master(&updated).unwrap().attendees;
+        let peter = people
+            .iter()
+            .find(|p| p.email == "peter@client.example")
+            .unwrap();
+        assert_eq!(peter.status.as_deref(), Some("declined"));
+        assert!(apply_reply(&updated, &answer).is_none());
+    }
+
     #[test]
     fn never_panics_on_odd_input() {
         for text in [
@@ -1359,6 +1774,9 @@ mod tests {
             let _ = master(text);
             let _ = edit_event(text, &input(Repeat::Keep), 0);
             let _ = skip_occurrence(text, 0);
+            let _ = invitation(text, "a@b");
+            let _ = reply(text, "a@b", None, Answer::Accepted, 0);
+            let _ = calendar_copy(text, "a@b", None, Answer::Declined);
         }
         assert_eq!(parse_duration("P1DT2H"), Some(93_600));
         assert_eq!(parse_duration("-PT15M"), Some(-900));

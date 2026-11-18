@@ -567,6 +567,24 @@ impl DavClient {
             .await
     }
 
+    /// Store an answered invitation in a calendar, asking the server not to
+    /// email the organiser itself (`Schedule-Reply: F`, RFC 6638): the app
+    /// sends that answer.
+    ///
+    /// # Errors
+    /// As [`Self::put_event`].
+    pub async fn put_answered_event(
+        &self,
+        calendar: &Url,
+        href: Option<&str>,
+        uid: &str,
+        ics: &str,
+        if_match: Option<&str>,
+    ) -> Result<(String, Option<String>), SyncError> {
+        self.put(calendar, href, uid, ics, if_match, Kind::Answered)
+            .await
+    }
+
     async fn put(
         &self,
         book: &Url,
@@ -583,6 +601,9 @@ impl DavClient {
         .map_err(|e| SyncError::Invalid(e.to_string()))?;
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(kind.content_type()));
+        if matches!(kind, Kind::Answered) {
+            headers.insert("Schedule-Reply", HeaderValue::from_static("F"));
+        }
         match (href, if_match) {
             (None, _) => {
                 headers.insert("If-None-Match", HeaderValue::from_static("*"));
@@ -639,6 +660,20 @@ impl DavClient {
         self.delete(calendar, href, if_match, Kind::Event).await
     }
 
+    /// Remove a declined or cancelled invitation from a calendar, without
+    /// the server emailing the organiser (`Schedule-Reply: F`).
+    ///
+    /// # Errors
+    /// As [`Self::delete_event`].
+    pub async fn delete_answered_event(
+        &self,
+        calendar: &Url,
+        href: &str,
+        if_match: Option<&str>,
+    ) -> Result<(), SyncError> {
+        self.delete(calendar, href, if_match, Kind::Answered).await
+    }
+
     async fn delete(
         &self,
         book: &Url,
@@ -652,6 +687,9 @@ impl DavClient {
         let mut headers = HeaderMap::new();
         if let Some(value) = if_match.and_then(|e| HeaderValue::from_str(e).ok()) {
             headers.insert("If-Match", value);
+        }
+        if matches!(kind, Kind::Answered) {
+            headers.insert("Schedule-Reply", HeaderValue::from_static("F"));
         }
         let (_, status, _, _) = self.send(&Method::DELETE, url, headers, None).await?;
         if status.is_success() || status == StatusCode::NOT_FOUND {
@@ -670,27 +708,29 @@ impl DavClient {
 enum Kind {
     Card,
     Event,
+    /// An event that answers an invitation.
+    Answered,
 }
 
 impl Kind {
     fn extension(self) -> &'static str {
         match self {
             Self::Card => "vcf",
-            Self::Event => "ics",
+            Self::Event | Self::Answered => "ics",
         }
     }
 
     fn content_type(self) -> &'static str {
         match self {
             Self::Card => "text/vcard; charset=utf-8",
-            Self::Event => "text/calendar; charset=utf-8",
+            Self::Event | Self::Answered => "text/calendar; charset=utf-8",
         }
     }
 
     fn noun(self) -> &'static str {
         match self {
             Self::Card => "contact",
-            Self::Event => "event",
+            Self::Event | Self::Answered => "event",
         }
     }
 }

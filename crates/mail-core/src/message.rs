@@ -114,6 +114,28 @@ pub struct MessageBody {
     pub attachments: Vec<AttachmentInfo>,
     /// Images referenced from the HTML body.
     pub inline_images: Vec<InlineImage>,
+    /// The first calendar part (`text/calendar`, an invitation or reply),
+    /// as text.
+    pub calendar: Option<String>,
+}
+
+/// Largest calendar part read (1 MiB).
+const MAX_CALENDAR_BYTES: usize = 1024 * 1024;
+
+/// The first `text/calendar` (or `application/ics`) part's text.
+fn calendar_part(message: &Message<'_>) -> Option<String> {
+    message.parts.iter().find_map(|part| {
+        let mime = mime_type(part);
+        let named_ics = part
+            .attachment_name()
+            .is_some_and(|n| n.to_ascii_lowercase().ends_with(".ics"));
+        if mime != "text/calendar" && mime != "application/ics" && !named_ics {
+            return None;
+        }
+        let data = part.contents();
+        (!data.is_empty() && data.len() <= MAX_CALENDAR_BYTES)
+            .then(|| String::from_utf8_lossy(data).into_owned())
+    })
 }
 
 /// Image types that may be shown inline. SVG is excluded: it can carry script.
@@ -294,6 +316,7 @@ pub fn parse_body(raw: &[u8]) -> Result<MessageBody, ParseError> {
         html,
         attachments: attachment_parts(&message).map(attachment_info).collect(),
         inline_images: message.parts.iter().filter_map(inline_image).collect(),
+        calendar: calendar_part(&message),
     })
 }
 

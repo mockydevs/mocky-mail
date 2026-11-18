@@ -245,6 +245,20 @@ impl Store {
         Ok(())
     }
 
+    /// Every stored event of an account's calendars.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn calendar_events_of_account(&self, account_id: &str) -> Result<Vec<StoredEvent>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.calendar_id, e.href, e.etag, e.ics FROM calendar_events e
+             JOIN calendars c ON c.id = e.calendar_id WHERE c.account_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![account_id], event_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Events that may have occurrences between `from` and `to` (Unix
     /// seconds): the caller works out the exact dates.
     ///
@@ -348,6 +362,13 @@ mod tests {
             Some("\"2\"")
         );
 
+        assert_eq!(store.calendar_events_of_account(&account).unwrap().len(), 2);
+        assert!(
+            store
+                .calendar_events_of_account("someone-else")
+                .unwrap()
+                .is_empty()
+        );
         store
             .forget_calendar_events_not_on_server(&cal, &["/c/b.ics".to_owned()])
             .unwrap();

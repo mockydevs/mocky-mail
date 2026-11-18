@@ -930,6 +930,57 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         emit('mail://calendar-changed', { calendars: [] });
       }),
 
+    answerInvitation: (id, answer, notify) =>
+      run('answerInvitation', () => {
+        const m = stored(id);
+        const inv = m.invitation;
+        if (inv?.method !== 'REQUEST') throw appError('invalid', "This isn't an invitation you can answer.");
+        const next = {
+          ...inv,
+          savedStatus: inv.hasCalendar && answer !== 'declined' ? answer : null,
+          calendarEventId: inv.hasCalendar && answer !== 'declined' ? (inv.calendarEventId ?? `e${String(seq++)}`) : null,
+        };
+        messages = messages.map((x) => (x.id === id ? { ...x, invitation: next } : x));
+        const organizer = inv.event.organizer;
+        if (notify && organizer) {
+          const word = answer === 'accepted' ? 'Accepted' : answer === 'tentative' ? 'Tentative' : 'Declined';
+          outbox = [
+            ...outbox,
+            {
+              id: `o${String(seq++)}`,
+              accountId: m.accountId,
+              to: [{ name: organizer.name, address: organizer.email }],
+              subject: `${word}: ${inv.event.title}`,
+              preview: `${word} this invitation.`,
+              createdAt: now(),
+              attempts: 0,
+              status: { state: 'queued', next_attempt_at: now(), maybe_sent: false },
+              progress: null,
+            },
+          ];
+          emit('mail://outbox-changed', { entries: outbox });
+        }
+        return next;
+      }),
+
+    removeCancelledEvent: (id) =>
+      run('removeCancelledEvent', () => {
+        const inv = stored(id).invitation;
+        if (inv?.method !== 'CANCEL') throw appError('invalid', "This event wasn't cancelled.");
+        const next = { ...inv, calendarEventId: null, savedStatus: null };
+        messages = messages.map((x) => (x.id === id ? { ...x, invitation: next } : x));
+        return next;
+      }),
+
+    applyInvitationReply: (id) =>
+      run('applyInvitationReply', () => {
+        const inv = stored(id).invitation;
+        if (!inv?.calendarEventId) throw appError('invalid', "This event isn't in your calendar.");
+        const next = { ...inv, replyPending: false };
+        messages = messages.map((x) => (x.id === id ? { ...x, invitation: next } : x));
+        return next;
+      }),
+
     syncCalendars: () =>
       run(
         'syncCalendars',

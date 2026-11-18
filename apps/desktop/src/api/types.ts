@@ -106,7 +106,33 @@ export type MessageDetail = MessageListItem & {
   /** In-Reply-To of this message (for continuing a saved reply draft). */
   inReplyTo: string | null;
   references: string[];
+  /** A meeting invitation, cancellation or answer in the message. */
+  invitation?: InvitationView | null;
 };
+
+/** Your answer to an invitation. */
+export type Answer = 'accepted' | 'tentative' | 'declined';
+
+/** A meeting invitation in an email, with what your calendar knows of it. */
+export interface InvitationView {
+  /** `REQUEST` (invitation or update), `CANCEL`, `REPLY` (someone's answer), `PUBLISH`. */
+  method: string;
+  /** The event; `id`/`calendarId` are not set (it may not be in a calendar). */
+  event: Omit<CalendarEvent, 'id' | 'calendarId' | 'accountId' | 'color'>;
+  sequence: number;
+  /** Your answer as listed in the invitation. */
+  myStatus: string | null;
+  /** For a `REPLY`: who answered, with their answer in `status`. */
+  replier: EventPerson | null;
+  /** The same event in your calendar. */
+  calendarEventId: string | null;
+  /** Your answer as saved in your calendar. */
+  savedStatus: string | null;
+  /** For a `REPLY`: your calendar doesn't show this answer yet. */
+  replyPending: boolean;
+  /** The account has a calendar to save to. */
+  hasCalendar: boolean;
+}
 
 export type ReadFilter = 'all' | 'unread' | 'flagged';
 
@@ -496,6 +522,12 @@ export interface MailApi {
   deleteEvent(id: string, occurrence: number | null): Promise<void>;
   /** Sync every account's calendars now. */
   syncCalendars(): Promise<CalendarStatus[]>;
+  /** Answer an invitation in a message: saved in your calendar (a decline removes it); with `notify`, the organiser is emailed. */
+  answerInvitation(messageId: string, answer: Answer, notify: boolean): Promise<InvitationView>;
+  /** Take a cancelled event out of your calendar. */
+  removeCancelledEvent(messageId: string): Promise<InvitationView>;
+  /** Record someone's answer to your invitation in your calendar. */
+  applyInvitationReply(messageId: string): Promise<InvitationView>;
   /** The signature a new message (or, with `reply`, a reply or forward) starts with. */
   getSignature(accountId: string, reply?: boolean): Promise<Signature | null>;
   listSignatures(accountId: string): Promise<SignatureSet>;

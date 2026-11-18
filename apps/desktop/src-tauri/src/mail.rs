@@ -107,6 +107,8 @@ pub struct MessageDetail {
     message_id_header: Option<String>,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    /// A meeting invitation (or a cancellation or answer) in the message.
+    invitation: Option<crate::invitations::InvitationView>,
 }
 
 /// `get_message`: the body is downloaded if needed, cleaned and returned.
@@ -124,6 +126,13 @@ pub async fn get_message(
         RemoteContent::Allow
     } else {
         RemoteContent::Block
+    };
+    let invitation = match body.calendar.as_deref() {
+        Some(calendar) => {
+            let account = state.store.get_account(&stored.item.account_id)?;
+            crate::invitations::view(&state, &account, calendar)?
+        }
+        None => None,
     };
     let (html, blocked) = match body.html.as_deref() {
         Some(html) => {
@@ -157,6 +166,7 @@ pub async fn get_message(
         message_id_header: stored.message_id_header,
         in_reply_to: stored.in_reply_to,
         references: stored.references,
+        invitation,
     })
 }
 

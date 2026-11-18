@@ -20,6 +20,7 @@ mod files_android;
 mod folders;
 #[cfg(target_os = "android")]
 mod google_android;
+mod invitations;
 mod mail;
 mod mailto;
 mod message_tools;
@@ -212,6 +213,9 @@ pub fn run() {
             calendar::save_event,
             calendar::delete_event,
             calendar::sync_calendars,
+            invitations::answer_invitation,
+            invitations::remove_cancelled_event,
+            invitations::apply_invitation_reply,
             signatures::get_signature,
             signatures::list_signatures,
             signatures::save_signature,

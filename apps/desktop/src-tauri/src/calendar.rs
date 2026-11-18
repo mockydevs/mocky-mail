@@ -159,7 +159,10 @@ pub fn get_event(state: State<'_, Arc<AppState>>, id: String) -> AppResult<Calen
 }
 
 /// A connection to the calendar server of a calendar's account.
-async fn client_for(state: &AppState, calendar: &Calendar) -> AppResult<(DavClient, Url)> {
+pub(crate) async fn client_for(
+    state: &AppState,
+    calendar: &Calendar,
+) -> AppResult<(DavClient, Url)> {
     let account = state
         .store
         .list_accounts()?
@@ -307,7 +310,7 @@ pub async fn sync_calendars(
     Ok(sync_all(&app, &state).await)
 }
 
-fn changed(app: &AppHandle, statuses: &[CalendarStatus]) {
+pub(crate) fn changed(app: &AppHandle, statuses: &[CalendarStatus]) {
     if let Err(error) = app.emit("mail://calendar-changed", json!({ "calendars": statuses })) {
         eprintln!("couldn't emit calendar-changed: {error}");
     }

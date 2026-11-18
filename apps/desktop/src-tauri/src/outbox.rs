@@ -225,7 +225,11 @@ pub async fn check_draft(state: State<'_, Arc<AppState>>, draft: Draft) -> AppRe
     })
 }
 
-fn folder_path(state: &AppState, account_id: &str, role: FolderRole) -> AppResult<Option<String>> {
+pub(crate) fn folder_path(
+    state: &AppState,
+    account_id: &str,
+    role: FolderRole,
+) -> AppResult<Option<String>> {
     Ok(state
         .store
         .list_folders(account_id)?

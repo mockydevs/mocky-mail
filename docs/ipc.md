@@ -51,6 +51,19 @@ type MessageDetail = MessageListItem & {
   blockedRemoteImages: number;
   attachments: AttachmentMeta[];
   messageIdHeader: string | null; inReplyTo: string | null; references: string[];
+  invitation: InvitationView | null;  // from the first text/calendar part (iMIP)
+};
+
+type InvitationView = {
+  method: string;                     // REQUEST, CANCEL, REPLY, PUBLISH
+  event: CalendarEvent;               // without id, calendarId, accountId, color
+  sequence: number;
+  myStatus: string | null;            // your PARTSTAT in it, lower case
+  replier: { email, name, status } | null;   // for REPLY
+  calendarEventId: string | null;     // the same UID in your calendar
+  savedStatus: string | null;         // your answer as saved there
+  replyPending: boolean;              // REPLY not yet in your calendar copy
+  hasCalendar: boolean;
 };
 
 type ListQuery = {
@@ -143,6 +156,9 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `save_event` | `{ event: { id?, calendarId, title, location, notes, allDay, start, end, repeat: … \| 'keep', timeZone } }` | `CalendarEvent`. Saved on the server first (needs a connection; `If-Match` on edits), then here. New events are written in the device's time zone with a `VTIMEZONE`; edits keep everything the app doesn't show (alarms, attendees, other properties). Choosing another calendar moves the event. |
 | `delete_event` | `{ id, occurrence: number \| null }` | `void`. With `occurrence` (a `recurrenceId`), only that date of a series is removed (an `EXDATE`); otherwise the event or whole series is deleted. |
 | `sync_calendars` | | `{ accountId, state: 'synced' \| 'unavailable' \| 'error', message }[]`. Password accounts sync with CalDAV on their IMAP host (`https://<imap host>/.well-known/caldav`, e.g. SOGo), Basic auth over HTTPS only; calendars that hold events are listed, changed events fetched, and events deleted elsewhere removed. Also runs at start-up and every 15 minutes, and emits `mail://calendar-changed` `{ calendars }` (empty after a change made here). Gmail and Microsoft accounts are `unavailable` for now. |
+| `answer_invitation` | `{ id (message), answer: 'accepted' \| 'tentative' \| 'declined', notify }` | `InvitationView`. For a `METHOD:REQUEST` invitation in the message: the event is saved in the account's calendar with your `PARTSTAT` (into the calendar already holding its `UID`, else the account's personal calendar); a decline removes it. Calendar writes carry `Schedule-Reply: F` so the server doesn't email the organiser as well. With `notify`, a `METHOD:REPLY` email (text note plus `text/calendar; method=REPLY`) to the organiser is queued in the Outbox to send at once. |
+| `remove_cancelled_event` | `{ id }` | `InvitationView` (for a `METHOD:CANCEL`: deletes the event with that `UID` from your calendar) |
+| `apply_invitation_reply` | `{ id }` | `InvitationView` (for a `METHOD:REPLY` to your invitation: the replier's `PARTSTAT` is written into your calendar copy) |
 | `get_signature` | `{ accountId, reply?: boolean }` | `Signature \| null` (the account's default signature for new messages, or with `reply` for replies and forwards; `{ html, text, image? }`, image `{ mimeType, data (base64), width, naturalWidth, naturalHeight }`) |
 | `list_signatures` | `{ accountId }` | `SignatureSet` (`{ items: (Signature & { id, name })[], defaultNew: string \| null, defaultReply: string \| null }`; the single signature older versions stored is moved into the list on first read) |
 | `save_signature` | `{ accountId, id: string \| null, name, html }` | `SignatureSet` (null `id` creates one; the HTML is sanitized like incoming mail; the picture is kept; the first signature becomes both defaults. Sending adds an HTML alternative with the full signature, and its picture as a `multipart/related` part `cid:signature-image@mocky.mail`, for whichever of the account's signatures still has its plain block in the body) |

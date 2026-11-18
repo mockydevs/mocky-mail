@@ -15,6 +15,7 @@ import { Modal } from '../../ui/Modal';
 import { AttachmentViewer } from './AttachmentViewer';
 import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
+import { InvitationCard } from '../calendar/InvitationCard';
 import { ThreadHistory } from './ThreadHistory';
 
 export interface ReaderActions {
@@ -485,6 +486,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
                 </button>
               </div>
             )}
+            {message.invitation && <InvitationCard key={message.id} messageId={message.id} initial={message.invitation} />}
             {attachmentList}
             {viewer}
             {sourceDialog}
@@ -766,6 +768,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
           </div>
         )}
 
+        {message.invitation && <InvitationCard key={message.id} messageId={message.id} initial={message.invitation} />}
         {attachmentList}
         {viewer}
         {sourceDialog}

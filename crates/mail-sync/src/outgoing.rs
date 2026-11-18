@@ -236,6 +236,49 @@ pub fn build(message: &OutgoingMessage) -> Result<BuiltMessage, SyncError> {
     })
 }
 
+/// An answer to an invitation (iMIP, RFC 6047): a short note, and the
+/// `METHOD:REPLY` calendar part calendar apps act on.
+///
+/// # Errors
+/// [`SyncError::Invalid`] for bad addresses.
+pub fn build_calendar_reply(
+    from: &Mailbox,
+    to: &Mailbox,
+    subject: &str,
+    note: &str,
+    ics: &str,
+) -> Result<BuiltMessage, SyncError> {
+    let domain = from
+        .address
+        .rsplit_once('@')
+        .map_or("localhost", |(_, d)| d);
+    let message_id = format!("{}@{domain}", random_token()?);
+    let calendar = SinglePart::builder()
+        .header(
+            ContentType::parse("text/calendar; charset=utf-8; method=REPLY")
+                .map_err(|e| SyncError::Invalid(e.to_string()))?,
+        )
+        .body(ics.to_owned());
+    let email = lettre::Message::builder()
+        .from(to_lettre(from)?)
+        .to(to_lettre(to)?)
+        .subject(display_safe(subject))
+        .message_id(Some(format!("<{message_id}>")))
+        .user_agent("Mocky Mail".to_owned())
+        .multipart(
+            MultiPart::alternative()
+                .singlepart(SinglePart::plain(note.to_owned()))
+                .singlepart(calendar),
+        )
+        .map_err(|e| SyncError::Invalid(e.to_string()))?;
+    Ok(BuiltMessage {
+        raw: email.formatted(),
+        message_id,
+        envelope_from: from.address.clone(),
+        recipients: vec![to.address.clone()],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +288,25 @@ mod tests {
             name: name.map(str::to_owned),
             address: address.to_owned(),
         }
+    }
+
+    #[test]
+    fn invitation_answers_carry_the_reply_part() {
+        let built = build_calendar_reply(
+            &mb("info@mocky.co.ke", Some("Mocky Digital")),
+            &mb("peter@client.example", Some("Peter Mwangi")),
+            "Accepted: Site visit",
+            "Mocky Digital accepted this invitation.",
+            "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let raw = String::from_utf8_lossy(&built.raw);
+        assert!(raw.contains("multipart/alternative"));
+        assert!(raw.contains("text/calendar; charset=utf-8; method=REPLY"));
+        assert!(raw.contains("Subject: Accepted: Site visit"));
+        assert_eq!(built.recipients, ["peter@client.example"]);
+        let body = mail_core::message::parse_body(&built.raw).unwrap_or_else(|e| panic!("{e}"));
+        assert!(body.calendar.unwrap_or_default().contains("METHOD:REPLY"));
     }
 
     fn base() -> OutgoingMessage {
