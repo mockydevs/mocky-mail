@@ -145,7 +145,13 @@ function listItem(m: MockMessage): MessageListItem {
     flagged: m.flagged,
     answered: m.answered,
     hasAttachments: m.hasAttachments,
+    threadCount: 1,
   };
+}
+
+/** The conversation a message belongs to, from its reply headers (as the backend does). */
+function threadKey(m: MockMessage): string {
+  return (m.references[0] ?? m.inReplyTo ?? m.messageIdHeader ?? m.id).toLowerCase();
 }
 
 function clone<T>(value: T): T {
@@ -470,10 +476,41 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
                 .includes(needle),
           )
           .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
-        return {
-          items: matches.slice(query.offset, query.offset + query.limit).map(listItem),
-          total: matches.length,
-        };
+        if (!query.threads) {
+          return {
+            items: matches.slice(query.offset, query.offset + query.limit).map(listItem),
+            total: matches.length,
+          };
+        }
+        // One row per conversation: its newest message, unread if any is.
+        const groups = new Map<string, MockMessage[]>();
+        for (const m of matches) {
+          const key = `${m.accountId}\u0000${threadKey(m)}`;
+          groups.set(key, [...(groups.get(key) ?? []), m]);
+        }
+        const rows = [...groups.values()].map((group) => {
+          const [newest] = group;
+          if (!newest) throw appError('internal', 'empty conversation');
+          return {
+            ...listItem(newest),
+            unread: group.some((m) => m.unread),
+            threadCount: group.length,
+            threadIds: group.map((m) => m.id),
+          };
+        });
+        return { items: rows.slice(query.offset, query.offset + query.limit), total: rows.length };
+      }),
+
+    getThread: (id) =>
+      run('getThread', () => {
+        const message = stored(id);
+        const role = folderOf(message.folderId)?.role;
+        const hideBin = role !== 'trash' && role !== 'junk';
+        return messages
+          .filter((m) => m.accountId === message.accountId && threadKey(m) === threadKey(message))
+          .filter((m) => !hideBin || !['trash', 'junk'].includes(folderOf(m.folderId)?.role ?? ''))
+          .sort((a, b) => (a.date ?? 0) - (b.date ?? 0))
+          .map(listItem);
       }),
 
     getMessage: (id, allowRemote) =>

@@ -35,10 +35,24 @@ pub fn list_folders(state: State<'_, Arc<AppState>>, account_id: &str) -> AppRes
     Ok(state.store.list_folders(account_id)?)
 }
 
-/// `list_messages`.
+/// `list_messages`. With `threads`, one row per conversation.
 #[tauri::command]
-pub fn list_messages(state: State<'_, Arc<AppState>>, query: ListQuery) -> AppResult<MessagePage> {
-    Ok(state.store.list_messages(&query)?)
+pub fn list_messages(
+    state: State<'_, Arc<AppState>>,
+    query: ListQuery,
+    threads: Option<bool>,
+) -> AppResult<MessagePage> {
+    if threads.unwrap_or(false) {
+        Ok(state.store.list_threads(&query)?)
+    } else {
+        Ok(state.store.list_messages(&query)?)
+    }
+}
+
+/// `get_thread`: every message in a message's conversation, oldest first.
+#[tauri::command]
+pub fn get_thread(state: State<'_, Arc<AppState>>, id: String) -> AppResult<Vec<MessageListItem>> {
+    Ok(state.store.get_thread(&id)?)
 }
 
 /// An attachment as listed in the reading pane.

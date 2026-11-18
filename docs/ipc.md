@@ -35,6 +35,8 @@ type MessageListItem = {
   from: Mailbox | null; to: Mailbox[]; subject: string; preview: string;
   date: number | null;      // unix seconds
   unread: boolean; flagged: boolean; answered: boolean; hasAttachments: boolean;
+  threadCount: number;      // 1 unless grouped
+  threadIds?: string[];     // when grouped
 };
 
 type AttachmentMeta = {
@@ -102,7 +104,8 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `create_folder` | `{ accountId, name, parentId: string \| null }` | `void` (IMAP CREATE now, online only; name encoded as modified UTF-7; top-level folders go under `INBOX.` on servers that keep everything there; the folder list is re-read and `mail://changed` emitted) |
 | `rename_folder` | `{ folderId, name }` | `void` (own folders only; built-in ones are refused with `invalid`) |
 | `delete_folder` | `{ folderId }` | `void` (own folders only, and not while they contain folders; the mail in it is deleted on the server) |
-| `list_messages` | `{ query: ListQuery }` | `MessagePage` (newest first) |
+| `list_messages` | `{ query: ListQuery, threads?: boolean }` | `MessagePage` (with `threads`, one row per conversation: its newest matching message, `unread` if any is, `threadCount` and `threadIds` (newest first; actions on the row use all of them); `total` counts conversations. A conversation is the first id in References, else In-Reply-To, else the Message-ID) |
+| `get_thread` | `{ id }` | `MessageListItem[]` (every message in its conversation in the account, sent ones included, oldest first; Trash and Spam left out unless the message is there) |
 | `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read) |
 | `set_flags` | `{ ids, seen?: boolean, flagged?: boolean }` | `void` (local at once, server when online) |
 | `move_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` (a message moved again before the server gave it a new UID is found by Message-ID) |

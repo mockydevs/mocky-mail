@@ -15,6 +15,7 @@ import { Modal } from '../../ui/Modal';
 import { AttachmentViewer } from './AttachmentViewer';
 import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
+import { ThreadHistory } from './ThreadHistory';
 
 export interface ReaderActions {
   onReply: (message: MessageDetail, all: boolean) => void;
@@ -470,6 +471,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
             {viewer}
             {sourceDialog}
             {notices}
+            <ThreadHistory messageId={message.id} theme={theme} />
           </div>
           {isHtml ? (
             <SandboxedHtml
@@ -751,6 +753,8 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
         {sourceDialog}
 
         {notices}
+
+        <ThreadHistory messageId={message.id} theme={theme} />
 
         {!isHtml && <div className="reader__body">{textBody}</div>}
       </div>

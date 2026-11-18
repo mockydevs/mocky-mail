@@ -101,6 +101,16 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
               {label}
             </label>
           ))}
+          <label className="choice">
+            <input
+              type="checkbox"
+              checked={settings.threads}
+              onChange={(e) => {
+                onChange({ ...settings, threads: e.target.checked });
+              }}
+            />
+            Group replies into conversations
+          </label>
         </fieldset>
 
         <fieldset className="settings__group">

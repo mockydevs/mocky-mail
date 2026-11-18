@@ -162,6 +162,7 @@ pub fn run() {
             folders::rename_folder,
             folders::delete_folder,
             mail::list_messages,
+            mail::get_thread,
             mail::get_message,
             mail::set_flags,
             mail::move_messages,

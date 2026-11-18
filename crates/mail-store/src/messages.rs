@@ -99,6 +99,12 @@ pub struct MessageListItem {
     pub answered: bool,
     /// Has attachments.
     pub has_attachments: bool,
+    /// Messages in this conversation shown by the list (1 when not grouped).
+    pub thread_count: u32,
+    /// Their ids, newest first, when grouped; empty otherwise. Actions on a
+    /// conversation row apply to all of them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub thread_ids: Vec<String>,
 }
 
 /// A page of the message list and how many messages match in total.
@@ -211,6 +217,8 @@ impl ItemRow {
             flagged: self.flagged,
             answered: self.answered,
             has_attachments: self.has_attachments,
+            thread_count: 1,
+            thread_ids: Vec::new(),
         })
     }
 }
@@ -507,6 +515,139 @@ impl Store {
             items,
             total: to_u64(total, "message count")?,
         })
+    }
+
+    /// Like [`Store::list_messages`], one row per conversation: its newest
+    /// matching message, unread if any of them is, with how many matched
+    /// and their ids. `total` counts conversations.
+    ///
+    /// # Errors
+    /// Fails on a database error.
+    pub fn list_threads(&self, query: &ListQuery) -> Result<MessagePage> {
+        let search = match fts_query(query.search.as_deref()) {
+            SearchTerms::None => None,
+            SearchTerms::Nothing => {
+                return Ok(MessagePage {
+                    items: Vec::new(),
+                    total: 0,
+                });
+            }
+            SearchTerms::Match(expr) => Some(expr),
+        };
+        let role = query.role.map(role_str);
+        let limit = i64::from(query.limit.min(MAX_PAGE_SIZE));
+        let offset = i64::from(query.offset);
+        let conn = self.conn();
+        let total: i64 = conn
+            .prepare_cached(concat!(
+                "SELECT count(DISTINCT m.account_id || char(0) || coalesce(m.thread_key, m.id))",
+                list_where!()
+            ))?
+            .query_row(
+                params![
+                    query.account_id,
+                    query.folder_id,
+                    role,
+                    query.filter.code(),
+                    search
+                ],
+                |row| row.get(0),
+            )?;
+        let mut stmt = conn.prepare_cached(concat!(
+            "WITH hits AS (SELECT m.seq AS seq, m.id AS id, m.account_id AS account_id,
+                    coalesce(m.thread_key, m.id) AS tk, m.date AS date, m.seen AS seen",
+            list_where!(),
+            "), ranked AS (SELECT seq,
+                    row_number() OVER (PARTITION BY account_id, tk
+                        ORDER BY date IS NULL, date DESC, seq DESC) AS rn,
+                    count(*) OVER whole AS n,
+                    max(seen = 0) OVER whole AS any_unread,
+                    group_concat(id, ',') OVER whole AS ids
+                FROM hits
+                WINDOW whole AS (PARTITION BY account_id, tk))
+             SELECT ",
+            item_columns!(),
+            ", r.n, r.any_unread, r.ids FROM ranked r JOIN messages m ON m.seq = r.seq
+             WHERE r.rn = 1
+             ORDER BY m.date IS NULL, m.date DESC, m.seq DESC LIMIT ?6 OFFSET ?7"
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                query.account_id,
+                query.folder_id,
+                role,
+                query.filter.code(),
+                search,
+                limit,
+                offset
+            ],
+            |row| {
+                Ok((
+                    ItemRow::read(row)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, bool>(14)?,
+                    row.get::<_, String>(15)?,
+                ))
+            },
+        )?;
+        let mut items = Vec::new();
+        for row in rows {
+            let (item, count, any_unread, ids) = row?;
+            let mut item = item.into_item()?;
+            item.thread_count = u32::try_from(count).unwrap_or(1).max(1);
+            item.unread = any_unread;
+            let mut ids: Vec<String> = ids.split(',').map(str::to_owned).collect();
+            // The shown message first.
+            ids.retain(|id| id != &item.id);
+            ids.insert(0, item.id.clone());
+            item.thread_ids = ids;
+            items.push(item);
+        }
+        Ok(MessagePage {
+            items,
+            total: to_u64(total, "conversation count")?,
+        })
+    }
+
+    /// Every message in a message's conversation in its account, oldest
+    /// first: received and sent, in any folder except Trash and Spam
+    /// (unless the message itself is there).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] for an unknown id.
+    pub fn get_thread(&self, id: &str) -> Result<Vec<MessageListItem>> {
+        let conn = self.conn();
+        let (account_id, key, role): (String, String, String) = conn
+            .query_row(
+                "SELECT m.account_id, coalesce(m.thread_key, m.id), f.role
+                 FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("message"))?;
+        let hide_bin = role != "trash" && role != "junk";
+        let mut stmt = conn.prepare_cached(concat!(
+            "SELECT ",
+            item_columns!(),
+            " FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE m.account_id = ?1 AND coalesce(m.thread_key, m.id) = ?2
+               AND (?3 = 0 OR f.role NOT IN ('trash', 'junk'))
+             ORDER BY m.date IS NULL, m.date ASC, m.seq ASC LIMIT 200"
+        ))?;
+        let rows = stmt.query_map(params![account_id, key, hide_bin], ItemRow::read)?;
+        let mut items: Vec<MessageListItem> = Vec::new();
+        for row in rows {
+            let item = row?.into_item()?;
+            // The same message can sit in two folders (Gmail labels): show it once.
+            if !items
+                .iter()
+                .any(|i| i.date == item.date && i.subject == item.subject && i.from == item.from)
+            {
+                items.push(item);
+            }
+        }
+        Ok(items)
     }
 
     /// Change flags on messages; `None` leaves a flag as it is. Returns how
@@ -1445,5 +1586,78 @@ mod tests {
             prop_assert_eq!(seen.len(), count as usize);
             prop_assert_eq!(unique.len(), seen.len());
         }
+    }
+
+    /// A reply in a conversation started by `root`.
+    fn reply(
+        subject: &str,
+        date: i64,
+        root: &str,
+        parent: &str,
+    ) -> mail_core::message::MessageSummary {
+        let mut m = summary(subject, date);
+        m.in_reply_to = Some(parent.to_owned());
+        m.references = vec![root.to_owned(), parent.to_owned()];
+        m
+    }
+
+    #[test]
+    fn conversations_show_once_with_their_newest_message() {
+        let f = fixture();
+        let sent = add_folder(&f.store, &f.account, "Sent", FolderRole::Sent);
+        let trash = add_folder(&f.store, &f.account, "Trash", FolderRole::Trash);
+        // A quote, my reply (in Sent), and their answer; plus an unrelated message.
+        let quote = summary("Quote", 100);
+        let root = quote.message_id.clone().unwrap_or_default();
+        add_message(&f.store, &f.inbox, 1, &quote);
+        add_message(&f.store, &sent, 1, &reply("Re: Quote", 200, &root, &root));
+        let answer = add_message(
+            &f.store,
+            &f.inbox,
+            2,
+            &reply("Re: Quote", 300, &root, "mine@x"),
+        );
+        add_message(&f.store, &f.inbox, 3, &summary("Lunch", 250));
+        add_message(&f.store, &trash, 1, &reply("Re: Quote", 50, &root, &root));
+
+        let inbox = ListQuery {
+            folder_id: Some(f.inbox.clone()),
+            ..query()
+        };
+        let page = f.store.list_threads(&inbox).unwrap();
+        assert_eq!(subjects(&page), ["Re: Quote", "Lunch"]);
+        assert_eq!(page.total, 2);
+        let thread = &page.items[0];
+        assert_eq!(thread.id, answer);
+        // Two of the three are in the Inbox; the row acts on those two.
+        assert_eq!(thread.thread_count, 2);
+        assert_eq!(thread.thread_ids.len(), 2);
+        assert_eq!(thread.thread_ids[0], answer);
+        // Unread because one of them is.
+        assert!(thread.unread);
+        // Ungrouped lists are unchanged.
+        assert_eq!(f.store.list_messages(&inbox).unwrap().total, 3);
+
+        // Opening it shows the whole conversation in order, Sent included,
+        // Trash left out.
+        let all = f.store.get_thread(&answer).unwrap();
+        assert_eq!(
+            all.iter().map(|m| m.date).collect::<Vec<_>>(),
+            [Some(100), Some(200), Some(300)]
+        );
+    }
+
+    #[test]
+    fn messages_without_reply_headers_stand_alone() {
+        let f = fixture();
+        let mut a = summary("Same subject", 1);
+        a.message_id = None;
+        let mut b = summary("Same subject", 2);
+        b.message_id = None;
+        add_message(&f.store, &f.inbox, 1, &a);
+        let only = add_message(&f.store, &f.inbox, 2, &b);
+        let page = f.store.list_threads(&query()).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(f.store.get_thread(&only).unwrap().len(), 1);
     }
 }

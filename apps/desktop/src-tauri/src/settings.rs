@@ -25,6 +25,8 @@ pub struct Settings {
     /// "open" (as soon as a message is opened), "delay" (after a few
     /// seconds open) or "manual" (only with Mark as read).
     pub mark_read: String,
+    /// Group replies with the message they answer, as one conversation.
+    pub threads: bool,
 }
 
 /// Undo-send choices offered in Settings.
@@ -39,6 +41,7 @@ impl Default for Settings {
             sound: true,
             undo_send_secs: 5,
             mark_read: "open".into(),
+            threads: true,
         }
     }
 }
@@ -106,6 +109,7 @@ mod tests {
             sound: false,
             undo_send_secs: 7,
             mark_read: "sometimes".into(),
+            threads: false,
         }
         .normalized();
         assert_eq!(s.theme, "system");

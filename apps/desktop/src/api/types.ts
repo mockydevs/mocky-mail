@@ -76,6 +76,10 @@ export interface MessageListItem {
   flagged: boolean;
   answered: boolean;
   hasAttachments: boolean;
+  /** Messages in this conversation shown by the list (1, or missing, when not grouped). */
+  threadCount?: number;
+  /** Their ids, newest first, when grouped. Actions on the row apply to all of them. */
+  threadIds?: string[];
 }
 
 /** How the in-app preview shows an attachment. */
@@ -256,6 +260,8 @@ export interface Settings {
   undoSendSecs: number;
   /** When an opened message counts as read. */
   markRead: MarkReadSetting;
+  /** Group replies with the message they answer, as one conversation. */
+  threads: boolean;
 }
 
 /** "open": as soon as it is opened; "delay": after a few seconds open; "manual": only with Mark as read. */
@@ -336,7 +342,10 @@ export interface MailApi {
   renameFolder(folderId: string, name: string): Promise<void>;
   /** Delete one of the user's own folders and the mail in it. */
   deleteFolder(folderId: string): Promise<void>;
-  listMessages(query: ListQuery): Promise<MessagePage>;
+  /** With `threads`, one row per conversation (its newest message). */
+  listMessages(query: ListQuery & { threads?: boolean }): Promise<MessagePage>;
+  /** Every message in this message's conversation, oldest first (Trash and Spam left out). */
+  getThread(id: string): Promise<MessageListItem[]>;
   getMessage(id: string, allowRemote: boolean): Promise<MessageDetail>;
   setFlags(ids: string[], change: FlagChange): Promise<void>;
   moveMessages(ids: string[], target: MoveTarget): Promise<void>;

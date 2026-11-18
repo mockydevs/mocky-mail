@@ -6,7 +6,7 @@ import type { AppError, ListQuery, MailApi, MessageListItem } from '../../api/ty
 export const PAGE_SIZE = 50;
 const MAX_LIMIT = 200;
 
-export type PageQuery = Omit<ListQuery, 'offset' | 'limit'>;
+export type PageQuery = Omit<ListQuery, 'offset' | 'limit'> & { threads?: boolean };
 
 export interface MessagePageState {
   status: 'loading' | 'ready' | 'error';

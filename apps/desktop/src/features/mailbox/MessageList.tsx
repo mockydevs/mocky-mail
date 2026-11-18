@@ -205,6 +205,11 @@ export function MessageList(props: Props) {
                       <span className="row__top">
                         {m.unread && <span className="row__unread" aria-label="Unread" />}
                         <span className="row__who">{who(m, outgoing)}</span>
+                        {(m.threadCount ?? 1) > 1 && (
+                          <span className="row__count" aria-label={`${String(m.threadCount)} messages in this conversation`}>
+                            {m.threadCount}
+                          </span>
+                        )}
                         {m.answered && (
                           <span className="row__icon" aria-label="Replied">
                             <Icon name="answered" size={14} />

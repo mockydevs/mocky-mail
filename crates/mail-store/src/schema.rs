@@ -181,8 +181,39 @@ CREATE UNIQUE INDEX contacts_href ON contacts (account_id, href) WHERE href IS N
 CREATE INDEX contacts_sort ON contacts (sort_name COLLATE NOCASE);
 ";
 
+/// Version 4: conversations. A message's thread is the first id in its
+/// References (the conversation's first message), else what it replies
+/// to, else its own Message-ID: the headers every mail client writes.
+const V4: &str = r"
+ALTER TABLE messages ADD COLUMN thread_key TEXT;
+UPDATE messages SET thread_key = lower(trim(coalesce(
+    nullif(json_extract(references_json, '$[0]'), ''),
+    nullif(in_reply_to, ''),
+    nullif(message_id_header, ''),
+    id), '<> '));
+CREATE INDEX messages_thread ON messages (account_id, thread_key);
+CREATE TRIGGER messages_thread_key_insert AFTER INSERT ON messages BEGIN
+    UPDATE messages SET thread_key = lower(trim(coalesce(
+        nullif(json_extract(new.references_json, '$[0]'), ''),
+        nullif(new.in_reply_to, ''),
+        nullif(new.message_id_header, ''),
+        new.id), '<> '))
+    WHERE seq = new.seq;
+END;
+-- Rows are inserted first and their headers filled in after.
+CREATE TRIGGER messages_thread_key_update
+AFTER UPDATE OF references_json, in_reply_to, message_id_header ON messages BEGIN
+    UPDATE messages SET thread_key = lower(trim(coalesce(
+        nullif(json_extract(new.references_json, '$[0]'), ''),
+        nullif(new.in_reply_to, ''),
+        nullif(new.message_id_header, ''),
+        new.id), '<> '))
+    WHERE seq = new.seq;
+END;
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {

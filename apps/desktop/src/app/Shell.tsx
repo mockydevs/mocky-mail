@@ -59,6 +59,12 @@ const NOTICE_MS = 4000;
 /** "Mark as read after a few seconds": how long a message must stay open. */
 const MARK_READ_DELAY_MS = 3000;
 
+/** The messages a list row stands for: the whole conversation when grouped. */
+function idsOf(item: MessageListItem | undefined, fallback = ''): string[] {
+  if (!item) return fallback ? [fallback] : [];
+  return item.threadIds && item.threadIds.length > 0 ? item.threadIds : [item.id];
+}
+
 /** The toast for a message the user just sent, if one is being followed. */
 function sendNoticeOf(status: SendStatus | null, undo: (id: string) => void): Notice | null {
   switch (status?.phase) {
@@ -109,6 +115,7 @@ const DEFAULT_SETTINGS: Settings = {
   sound: false,
   undoSendSecs: 5,
   markRead: 'open',
+  threads: true,
 };
 
 /**
@@ -239,7 +246,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [filter, setFilter] = useState<ReadFilter>('all');
   const [searchInput, setSearchInput] = useState('');
   const search = useDebounced(searchInput, SEARCH_DEBOUNCE_MS);
-  const query = viewQuery(view, filter, search);
+  const baseQuery = viewQuery(view, filter, search);
+  const threads = settings?.threads ?? true;
+  const query = baseQuery && { ...baseQuery, threads };
   const page = useMessagePage(api, query, revision);
   const [overrides, setOverrides] = useState<Record<string, Override>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -335,7 +344,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
 
   const markRead = (id: string) => {
-    optimistic([id], { unread: false }, () => api.setFlags([id], { seen: true }), 'Could not mark as read');
+    const ids = idsOf(items.find((m) => m.id === id), id);
+    optimistic([id], { unread: false }, () => api.setFlags(ids, { seen: true }), 'Could not mark as read');
   };
 
   // "Mark as read after a few seconds": a quick peek leaves it unread.
@@ -373,7 +383,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     optimistic(
       [item.id],
       { removed: true },
-      () => api.moveMessages([item.id], { role: target }),
+      () => api.moveMessages(idsOf(item), { role: target }),
       target === 'archive' ? 'Could not archive' : 'Could not delete',
       restore(item),
     );
@@ -396,7 +406,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     optimistic(
       [item.id],
       { removed: false },
-      () => api.moveMessages([item.id], { folderId: item.folderId }),
+      () => api.moveMessages(idsOf(item), { folderId: item.folderId }),
       'Could not undo',
     );
   };
@@ -404,7 +414,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const deleteForever = (item: MessageListItem) => {
     setSelectedId(phone ? null : neighbourAfterRemoval(items, item.id));
     setPinned(null);
-    optimistic([item.id], { removed: true }, () => api.deleteForever([item.id]), 'Could not delete', restore(item));
+    optimistic([item.id], { removed: true }, () => api.deleteForever(idsOf(item)), 'Could not delete', restore(item));
   };
 
   const deleteItem = (item: MessageListItem) => {
@@ -421,7 +431,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     optimistic(
       [item.id],
       { unread: !item.unread },
-      () => api.setFlags([item.id], { seen: item.unread }),
+      () => api.setFlags(idsOf(item), { seen: item.unread }),
       'Could not change read state',
     );
   };

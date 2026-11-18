@@ -219,6 +219,8 @@ mod tests {
             flagged: false,
             answered: false,
             has_attachments: false,
+            thread_count: 1,
+            thread_ids: Vec::new(),
         }
     }
 

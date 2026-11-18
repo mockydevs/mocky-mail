@@ -234,4 +234,5 @@ export const MOCK_SETTINGS: Settings = {
   sound: true,
   undoSendSecs: 5,
   markRead: 'open',
+  threads: true,
 };

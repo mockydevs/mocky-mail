@@ -3317,3 +3317,80 @@ button.contact-row:hover,
   gap: 12px;
   margin-top: 16px;
 }
+
+/* Number of messages in a conversation, after the sender. */
+.row__count {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--list);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+/* Earlier messages of the open conversation, folded to one line each. */
+.thread {
+  display: flex;
+  flex-direction: column;
+  margin: 16px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.thread__item + .thread__item {
+  border-top: 1px solid var(--border);
+}
+
+.thread__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 0;
+  background: var(--list);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thread__who {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread__preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread__when {
+  flex: none;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.thread__body {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px 12px;
+}
+
+.thread__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
