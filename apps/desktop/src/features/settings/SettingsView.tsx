@@ -7,6 +7,7 @@ import { ConfirmDialog } from '../../ui/Modal';
 import { Icon } from '../../ui/Icon';
 import { PasswordField } from '../../ui/PasswordField';
 import { reminderText } from '../calendar/calendarTime';
+import { OutOfOffice } from './OutOfOffice';
 import { playChime } from '../notifications/chime';
 import { accountErrorCopy } from '../accounts/providers';
 import { SignatureEditor } from './SignatureEditor';
@@ -265,6 +266,8 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
               If nothing appears, check that notifications are allowed for Mocky Mail in your system settings.
             </p>
           </fieldset>
+
+          {accounts.length > 0 && <OutOfOffice accounts={accounts} />}
 
           <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`}>
             <h2 id={`${id}-accounts`} className="settings__legend">

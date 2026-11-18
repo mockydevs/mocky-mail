@@ -4029,3 +4029,34 @@ button.contact-row:hover,
   opacity: 1;
   cursor: default;
 }
+
+/* Automatic replies (Settings). */
+.ooo {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ooo__status {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--list);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.ooo__status--on {
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.ooo__dates {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ooo__message {
+  resize: vertical;
+}

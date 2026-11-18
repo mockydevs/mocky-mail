@@ -5,6 +5,7 @@ import type {
   AddressBookStatus,
   CalendarInfo,
   CalendarStatus,
+  OutOfOffice,
   Contact,
   AttachmentMeta,
   Focus,
@@ -56,6 +57,8 @@ export interface MockOptions {
   calendars?: CalendarInfo[];
   /** Stored events; default: a few sample events. */
   events?: MockEvent[];
+  /** Automatic replies by account id; missing: available and off. */
+  outOfOffice?: Record<string, OutOfOffice>;
   /** Calendar status per account; default: every account synced. */
   calendarStatus?: CalendarStatus[];
   /** Address book status per account; default: every account synced. */
@@ -225,6 +228,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   let contacts: Contact[] = clone(options.contacts ?? []);
   const calendars: CalendarInfo[] = clone(options.calendars ?? MOCK_CALENDARS);
   let events: MockEvent[] = clone(options.events ?? MOCK_EVENTS);
+  const outOfOffice = new Map<string, OutOfOffice>(Object.entries(clone(options.outOfOffice ?? {})));
   const outboxDrafts = new Map<string, Draft>();
   /** Attachments of drafts saved in this session, by message id. */
   const draftFiles = new Map<string, DraftAttachment[]>();
@@ -979,6 +983,39 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         const next = { ...inv, replyPending: false };
         messages = messages.map((x) => (x.id === id ? { ...x, invitation: next } : x));
         return next;
+      }),
+
+    getOutOfOffice: (accountId) =>
+      run('getOutOfOffice', () => {
+        if (!accounts.some((a) => a.id === accountId)) throw appError('not_found', 'That account was removed.');
+        return (
+          outOfOffice.get(accountId) ?? {
+            accountId,
+            available: true,
+            message: null,
+            active: false,
+            settings: { enabled: false, subject: 'Out of office', message: '', start: null, end: null, days: 1 },
+          }
+        );
+      }),
+
+    setOutOfOffice: (accountId, settings) =>
+      run('setOutOfOffice', () => {
+        const current = outOfOffice.get(accountId);
+        if (current && !current.available) throw appError('invalid', current.message ?? 'Not available.');
+        if (settings.enabled && !settings.message.trim()) throw appError('invalid', 'Write the reply people will get.');
+        if (settings.start && settings.end && settings.end < settings.start) {
+          throw appError('invalid', 'The last day is before the first.');
+        }
+        const saved: OutOfOffice = {
+          accountId,
+          available: true,
+          message: null,
+          active: settings.enabled,
+          settings: { ...settings, subject: settings.subject.trim() || 'Out of office', message: settings.message.trim() },
+        };
+        outOfOffice.set(accountId, saved);
+        return saved;
       }),
 
     syncCalendars: () =>

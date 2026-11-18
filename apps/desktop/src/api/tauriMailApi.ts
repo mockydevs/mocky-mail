@@ -69,6 +69,8 @@ export function createTauriMailApi(): MailApi {
     answerInvitation: (id, answer, notify) => call('answer_invitation', { id, answer, notify }),
     removeCancelledEvent: (id) => call('remove_cancelled_event', { id }),
     applyInvitationReply: (id) => call('apply_invitation_reply', { id }),
+    getOutOfOffice: (accountId) => call('get_out_of_office', { accountId }),
+    setOutOfOffice: (accountId, settings) => call('set_out_of_office', { accountId, settings }),
     getSignature: (accountId, reply) => call('get_signature', { accountId, reply: reply ?? false }),
     listSignatures: (accountId) => call('list_signatures', { accountId }),
     saveSignature: (accountId, id, name, html) => call('save_signature', { accountId, id, name, html }),

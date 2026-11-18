@@ -110,6 +110,31 @@ export type MessageDetail = MessageListItem & {
   invitation?: InvitationView | null;
 };
 
+/** Automatic replies (out of office), kept on the mail server. */
+export interface Vacation {
+  enabled: boolean;
+  subject: string;
+  message: string;
+  /** First day, `YYYY-MM-DD`; null from now. */
+  start: string | null;
+  /** Last day, `YYYY-MM-DD`; null until switched off. */
+  end: string | null;
+  /** Days before the same sender gets the reply again. */
+  days: number;
+}
+
+/** An account's automatic replies. */
+export interface OutOfOffice {
+  accountId: string;
+  /** The server can send automatic replies for this account. */
+  available: boolean;
+  /** Why not, in plain words. */
+  message: string | null;
+  /** Replies are on at the server now. */
+  active: boolean;
+  settings: Vacation;
+}
+
 /** Your answer to an invitation. */
 export type Answer = 'accepted' | 'tentative' | 'declined';
 
@@ -536,6 +561,10 @@ export interface MailApi {
   removeCancelledEvent(messageId: string): Promise<InvitationView>;
   /** Record someone's answer to your invitation in your calendar. */
   applyInvitationReply(messageId: string): Promise<InvitationView>;
+  /** An account's automatic replies, read from its mail server. */
+  getOutOfOffice(accountId: string): Promise<OutOfOffice>;
+  /** Save automatic replies on the mail server (switching them on or off). */
+  setOutOfOffice(accountId: string, settings: Vacation): Promise<OutOfOffice>;
   /** The signature a new message (or, with `reply`, a reply or forward) starts with. */
   getSignature(accountId: string, reply?: boolean): Promise<Signature | null>;
   listSignatures(accountId: string): Promise<SignatureSet>;

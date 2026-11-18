@@ -24,6 +24,7 @@ mod invitations;
 mod mail;
 mod mailto;
 mod message_tools;
+mod out_of_office;
 mod outbox;
 mod reminders;
 mod settings;
@@ -216,6 +217,8 @@ pub fn run() {
             calendar::delete_event,
             calendar::sync_calendars,
             invitations::answer_invitation,
+            out_of_office::get_out_of_office,
+            out_of_office::set_out_of_office,
             invitations::remove_cancelled_event,
             invitations::apply_invitation_reply,
             signatures::get_signature,
