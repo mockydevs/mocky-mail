@@ -120,8 +120,8 @@ export const MOCK_MESSAGES: MockMessage[] = [
       'Thanks,\nWanjiru',
     ),
     attachments: [
-      { index: 0, fileName: 'Quotation-Westlands-rev2.pdf', mimeType: 'application/pdf', size: 412 * 1024 },
-      { index: 1, fileName: 'Floor-plan.png', mimeType: 'image/png', size: Math.round(1.8 * MB) },
+      { index: 0, fileName: 'Quotation-Westlands-rev2.pdf', mimeType: 'application/pdf', size: 412 * 1024, preview: 'pdf' },
+      { index: 1, fileName: 'Floor-plan.png', mimeType: 'image/png', size: Math.round(1.8 * MB), preview: 'image' },
     ],
     references: ['<q-2040@fitout.example>'],
   }),
@@ -152,7 +152,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     preview: 'Here are the final logo files in SVG, PNG and PDF, plus the white version.',
     date: at('2026-11-12T13:20:00Z'), flagged: true,
     text: para('Hi,', 'Here are the final logo files in SVG, PNG and PDF.', 'Amina'),
-    attachments: [{ index: 0, fileName: 'Logo-final.zip', mimeType: 'application/zip', size: Math.round(6.4 * MB) }],
+    attachments: [{ index: 0, fileName: 'Logo-final.zip', mimeType: 'application/zip', size: Math.round(6.4 * MB), preview: null }],
   }),
   message({
     id: 'm5', accountId: 'work', folderId: 'work:inbox',
@@ -169,7 +169,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     preview: 'Payment received, thank you. Receipt attached for your records.',
     date: at('2026-11-11T12:47:00Z'), answered: true,
     text: para('Hello,', 'Payment for INV-0142 has gone through.', 'Regards,\nPeter'),
-    attachments: [{ index: 0, fileName: 'Receipt-INV-0142.pdf', mimeType: 'application/pdf', size: 96 * 1024 }],
+    attachments: [{ index: 0, fileName: 'Receipt-INV-0142.pdf', mimeType: 'application/pdf', size: 96 * 1024, preview: 'pdf' }],
   }),
   message({
     id: 'm7', accountId: 'personal', folderId: 'personal:inbox',
@@ -178,7 +178,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     preview: 'Finally sorted through them. The ones from Naivasha came out really well.',
     date: at('2026-11-10T17:12:00Z'),
     text: para('Finally sorted through them. The ones from Naivasha came out really well.'),
-    attachments: [{ index: 0, fileName: 'Naivasha.zip', mimeType: 'application/zip', size: Math.round(18.2 * MB) }],
+    attachments: [{ index: 0, fileName: 'Naivasha.zip', mimeType: 'application/zip', size: Math.round(18.2 * MB), preview: null }],
   }),
   message({
     id: 'd1', accountId: 'personal', folderId: 'personal:drafts',
@@ -188,7 +188,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     date: at('2026-11-13T07:14:00Z'), text: 'Friday works. 1pm at',
     inReplyTo: '<lunch-1@personal.example>',
     references: ['<lunch-1@personal.example>'],
-    attachments: [{ index: 0, fileName: 'Menu.pdf', mimeType: 'application/pdf', size: 220 * 1024 }],
+    attachments: [{ index: 0, fileName: 'Menu.pdf', mimeType: 'application/pdf', size: 220 * 1024, preview: 'pdf' }],
   }),
   message({
     id: 's1', accountId: 'work', folderId: 'work:sent',

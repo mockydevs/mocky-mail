@@ -21,6 +21,7 @@ use mail_sync::smtp;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
+use crate::attachments::MAX_ATTACHMENT_BYTES;
 use crate::convert::to_sync;
 use crate::credentials;
 use crate::error::{AppError, AppResult};
@@ -32,7 +33,6 @@ use crate::sync::{self, Op};
 /// Size limit when the account doesn't say (most providers allow 25 MB).
 const DEFAULT_LIMIT: u64 = 25 * 1024 * 1024;
 /// Largest single attachment read from disk.
-const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 /// Longest the worker sleeps between checks.
 const MAX_IDLE: Duration = Duration::from_secs(30);
 

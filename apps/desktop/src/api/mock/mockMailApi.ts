@@ -2,6 +2,7 @@ import { appError, MailError, toAppError } from '../errors';
 import { parseRecipients } from '../../features/compose/recipients';
 import type {
   Account,
+  AttachmentMeta,
   AppError,
   Draft,
   Signature,
@@ -50,6 +51,32 @@ export interface MockMailApi extends MailApi {
   failNext(method: Method, error: AppError): void;
   /** URLs passed to openExternal, for assertions. */
   readonly opened: string[];
+  /** File names passed to openAttachment, for assertions. */
+  readonly openedFiles: string[];
+}
+
+/** 1x1 PNG, a one-line PDF and some text: what the dev preview shows. */
+const MOCK_PNG = Uint8Array.from(
+  atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
+  (c) => c.charCodeAt(0),
+);
+const MOCK_PDF = [
+  '%PDF-1.4',
+  '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj',
+  '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj',
+  '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 160]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj',
+  '4 0 obj<</Length 44>>stream',
+  'BT /F1 18 Tf 40 80 Td (Sample attachment) Tj ET',
+  'endstream endobj',
+  '5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj',
+  'trailer<</Root 1 0 R>>',
+  '%%EOF',
+].join('\n');
+
+function mockBytes(kind: AttachmentMeta['preview']): ArrayBuffer {
+  if (kind === 'image') return MOCK_PNG.slice().buffer;
+  const text = kind === 'pdf' ? MOCK_PDF : 'Sample attachment text.\nSecond line.';
+  return new TextEncoder().encode(text).slice().buffer;
 }
 
 const PALETTE = ['#2450C8', '#0F7B6C', '#8A3FB0', '#B5471B', '#1E6B3A', '#A1356B'];
@@ -147,6 +174,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const handlers = new Map<MailEventName, Set<Handler>>();
   const failures = new Map<Method, AppError>();
   const opened: string[] = [];
+  const openedFiles: string[] = [];
   let seq = 1;
 
   const emit = <E extends MailEventName>(event: E, payload: MailEvents[E]) => {
@@ -221,6 +249,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
 
   const api: MockMailApi = {
     opened,
+    openedFiles,
     emit,
     failNext(method, error) {
       failures.set(method, error);
@@ -407,6 +436,23 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         return `/home/you/Downloads/${file.fileName}`;
       }),
 
+    previewAttachment: (messageId, index) =>
+      run('previewAttachment', () => {
+        const file = stored(messageId).attachments.find((a) => a.index === index);
+        if (!file) throw appError('not_found', 'That attachment is no longer available.');
+        if (file.preview === null) {
+          throw appError('invalid', `${file.fileName} can't be shown here. Open it in another app or save it.`);
+        }
+        return mockBytes(file.preview);
+      }),
+
+    openAttachment: (messageId, index) =>
+      run('openAttachment', () => {
+        const file = stored(messageId).attachments.find((a) => a.index === index);
+        if (!file) throw appError('not_found', 'That attachment is no longer available.');
+        openedFiles.push(file.fileName);
+      }),
+
     pickAttachments: () =>
       run(
         'pickAttachments',
@@ -477,6 +523,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
               fileName: a.fileName,
               mimeType: 'application/octet-stream',
               size: a.size,
+              preview: null,
             })),
             messageIdHeader: draftMessageId,
             inReplyTo: draft.inReplyTo,

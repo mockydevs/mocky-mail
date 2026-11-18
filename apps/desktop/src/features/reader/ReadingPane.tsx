@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useRef, useState, type SyntheticEvent } from 're
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, FolderRole, MessageDetail, MessageListItem } from '../../api/types';
+import type { Account, AppError, AttachmentMeta, FolderRole, MessageDetail, MessageListItem } from '../../api/types';
 import { formatBytes, formatListTime, formatLongDate, nowSeconds } from '../../lib/format';
 import { useLoad } from '../../lib/useLoad';
 import type { Theme } from '../../theme/useTheme';
@@ -10,6 +10,7 @@ import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
 import { formatMailbox, formatMailboxes, replyDraft, toolbarActions, withSignature } from '../compose/seed';
 import { useSendStatus } from '../outbox/useSendStatus';
+import { AttachmentViewer } from './AttachmentViewer';
 import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
 
@@ -68,6 +69,8 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
     }),
   );
   const [notice, setNotice] = useState<{ error: AppError | null; text: string | null }>({ error: null, text: null });
+  // The attachment shown full screen, if any.
+  const [viewing, setViewing] = useState<AttachmentMeta | null>(null);
   // Phone layout only.
   const [details, setDetails] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -110,7 +113,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
     setNotice({ error: null, text: null });
     api.saveAttachment(message.id, index).then(
       (path) => {
-        if (path !== null) setNotice({ error: null, text: `Saved to ${path}` });
+        if (path !== null) setNotice({ error: null, text: `Saved: ${path}` });
       },
       (e: unknown) => {
         setNotice({ error: toAppError(e), text: null });
@@ -118,17 +121,43 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
     );
   };
 
+  const openInApp = (index: number) => {
+    setNotice({ error: null, text: null });
+    api.openAttachment(message.id, index).catch((e: unknown) => {
+      setNotice({ error: toAppError(e), text: null });
+    });
+  };
+
+  // Tap: photos, PDFs and text open in the preview; anything else goes
+  // straight to the app the device uses for it (Word, Excel, zip…).
+  const view = (file: AttachmentMeta) => {
+    if (file.preview === null) openInApp(file.index);
+    else {
+      setNotice({ error: null, text: null });
+      setViewing(file);
+    }
+  };
+
   const attachmentList = message.attachments.length > 0 && (
     <ul className="attachments" aria-label="Attachments">
       {message.attachments.map((file) => (
         <li key={file.index} className="attachment">
-          <span className="attachment__icon" aria-hidden="true">
-            {fileBadge(file.fileName)}
-          </span>
-          <span className="attachment__text">
-            <span className="attachment__name">{file.fileName}</span>
-            <span className="muted small">{formatBytes(file.size)}</span>
-          </span>
+          <button
+            type="button"
+            className="attachment__open"
+            aria-label={file.preview === null ? `Open ${file.fileName} in another app` : `Preview ${file.fileName}`}
+            onClick={() => {
+              view(file);
+            }}
+          >
+            <span className="attachment__icon" aria-hidden="true">
+              {fileBadge(file.fileName)}
+            </span>
+            <span className="attachment__text">
+              <span className="attachment__name">{file.fileName}</span>
+              <span className="muted small">{formatBytes(file.size)}</span>
+            </span>
+          </button>
           <button
             type="button"
             className="icon-btn"
@@ -142,6 +171,23 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
         </li>
       ))}
     </ul>
+  );
+
+  const viewer = viewing && (
+    <AttachmentViewer
+      messageId={message.id}
+      file={viewing}
+      onClose={() => {
+        setViewing(null);
+      }}
+      onSave={() => {
+        save(viewing.index);
+      }}
+      onOpen={() => {
+        openInApp(viewing.index);
+      }}
+      notice={notice}
+    />
   );
 
   const notices = (
@@ -334,6 +380,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
               </div>
             )}
             {attachmentList}
+            {viewer}
             {notices}
           </div>
           {isHtml ? (
@@ -580,6 +627,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
         )}
 
         {attachmentList}
+        {viewer}
 
         {notices}
 

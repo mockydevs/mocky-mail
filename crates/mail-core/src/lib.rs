@@ -11,5 +11,6 @@ pub mod folders;
 pub mod limits;
 pub mod message;
 pub mod outbox;
+pub mod preview;
 pub mod sanitize;
 pub mod signature;

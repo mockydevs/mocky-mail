@@ -887,6 +887,26 @@ button:disabled {
   background: var(--file-other);
 }
 
+/* The name and icon open the file; the download button beside it saves. */
+.attachment__open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attachment__open:hover .attachment__name {
+  text-decoration: underline;
+}
+
 .attachment__icon--pdf { background: var(--file-pdf); }
 .attachment__icon--image { background: var(--file-image); }
 
@@ -2765,4 +2785,137 @@ kbd {
 .update-bar__actions {
   display: flex;
   gap: 6px;
+}
+
+/* Attachment preview: full screen, dark behind photos and pages. */
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: #141416;
+  color: #f2f2f3;
+}
+
+.viewer__bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: calc(6px + env(safe-area-inset-top, 0px)) 6px 6px;
+  background: #1f1f22;
+}
+
+.viewer .viewer__btn {
+  width: 44px;
+  height: 44px;
+  color: #f2f2f3;
+}
+
+.viewer .viewer__btn:hover {
+  background: rgb(255 255 255 / 10%);
+}
+
+.viewer__title {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 6px;
+}
+
+.viewer__name {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer__size {
+  color: #b4b4b9;
+  font-size: 12px;
+}
+
+.viewer__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  min-height: 0;
+  padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.viewer__image {
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+
+.viewer__pages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 900px;
+}
+
+.viewer__page {
+  width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 50%);
+}
+
+.viewer__text {
+  width: 100%;
+  max-width: 900px;
+  margin: 0;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: 13px/1.5 ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.viewer__status {
+  margin: auto;
+  max-width: 420px;
+  text-align: center;
+}
+
+.viewer__fallback {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.viewer__note {
+  margin: 12px 0 0;
+  color: #b4b4b9;
+  font-size: 13px;
+  text-align: center;
+}
+
+.viewer__notice {
+  flex: none;
+  margin: 0;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+  background: #1f1f22;
+  color: #f2f2f3;
+  font-size: 13px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.viewer__notice--error {
+  color: #ffb4ab;
 }

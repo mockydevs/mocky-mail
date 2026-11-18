@@ -8,10 +8,13 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod accounts;
+mod attachments;
 mod convert;
 mod credentials;
 mod error;
 mod events;
+#[cfg(target_os = "android")]
+mod files_android;
 #[cfg(target_os = "android")]
 mod google_android;
 mod mail;
@@ -98,6 +101,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let cache_dir = app.path().app_cache_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&cache_dir)?;
+    attachments::clear_opened(&cache_dir);
     let store = mail_store::Store::open(data_dir.join("mail.db"))?;
     let recovered = store.recover_outbox_after_restart(now())?;
     if recovered > 0 {
@@ -134,6 +138,9 @@ pub fn run() {
     // Android: Gmail sign-in with the phone's own Google accounts.
     #[cfg(target_os = "android")]
     let builder = builder.plugin(google_android::init());
+    // Android: pick, save and open files through the phone's own screens.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(files_android::init());
     let result = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -153,8 +160,10 @@ pub fn run() {
             mail::move_messages,
             mail::suggest_recipients,
             mail::delete_forever,
-            mail::save_attachment,
-            mail::pick_attachments,
+            attachments::save_attachment,
+            attachments::pick_attachments,
+            attachments::preview_attachment,
+            attachments::open_attachment,
             mail::sync_now,
             mail::open_external,
             outbox::check_draft,

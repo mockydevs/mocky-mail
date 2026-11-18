@@ -37,7 +37,10 @@ type MessageListItem = {
   unread: boolean; flagged: boolean; answered: boolean; hasAttachments: boolean;
 };
 
-type AttachmentMeta = { index: number; fileName: string; mimeType: string; size: number };
+type AttachmentMeta = {
+  index: number; fileName: string; mimeType: string; size: number;
+  preview: 'image' | 'pdf' | 'text' | null; // in-app preview offered, judged by name and type (never SVG or HTML); null: open or save instead
+};
 
 type MessageDetail = MessageListItem & {
   cc: Mailbox[]; replyTo: Mailbox[];
@@ -102,8 +105,10 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `move_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` (a message moved again before the server gave it a new UID is found by Message-ID) |
 | `suggest_recipients` | `{ query }` | `Mailbox[]` (up to 8 people written to or heard from, best first; own addresses and no-reply senders left out) |
 | `delete_forever` | `{ ids }` | `void` (only allowed for messages in Trash or Junk) |
-| `save_attachment` | `{ messageId, index }` | `string \| null` (shows a save dialog; null if cancelled) |
-| `pick_attachments` | | `DraftAttachment[]` (open-file dialog) |
+| `save_attachment` | `{ messageId, index }` | `string \| null` (shows a save dialog, Android's "Save to" screen on phones; where it was saved, null if cancelled) |
+| `preview_attachment` | `{ messageId, index }` | raw bytes (`ArrayBuffer`) for the in-app preview; rejects `invalid` unless the file's own bytes are a PNG/JPEG/GIF/WebP photo, a PDF or plain text, up to 30 MB |
+| `open_attachment` | `{ messageId, index }` | `void` (copies it to the app cache and opens it in the device's app for its type; programs and scripts are refused with `invalid`) |
+| `pick_attachments` | | `DraftAttachment[]` (open-file dialog; on Android the system picker, each file copied into the app cache) |
 | `check_draft` | `{ draft }` | `{ estimatedBytes: number; limitBytes: number }` or rejects `invalid`/`too_large` |
 | `send_message` | `{ draft }` | `OutboxEntry` (validated, queued and held for `Settings.undoSendSecs` so `outbox_edit`/`outbox_cancel` can undo it; outbox worker then sends; removes the saved draft `draft.draftMessageId` if set) |
 | `attachments_for_draft` | `{ messageId }` | `DraftAttachment[]` (copies of a message's attachments, usable in a Draft: forwarding, continuing a draft) |

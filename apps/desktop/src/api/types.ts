@@ -78,11 +78,16 @@ export interface MessageListItem {
   hasAttachments: boolean;
 }
 
+/** How the in-app preview shows an attachment. */
+export type PreviewKind = 'image' | 'pdf' | 'text';
+
 export interface AttachmentMeta {
   index: number;
   fileName: string;
   mimeType: string;
   size: number;
+  /** Null: no in-app preview; open it in another app or save it. */
+  preview: PreviewKind | null;
 }
 
 export type MessageDetail = MessageListItem & {
@@ -273,7 +278,12 @@ export interface MailApi {
   setFlags(ids: string[], change: FlagChange): Promise<void>;
   moveMessages(ids: string[], target: MoveTarget): Promise<void>;
   deleteForever(ids: string[]): Promise<void>;
+  /** Where it was saved, or null if the user cancelled. */
   saveAttachment(messageId: string, index: number): Promise<string | null>;
+  /** The file's bytes for the in-app preview. Rejects with `invalid` if it isn't really a photo, PDF or text. */
+  previewAttachment(messageId: string, index: number): Promise<ArrayBuffer>;
+  /** Opens it in the device's app for that type (PDF reader, Word, Gallery). */
+  openAttachment(messageId: string, index: number): Promise<void>;
   pickAttachments(): Promise<DraftAttachment[]>;
   checkDraft(draft: Draft): Promise<DraftCheck>;
   sendMessage(draft: Draft): Promise<OutboxEntry>;

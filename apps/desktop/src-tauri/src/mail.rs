@@ -4,16 +4,16 @@
 use std::sync::Arc;
 
 use mail_core::folders::FolderRole;
-use mail_core::message::{Mailbox, attachment_bytes, parse_body};
+use mail_core::message::{Mailbox, parse_body};
+use mail_core::preview::PreviewKind;
 use mail_core::sanitize::{RemoteContent, embed_inline_images, sanitize_html};
 use mail_store::{Folder, ListQuery, MessageListItem, MessagePage, NewFolder};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
-use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::error::{AppError, AppResult};
-use crate::state::{AppState, lock};
+use crate::state::AppState;
 use crate::sync::{self, Op};
 use crate::{events, settings};
 
@@ -49,6 +49,8 @@ pub struct AttachmentMeta {
     file_name: String,
     mime_type: String,
     size: u64,
+    /// How the in-app preview shows it, or `None` (open or save instead).
+    preview: Option<PreviewKind>,
 }
 
 /// `MessageDetail` in `docs/ipc.md`.
@@ -107,6 +109,7 @@ pub async fn get_message(
             .enumerate()
             .map(|(index, a)| AttachmentMeta {
                 index,
+                preview: crate::attachments::preview_for(&a),
                 file_name: a.file_name,
                 mime_type: a.mime_type,
                 size: a.size,
@@ -335,29 +338,6 @@ pub fn delete_forever(
     Ok(())
 }
 
-/// `save_attachment`: asks where to save, then writes the file.
-#[tauri::command]
-pub async fn save_attachment(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-    message_id: String,
-    index: usize,
-) -> AppResult<Option<String>> {
-    let raw = sync::body_now(&state, &message_id).await?;
-    let (info, bytes) = attachment_bytes(&raw, index)?
-        .ok_or_else(|| AppError::new("not_found", "That attachment no longer exists."))?;
-    let dialog = app.dialog().file().set_file_name(&info.file_name);
-    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_save_file())
-        .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
-    let Some(path) = picked else { return Ok(None) };
-    let path = path
-        .into_path()
-        .map_err(|e| AppError::internal(e.to_string()))?;
-    tokio::fs::write(&path, bytes).await?;
-    Ok(Some(path.display().to_string()))
-}
-
 /// A file chosen to attach.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -368,47 +348,6 @@ pub struct DraftAttachment {
     pub file_name: String,
     /// Size in bytes.
     pub size: u64,
-}
-
-/// `pick_attachments`: the open-file dialog. Only files picked here may be
-/// attached to a message.
-#[tauri::command]
-pub async fn pick_attachments(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> AppResult<Vec<DraftAttachment>> {
-    let dialog = app.dialog().file();
-    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_files())
-        .await
-        .map_err(|e| AppError::internal(e.to_string()))?
-        .unwrap_or_default();
-    let mut out = Vec::new();
-    for file in picked {
-        let path = file
-            .into_path()
-            .map_err(|e| AppError::internal(e.to_string()))?;
-        let metadata = tokio::fs::metadata(&path).await?;
-        if !metadata.is_file() {
-            continue;
-        }
-        let file_name = mail_core::message::safe_file_name(
-            &path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        );
-        // Programs and scripts can't be sent; say so now, not at Send.
-        let data = tokio::fs::read(&path).await?;
-        mail_core::attachment_policy::check_outgoing(&file_name, &data)
-            .map_err(|refusal| AppError::invalid(format!("{file_name}: {refusal}")))?;
-        lock(&state.picked_files).insert(path.clone());
-        out.push(DraftAttachment {
-            path: path.display().to_string(),
-            file_name,
-            size: metadata.len(),
-        });
-    }
-    Ok(out)
 }
 
 /// `sync_now`.

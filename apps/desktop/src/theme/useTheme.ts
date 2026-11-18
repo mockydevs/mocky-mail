@@ -29,9 +29,19 @@ export function useTheme(setting: ThemeSetting): Theme {
   const theme = resolveTheme(setting, systemDark);
   useEffect(() => {
     document.documentElement.dataset['theme'] = theme;
-    // Android: match the phone's status and navigation bars.
-    const bars = (window as { MockySystemBars?: { set: (dark: boolean, background: string) => void } }).MockySystemBars;
-    bars?.set(theme === 'dark', getComputedStyle(document.documentElement).getPropertyValue('--list').trim());
+    matchSystemBars();
   }, [theme]);
   return theme;
+}
+
+/** Android: colour the phone's status and navigation bars. No-op elsewhere. */
+export function setSystemBars(dark: boolean, background: string) {
+  const bars = (window as { MockySystemBars?: { set: (dark: boolean, background: string) => void } }).MockySystemBars;
+  bars?.set(dark, background);
+}
+
+/** Android: match the phone's bars to the app's current theme. */
+export function matchSystemBars() {
+  const root = document.documentElement;
+  setSystemBars(root.dataset['theme'] === 'dark', getComputedStyle(root).getPropertyValue('--list').trim());
 }

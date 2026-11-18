@@ -110,7 +110,7 @@ describe('reading pane', () => {
     const { user, api } = renderApp();
     await rows();
     await user.click(await within(reader()).findByRole('button', { name: 'Save Quotation-Westlands-rev2.pdf' }));
-    expect(await within(reader()).findByText('Saved to /home/you/Downloads/Quotation-Westlands-rev2.pdf')).toBeInTheDocument();
+    expect(await within(reader()).findByText('Saved: /home/you/Downloads/Quotation-Westlands-rev2.pdf')).toBeInTheDocument();
     api.failNext('saveAttachment', { kind: 'storage', message: 'No space left on the disk.' });
     await user.click(within(reader()).getByRole('button', { name: 'Save Floor-plan.png' }));
     expect(await within(reader()).findByRole('alert')).toHaveTextContent('No space left on the disk.');

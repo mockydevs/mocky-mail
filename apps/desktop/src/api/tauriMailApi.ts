@@ -30,6 +30,8 @@ export function createTauriMailApi(): MailApi {
     moveMessages: (ids, target) => call('move_messages', { ids, target }),
     deleteForever: (ids) => call('delete_forever', { ids }),
     saveAttachment: (messageId, index) => call('save_attachment', { messageId, index }),
+    previewAttachment: (messageId, index) => call('preview_attachment', { messageId, index }),
+    openAttachment: (messageId, index) => call('open_attachment', { messageId, index }),
     pickAttachments: () => call('pick_attachments'),
     checkDraft: (draft) => call('check_draft', { draft }),
     sendMessage: (draft) => call('send_message', { draft }),
