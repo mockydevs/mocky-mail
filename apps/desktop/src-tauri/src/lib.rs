@@ -9,6 +9,7 @@
 
 mod accounts;
 mod attachments;
+mod contacts;
 mod convert;
 mod credentials;
 mod error;
@@ -116,6 +117,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     for account in state.store.list_accounts()? {
         sync::start(&handle, &state, &account.id);
     }
+    contacts::start(handle.clone(), Arc::clone(&state));
     tauri::async_runtime::spawn(outbox::run(handle, state));
     Ok(())
 }
@@ -176,6 +178,11 @@ pub fn run() {
             outbox::outbox_edit,
             settings::get_settings,
             settings::set_settings,
+            contacts::list_contacts,
+            contacts::get_contact,
+            contacts::save_contact,
+            contacts::delete_contact,
+            contacts::sync_contacts,
             signatures::get_signature,
             signatures::set_signature,
             signatures::set_signature_image,

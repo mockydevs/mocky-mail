@@ -2773,6 +2773,8 @@ dependencies = [
  "keyring-core",
  "lettre",
  "mail-core",
+ "quick-xml",
+ "reqwest",
  "rustls",
  "rustls-platform-verifier",
  "serde",

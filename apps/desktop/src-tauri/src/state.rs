@@ -33,6 +33,8 @@ pub struct AppState {
     pub picked_files: Mutex<HashSet<PathBuf>>,
     /// Where temporary files (re-opened outbox attachments) go.
     pub cache_dir: PathBuf,
+    /// Held while contacts sync, so two syncs never send the same change.
+    pub contacts_sync: tokio::sync::Mutex<()>,
 }
 
 /// Lock a mutex, recovering from a panic elsewhere instead of failing.
@@ -51,6 +53,7 @@ impl AppState {
             outbox_wake: Arc::new(Notify::new()),
             picked_files: Mutex::new(HashSet::new()),
             cache_dir,
+            contacts_sync: tokio::sync::Mutex::new(()),
         }
     }
 

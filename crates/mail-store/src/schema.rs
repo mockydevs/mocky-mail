@@ -162,8 +162,27 @@ const V2: &str = r"
 ALTER TABLE pending_ops ADD COLUMN refusals INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// Version 3: the address book. `card` is the contact as JSON; `vcard` the
+/// server's copy, so fields the app doesn't show survive an edit.
+const V3: &str = r"
+CREATE TABLE contacts (
+    id         TEXT PRIMARY KEY NOT NULL,
+    account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+    href       TEXT,
+    etag       TEXT,
+    vcard      TEXT,
+    card       TEXT NOT NULL,
+    state      TEXT NOT NULL CHECK (state IN ('synced', 'changed', 'deleted')),
+    sort_name  TEXT NOT NULL,
+    search     TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX contacts_href ON contacts (account_id, href) WHERE href IS NOT NULL;
+CREATE INDEX contacts_sort ON contacts (sort_name COLLATE NOCASE);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {

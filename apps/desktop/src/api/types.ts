@@ -137,6 +137,40 @@ export interface UpdateInfo {
   page: string;
 }
 
+/** A saved contact. `accountId` null: kept on this device only. */
+export interface Contact {
+  id: string;
+  accountId: string | null;
+  uid: string;
+  name: string;
+  emails: string[];
+  phones: string[];
+  organization: string;
+  title: string;
+  notes: string;
+  /** `changed` or `deleted`: waiting to be sent to the server. */
+  state: 'synced' | 'changed' | 'deleted';
+}
+
+/** A contact as typed in the editor. */
+export interface ContactInput {
+  id?: string;
+  accountId: string | null;
+  name: string;
+  emails: string[];
+  phones: string[];
+  organization: string;
+  title: string;
+  notes: string;
+}
+
+/** Whether an account's contacts sync with its server. */
+export interface AddressBookStatus {
+  accountId: string;
+  state: 'synced' | 'unavailable' | 'error';
+  message: string | null;
+}
+
 /** A picture under the signature (PNG, JPEG or GIF), sent inside the message. */
 export interface SignatureImage {
   mimeType: string;
@@ -268,6 +302,7 @@ export interface MailEvents {
   /** The backend also shows the desktop notification when enabled. */
   'mail://new-mail': { accountId: string; count: number };
   'mail://accounts-changed': Record<string, never>;
+  'mail://contacts-changed': { books: AddressBookStatus[] };
 }
 export type MailEventName = keyof MailEvents;
 
@@ -312,6 +347,14 @@ export interface MailApi {
   checkForUpdate(): Promise<UpdateInfo | null>;
   /** Download, verify and run the update; the app closes or restarts. */
   installUpdate(): Promise<void>;
+  /** Saved contacts matching the text (name, email, phone, company), by name. */
+  listContacts(query: string): Promise<Contact[]>;
+  getContact(id: string): Promise<Contact>;
+  /** Create or update; synced with the account's address book in the background. */
+  saveContact(contact: ContactInput): Promise<Contact>;
+  deleteContact(id: string): Promise<void>;
+  /** Sync every account's address book now. */
+  syncContacts(): Promise<AddressBookStatus[]>;
   /** The account's email signature, if it has one. */
   getSignature(accountId: string): Promise<Signature | null>;
   /** Clean and store a signature (pasted HTML or typed text); empty clears it. Returns what was stored. */

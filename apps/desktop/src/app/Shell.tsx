@@ -27,6 +27,7 @@ import { useSendStatus, type SendStatus } from '../features/outbox/useSendStatus
 import { playChime } from '../features/notifications/chime';
 import { ReadingPane } from '../features/reader/ReadingPane';
 import { SettingsView } from '../features/settings/SettingsView';
+import { ContactsView } from '../features/contacts/ContactsView';
 import { HelpSheet } from '../features/shortcuts/HelpSheet';
 import { shortcutFor, type ShortcutAction } from '../features/shortcuts/shortcuts';
 import { nowSeconds } from '../lib/format';
@@ -49,6 +50,7 @@ type Screen =
   | { kind: 'mail' }
   | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null; signature: boolean }
   | { kind: 'settings' }
+  | { kind: 'contacts' }
   | { kind: 'addAccount' };
 
 /** How long a confirmation toast stays up. */
@@ -450,7 +452,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     handlerRef.current = (action, event) => {
       if (help || confirmForever) return;
       if (action === 'close') {
-        if (screen.kind === 'settings' || screen.kind === 'addAccount') setScreen({ kind: 'mail' });
+        if (screen.kind === 'settings' || screen.kind === 'contacts' || screen.kind === 'addAccount') {
+          setScreen({ kind: 'mail' });
+        }
         return;
       }
       if (screen.kind !== 'mail') return;
@@ -584,6 +588,30 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           }}
           onClose={() => {
             setScreen({ kind: 'mail' });
+          }}
+        />
+      );
+      break;
+    case 'contacts':
+      main = (
+        <ContactsView
+          accounts={accounts}
+          phone={phone}
+          onClose={() => {
+            setScreen({ kind: 'mail' });
+          }}
+          onWrite={(name, address) => {
+            const accountId = view.type === 'folder' ? view.accountId : (accounts[0]?.id ?? '');
+            const clean = name.replace(/["\\<>]/g, '').trim();
+            const to = clean ? `"${clean}" <${address}>` : address;
+            compose({ ...blankDraft(accountId), to }, 'New message', null, true);
+          }}
+          onFindMail={(address) => {
+            setScreen({ kind: 'mail' });
+            goTo(INBOX_VIEW);
+            setSearchInput(address);
+            setSelectedId(null);
+            setPinned(null);
           }}
         />
       );
@@ -722,6 +750,10 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               onSettings={() => {
                 setDrawer(false);
                 setScreen({ kind: 'settings' });
+              }}
+              onContacts={() => {
+                setDrawer(false);
+                setScreen({ kind: 'contacts' });
               }}
               onAddAccount={() => {
                 setDrawer(false);

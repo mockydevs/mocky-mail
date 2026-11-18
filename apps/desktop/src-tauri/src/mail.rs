@@ -242,9 +242,8 @@ pub fn suggest_recipients(
     state: State<'_, Arc<AppState>>,
     query: String,
 ) -> AppResult<Vec<Mailbox>> {
-    Ok(state
-        .store
-        .suggest_recipients(&query, mail_store::MAX_SUGGESTIONS)?)
+    // Saved contacts first, then people from mail.
+    crate::contacts::suggestions(&state, &query, mail_store::MAX_SUGGESTIONS)
 }
 
 /// `move_messages`: archive, trash, junk or any folder.

@@ -119,6 +119,11 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `outbox_edit` | `{ id }` | `Draft` (removes it from the outbox) |
 | `sync_now` | `{ accountId: string \| null }` | `void` |
 | `get_settings` / `set_settings` | `{ settings }` | `Settings` |
+| `list_contacts` | `{ query }` | `Contact[]` (saved contacts matching name, email, phone or company, by name; `Contact = { id, accountId: string \| null, uid, name, emails, phones, organization, title, notes, state: 'synced' \| 'changed' \| 'deleted' }`) |
+| `get_contact` | `{ id }` | `Contact` |
+| `save_contact` | `{ contact: { id?, accountId: string \| null, name, emails, phones, organization, title, notes } }` | `Contact` (saved here at once; a contact of an account syncs to its server's address book in the background; null `accountId` keeps it on this device) |
+| `delete_contact` | `{ id }` | `void` (gone here at once; deleted on the server at the next sync) |
+| `sync_contacts` | | `{ accountId, state: 'synced' \| 'unavailable' \| 'error', message }[]`. Password accounts sync with CardDAV on their IMAP host (`https://<imap host>/.well-known/carddav`, e.g. SOGo), Basic auth over HTTPS only; local changes are sent first (newest edit wins), then server changes are read; fields the app doesn't show (photos, addresses) are kept. Also runs at start-up and every 15 minutes, and emits `mail://contacts-changed` `{ books }`. Gmail and Microsoft accounts are `unavailable` for now. `suggest_recipients` lists saved contacts before people from mail. |
 | `get_signature` | `{ accountId }` | `Signature \| null` (`{ html, text, image? }`: sanitized HTML, its plain text, and an optional picture `{ mimeType, data (base64), width, naturalWidth, naturalHeight }`) |
 | `set_signature` | `{ accountId, html }` | `Signature \| null`; the HTML is sanitized like incoming mail, empty clears it. Sending adds an HTML alternative with the full signature when its plain block (`-- \n` + text) is still in the body. Changing the words keeps the picture. |
 | `set_signature_image` | `{ accountId }` | `Signature \| null` (picker; PNG, JPEG or GIF checked by its bytes, up to 1 MB; null if cancelled; a picture-only signature uses the account name as its text). Sent as a `multipart/related` part (`cid:signature-image@mocky.mail`) so it shows without loading remote images. |

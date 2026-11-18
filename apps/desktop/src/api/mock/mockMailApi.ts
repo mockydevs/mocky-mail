@@ -2,6 +2,8 @@ import { appError, MailError, toAppError } from '../errors';
 import { parseRecipients } from '../../features/compose/recipients';
 import type {
   Account,
+  AddressBookStatus,
+  Contact,
   AttachmentMeta,
   AppError,
   Draft,
@@ -40,6 +42,10 @@ export interface MockOptions {
   update?: UpdateInfo;
   /** Signatures by account id. */
   signatures?: Record<string, Signature>;
+  /** Saved contacts. */
+  contacts?: Contact[];
+  /** Address book status per account; default: every account synced. */
+  books?: AddressBookStatus[];
   /** Dev preview: new messages go sending, then sent, like the real Outbox. */
   simulateDelivery?: boolean;
 }
@@ -74,6 +80,11 @@ const MOCK_PDF = [
   'trailer<</Root 1 0 R>>',
   '%%EOF',
 ].join('\n');
+
+/** Name, or the first address for a contact without one. */
+function contactSortKey(c: Contact): string {
+  return c.name !== '' ? c.name : (c.emails[0] ?? '');
+}
 
 function mockBytes(kind: AttachmentMeta['preview']): ArrayBuffer {
   if (kind === 'image') return MOCK_PNG.slice().buffer;
@@ -148,6 +159,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   let outbox = clone(options.outbox ?? MOCK_OUTBOX).filter(known);
   let settings = clone(options.settings ?? MOCK_SETTINGS);
   const signatures = new Map<string, Signature>(Object.entries(options.signatures ?? {}));
+  let contacts: Contact[] = clone(options.contacts ?? []);
   const outboxDrafts = new Map<string, Draft>();
   /** Attachments of drafts saved in this session, by message id. */
   const draftFiles = new Map<string, DraftAttachment[]>();
@@ -610,6 +622,63 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     checkForUpdate: () => run('checkForUpdate', () => options.update ?? null),
 
     installUpdate: () => run('installUpdate', () => undefined),
+
+    listContacts: (query) =>
+      run('listContacts', () => {
+        const q = query.trim().toLowerCase();
+        return contacts
+          .filter((c) => c.state !== 'deleted')
+          .filter((c) =>
+            [c.name, ...c.emails, ...c.phones, c.organization, c.title].some((f) => f.toLowerCase().includes(q)),
+          )
+          .sort((a, b) => contactSortKey(a).localeCompare(contactSortKey(b)));
+      }),
+
+    getContact: (id) =>
+      run('getContact', () => {
+        const found = contacts.find((c) => c.id === id && c.state !== 'deleted');
+        if (!found) throw appError('not_found', 'That contact no longer exists.');
+        return found;
+      }),
+
+    saveContact: (input) =>
+      run('saveContact', () => {
+        const emails = input.emails.map((e) => e.trim()).filter(Boolean);
+        const bad = emails.find((e) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+        if (bad) throw appError('invalid', `${bad} isn't an email address.`);
+        const phones = input.phones.map((p) => p.trim()).filter(Boolean);
+        if (!input.name.trim() && emails.length === 0 && phones.length === 0) {
+          throw appError('invalid', 'Add a name, an email address or a phone number.');
+        }
+        const old = input.id ? contacts.find((c) => c.id === input.id) : undefined;
+        if (input.id && !old) throw appError('not_found', 'That contact no longer exists.');
+        const saved: Contact = {
+          id: old?.id ?? `c${String(seq++)}`,
+          uid: old?.uid ?? `u${String(seq)}`,
+          accountId: old ? old.accountId : input.accountId,
+          name: input.name.trim(),
+          emails,
+          phones,
+          organization: input.organization.trim(),
+          title: input.title.trim(),
+          notes: input.notes.trim(),
+          state: input.accountId ? 'changed' : 'synced',
+        };
+        contacts = [...contacts.filter((c) => c.id !== saved.id), saved];
+        return saved;
+      }),
+
+    deleteContact: (id) =>
+      run('deleteContact', () => {
+        if (!contacts.some((c) => c.id === id)) throw appError('not_found', 'That contact no longer exists.');
+        contacts = contacts.filter((c) => c.id !== id);
+      }),
+
+    syncContacts: () =>
+      run('syncContacts', () => {
+        contacts = contacts.map((c) => ({ ...c, state: 'synced' as const }));
+        return options.books ?? accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null }));
+      }),
 
     getSignature: (accountId) => run('getSignature', () => signatures.get(accountId) ?? null),
 

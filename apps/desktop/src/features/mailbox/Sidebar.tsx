@@ -14,6 +14,7 @@ interface Props {
   onView: (view: MailView) => void;
   onCompose: () => void;
   onSettings: () => void;
+  onContacts: () => void;
   onAddAccount: () => void;
 }
 
@@ -163,7 +164,7 @@ function useOpenAccount(view: MailView, accounts: readonly Account[]) {
   return [openId, setOpenId] as const;
 }
 
-export function Sidebar({ view, accounts, folders, outboxCount, onView, onCompose, onSettings, onAddAccount }: Props) {
+export function Sidebar({ view, accounts, folders, outboxCount, onView, onCompose, onSettings, onContacts, onAddAccount }: Props) {
   const collapsed = useCollapsedFolders();
   const [openAccountId, setOpenAccountId] = useOpenAccount(view, accounts);
   const all = Object.values(folders).flat();
@@ -297,6 +298,10 @@ export function Sidebar({ view, accounts, folders, outboxCount, onView, onCompos
           <button type="button" className="nav__item nav__item--dashed" onClick={onAddAccount}>
             <Icon name="plus" />
             Add account
+          </button>
+          <button type="button" className="nav__item" onClick={onContacts}>
+            <Icon name="people" />
+            Contacts
           </button>
           <button type="button" className="nav__item" onClick={onSettings}>
             <Icon name="settings" />

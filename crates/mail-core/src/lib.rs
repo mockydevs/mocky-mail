@@ -14,3 +14,4 @@ pub mod outbox;
 pub mod preview;
 pub mod sanitize;
 pub mod signature;
+pub mod vcard;

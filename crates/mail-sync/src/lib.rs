@@ -8,6 +8,7 @@
 //! errors, logs or `Debug` output.
 
 pub mod config;
+pub mod dav;
 pub mod discover;
 pub mod error;
 pub mod imap;

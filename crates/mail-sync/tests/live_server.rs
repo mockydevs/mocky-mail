@@ -111,6 +111,7 @@ async fn wait_for(conn: &mut ImapConnection, folder: &str, count: usize) -> Vec<
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn full_mailbox_round_trip() {
     let Some(host) = host() else { return };
 
