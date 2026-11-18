@@ -223,6 +223,15 @@ async fn session(
             }
             new_unseen = new_unseen.saturating_add(report.new_unseen);
         }
+        if !full_done {
+            // Once per inbox: mark old mail that is newsletters or
+            // notifications, for the Focused Inbox. Never holds up mail.
+            for inbox in folders.iter().filter(|f| f.role == FolderRole::Inbox) {
+                if let Err(error) = mark_bulk_once(state, &mut conn, inbox).await {
+                    stop_if_disconnected(error, &mut problem)?;
+                }
+            }
+        }
         full_done = true;
         if new_unseen > 0 {
             events::new_mail(app, state, account, new_unseen);
@@ -380,6 +389,33 @@ fn leaf_name(path: &str, delimiter: Option<&str>) -> String {
         .and_then(|d| path.rsplit(d).next())
         .unwrap_or(path);
     decode_folder_name(leaf)
+}
+
+/// Headers fetched per round when marking old mail as bulk.
+const BULK_BATCH: usize = 200;
+
+/// Record which already-synced messages in a folder are bulk mail, once.
+async fn mark_bulk_once(
+    state: &AppState,
+    conn: &mut ImapConnection,
+    folder: &Folder,
+) -> AppResult<()> {
+    let key = format!("bulk_checked:{}", folder.id);
+    if state.store.get_setting(&key)?.is_some() {
+        return Ok(());
+    }
+    let uids = state.store.uids_in_folder(&folder.id)?;
+    for batch in uids.chunks(BULK_BATCH) {
+        let set = batch
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let marks = conn.fetch_bulk_marks(&folder.path, &set).await?;
+        state.store.set_bulk_by_uid(&folder.id, &marks)?;
+    }
+    state.store.set_setting(&key, "1")?;
+    Ok(())
 }
 
 pub(crate) async fn refresh_folders(

@@ -8,6 +8,20 @@ use crate::messages::MessageFlags;
 use crate::{Result, Store, StoreError};
 
 impl Store {
+    /// Record which messages, by UID, are bulk or automated mail.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_bulk_by_uid(&self, folder_id: &str, marks: &[(u32, bool)]) -> Result<()> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare_cached("UPDATE messages SET bulk = ?3 WHERE folder_id = ?1 AND uid = ?2")?;
+        for (uid, bulk) in marks {
+            stmt.execute(params![folder_id, uid, bulk])?;
+        }
+        Ok(())
+    }
+
     /// Apply flags fetched from the server to the message with this UID.
     /// Returns whether a row changed (false when the UID is unknown).
     ///

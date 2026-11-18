@@ -235,4 +235,5 @@ export const MOCK_SETTINGS: Settings = {
   undoSendSecs: 5,
   markRead: 'open',
   threads: true,
+  focusedInbox: false,
 };

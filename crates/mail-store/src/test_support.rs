@@ -70,6 +70,7 @@ pub(crate) fn summary(subject: &str, date: i64) -> MessageSummary {
         attachments: vec![],
         in_reply_to: None,
         references: vec![],
+        bulk: false,
     }
 }
 

@@ -9,6 +9,8 @@ use crate::state::AppState;
 const KEY: &str = "settings";
 
 /// User preferences (`Settings` in `docs/ipc.md`).
+// Each bool is a separate on/off preference the interface shows as a checkbox.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -27,6 +29,9 @@ pub struct Settings {
     pub mark_read: String,
     /// Group replies with the message they answer, as one conversation.
     pub threads: bool,
+    /// Split the Inbox into Focused (people) and Other (newsletters,
+    /// notifications). Off until the user turns it on.
+    pub focused_inbox: bool,
 }
 
 /// Undo-send choices offered in Settings.
@@ -42,6 +47,7 @@ impl Default for Settings {
             undo_send_secs: 5,
             mark_read: "open".into(),
             threads: true,
+            focused_inbox: false,
         }
     }
 }
@@ -110,6 +116,7 @@ mod tests {
             undo_send_secs: 7,
             mark_read: "sometimes".into(),
             threads: false,
+            focused_inbox: true,
         }
         .normalized();
         assert_eq!(s.theme, "system");

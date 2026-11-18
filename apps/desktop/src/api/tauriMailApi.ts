@@ -29,6 +29,7 @@ export function createTauriMailApi(): MailApi {
     deleteFolder: (folderId) => call('delete_folder', { folderId }),
     listMessages: ({ threads, ...query }) => call('list_messages', { query, threads: threads ?? false }),
     getThread: (id) => call('get_thread', { id }),
+    setFocusRule: (sender, focus, wholeDomain) => call('set_focus_rule', { sender, focus, wholeDomain }),
     getMessage: (id, allowRemote) => call('get_message', { id, allowRemote }),
     setFlags: (ids, change) => call('set_flags', { ids, ...change }),
     moveMessages: (ids, target) => call('move_messages', { ids, target }),

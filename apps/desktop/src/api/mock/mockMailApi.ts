@@ -5,6 +5,7 @@ import type {
   AddressBookStatus,
   Contact,
   AttachmentMeta,
+  Focus,
   AppError,
   Draft,
   Signature,
@@ -225,6 +226,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const opened: string[] = [];
   const openedFiles: string[] = [];
   const printed: string[] = [];
+  /** Focused Inbox rules: address or @domain to focus. */
+  const focusRules = new Map<string, Focus>();
   let seq = 1;
 
   const emit = <E extends MailEventName>(event: E, payload: MailEvents[E]) => {
@@ -243,6 +246,20 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     } catch (error: unknown) {
       return Promise.reject(error instanceof MailError ? error : toAppError(error));
     }
+  };
+
+  /** Focused or Other, as the backend decides it (the mock has no list headers). */
+  const focusOf = (m: MockMessage): Focus => {
+    const address = (m.from?.address ?? '').toLowerCase();
+    const rule = focusRules.get(address) ?? focusRules.get(address.slice(address.lastIndexOf('@')));
+    if (rule) return rule;
+    const writtenTo = messages.some(
+      (s) => folderOf(s.folderId)?.role === 'sent' && s.to.some((t) => t.address.toLowerCase() === address),
+    );
+    if (writtenTo) return 'focused';
+    return /^(noreply|no-reply|donotreply|notification|newsletter|news@|marketing|alerts?@|updates@)/.test(address)
+      ? 'other'
+      : 'focused';
   };
 
   const changed = (accountId: string, folderIds: string[]) => {
@@ -467,6 +484,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           .filter((m) => query.role === null || folderOf(m.folderId)?.role === query.role)
           .filter((m) => query.filter !== 'unread' || m.unread)
           .filter((m) => query.filter !== 'flagged' || m.flagged)
+          .filter((m) => !query.focus || folderOf(m.folderId)?.role !== 'inbox' || focusOf(m) === query.focus)
           .filter(
             (m) =>
               !needle ||
@@ -499,6 +517,16 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           };
         });
         return { items: rows.slice(query.offset, query.offset + query.limit), total: rows.length };
+      }),
+
+    setFocusRule: (sender, focus, wholeDomain) =>
+      run('setFocusRule', () => {
+        const address = sender.trim().toLowerCase();
+        const at = address.lastIndexOf('@');
+        if (at < 1) throw appError('invalid', "That isn't an email address.");
+        const key = wholeDomain ? address.slice(at) : address;
+        if (focus) focusRules.set(key, focus);
+        else focusRules.delete(key);
       }),
 
     getThread: (id) =>

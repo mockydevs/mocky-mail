@@ -120,7 +120,12 @@ export interface ListQuery {
   offset: number;
   /** At most 200. */
   limit: number;
+  /** Focused Inbox: only this half of inbox folders (other folders ignore it). */
+  focus?: Focus | null;
 }
+
+/** Focused Inbox halves: people, and newsletters and notifications. */
+export type Focus = 'focused' | 'other';
 
 export interface MessagePage {
   items: MessageListItem[];
@@ -262,6 +267,8 @@ export interface Settings {
   markRead: MarkReadSetting;
   /** Group replies with the message they answer, as one conversation. */
   threads: boolean;
+  /** Split the Inbox into Focused and Other. */
+  focusedInbox: boolean;
 }
 
 /** "open": as soon as it is opened; "delay": after a few seconds open; "manual": only with Mark as read. */
@@ -344,6 +351,8 @@ export interface MailApi {
   deleteFolder(folderId: string): Promise<void>;
   /** With `threads`, one row per conversation (its newest message). */
   listMessages(query: ListQuery & { threads?: boolean }): Promise<MessagePage>;
+  /** Always put mail from this sender (or anyone at its domain) in Focused or Other; null removes the rule. */
+  setFocusRule(sender: string, focus: Focus | null, wholeDomain: boolean): Promise<void>;
   /** Every message in this message's conversation, oldest first (Trash and Spam left out). */
   getThread(id: string): Promise<MessageListItem[]>;
   getMessage(id: string, allowRemote: boolean): Promise<MessageDetail>;

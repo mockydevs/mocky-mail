@@ -7,6 +7,7 @@
 
 pub mod attachment_policy;
 pub mod compose;
+pub mod focus;
 pub mod folders;
 pub mod limits;
 pub mod message;

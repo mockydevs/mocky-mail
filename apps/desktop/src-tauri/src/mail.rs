@@ -49,6 +49,21 @@ pub fn list_messages(
     }
 }
 
+/// `set_focus_rule`: always put mail from this sender (or, with
+/// `wholeDomain`, anyone at its domain) in Focused or Other; `None` removes
+/// the rule.
+#[tauri::command]
+pub fn set_focus_rule(
+    state: State<'_, Arc<AppState>>,
+    sender: String,
+    focus: Option<mail_core::focus::Focus>,
+    whole_domain: bool,
+) -> AppResult<()> {
+    let key = mail_core::focus::rule_key(&sender, whole_domain)
+        .ok_or_else(|| AppError::invalid("That isn't an email address."))?;
+    Ok(state.store.set_focus_rule(&key, focus)?)
+}
+
 /// `get_thread`: every message in a message's conversation, oldest first.
 #[tauri::command]
 pub fn get_thread(state: State<'_, Arc<AppState>>, id: String) -> AppResult<Vec<MessageListItem>> {

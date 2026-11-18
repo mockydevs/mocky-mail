@@ -81,6 +81,7 @@ pub fn unreadable_summary(arrived: Option<i64>) -> MessageSummary {
         attachments: Vec::new(),
         in_reply_to: None,
         references: Vec::new(),
+        bulk: false,
     }
 }
 /// Messages larger than this are not downloaded in the background.
@@ -538,6 +539,29 @@ impl ImapConnection {
                     size: fetch.size.unwrap_or(0),
                     summary,
                 })
+            })
+            .collect())
+    }
+
+    /// Whether each message is bulk or automated mail (Focused Inbox), from
+    /// its headers. Used once for mail synced before the app recorded it.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn fetch_bulk_marks(
+        &mut self,
+        path: &str,
+        set: &str,
+    ) -> Result<Vec<(u32, bool)>, SyncError> {
+        let fetches = self.fetch(path, set, "(UID BODY.PEEK[HEADER])").await?;
+        Ok(fetches
+            .iter()
+            .filter_map(|f| {
+                let bulk = f
+                    .header()
+                    .and_then(|h| parse_summary(h).ok())
+                    .is_some_and(|s| s.bulk);
+                Some((f.uid?, bulk))
             })
             .collect())
     }

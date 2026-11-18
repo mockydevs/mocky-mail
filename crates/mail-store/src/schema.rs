@@ -212,8 +212,19 @@ AFTER UPDATE OF references_json, in_reply_to, message_id_header ON messages BEGI
 END;
 ";
 
+/// Version 5: Focused Inbox. `bulk` marks mailing-list and automated
+/// mail (filled as messages are synced); `focus_rules` holds the user's
+/// "always Focused / always Other" choices by address or `@domain`.
+const V5: &str = r"
+ALTER TABLE messages ADD COLUMN bulk INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE focus_rules (
+    sender TEXT PRIMARY KEY NOT NULL,
+    focus  TEXT NOT NULL CHECK (focus IN ('focused', 'other'))
+);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {

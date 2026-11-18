@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useMailApi } from '../api/MailApiContext';
 import { errorTitle, toAppError } from '../api/errors';
-import type { AppError, Draft, Folder, MessageDetail, MessageListItem, OutboxEntry, ReadFilter, Settings, SyncStatus } from '../api/types';
+import type { AppError, Draft, Focus, Folder, MessageDetail, MessageListItem, OutboxEntry, ReadFilter, Settings, SyncStatus } from '../api/types';
 import { AddAccountForm } from '../features/accounts/AddAccountForm';
 import { Welcome } from '../features/accounts/Welcome';
 import { ComposeView } from '../features/compose/ComposeView';
@@ -116,6 +116,7 @@ const DEFAULT_SETTINGS: Settings = {
   undoSendSecs: 5,
   markRead: 'open',
   threads: true,
+  focusedInbox: false,
 };
 
 /**
@@ -248,7 +249,14 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const search = useDebounced(searchInput, SEARCH_DEBOUNCE_MS);
   const baseQuery = viewQuery(view, filter, search);
   const threads = settings?.threads ?? true;
-  const query = baseQuery && { ...baseQuery, threads };
+  // Focused Inbox: inbox views show one half at a time.
+  const [focusTab, setFocusTab] = useState<Focus>('focused');
+  const inboxView =
+    view.type === 'unified'
+      ? view.role === 'inbox'
+      : view.type === 'folder' && allFolders.some((f) => f.id === view.folderId && f.role === 'inbox');
+  const focusSplit = (settings?.focusedInbox ?? false) && inboxView;
+  const query = baseQuery && { ...baseQuery, threads, focus: focusSplit ? focusTab : null };
   const page = useMessagePage(api, query, revision);
   const [overrides, setOverrides] = useState<Record<string, Override>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -365,6 +373,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
 
   const goTo = (next: MailView) => {
     setView(next);
+    setFocusTab('focused');
     setFilter('all');
     setSelectedId(null);
     setPinned(null);
@@ -668,6 +677,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               error={page.error}
               filtered={filtering}
               filter={filter}
+              focus={focusSplit ? focusTab : null}
+              onFocus={(next) => {
+                setFocusTab(next);
+                setSelectedId(null);
+                setPinned(null);
+              }}
               selectedId={activeId}
               accounts={accounts}
               now={now()}
@@ -691,6 +706,24 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               alwaysLoadImages={settings?.remoteImages === 'allow'}
               theme={theme}
               onLoaded={setLoaded}
+              focusTab={focusSplit ? focusTab : null}
+              onFocusRule={(sender, focus) => {
+                api.setFocusRule(sender, focus, false).then(
+                  () => {
+                    setSelectedId(null);
+                    setPinned(null);
+                    refresh();
+                    setNotice({
+                      tone: 'info',
+                      title: focus === 'other' ? 'Moved to Other' : 'Moved to Focused',
+                      text: `Mail from ${sender} will go there from now on.`,
+                    });
+                  },
+                  (e: unknown) => {
+                    report(toAppError(e), 'Could not move');
+                  },
+                );
+              }}
               narrow={phone}
               onBack={closeMessage}
               onReply={reply}

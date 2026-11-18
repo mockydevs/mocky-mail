@@ -111,6 +111,16 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
             />
             Group replies into conversations
           </label>
+          <label className="choice">
+            <input
+              type="checkbox"
+              checked={settings.focusedInbox}
+              onChange={(e) => {
+                onChange({ ...settings, focusedInbox: e.target.checked });
+              }}
+            />
+            Focused Inbox: put newsletters and notifications in a separate Other tab
+          </label>
         </fieldset>
 
         <fieldset className="settings__group">

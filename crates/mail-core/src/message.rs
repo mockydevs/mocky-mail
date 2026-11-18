@@ -86,6 +86,10 @@ pub struct MessageSummary {
     pub in_reply_to: Option<String>,
     /// Message-IDs of the thread so far, oldest first.
     pub references: Vec<String>,
+    /// Mailing-list or automated mail (List-Unsubscribe, List-Id,
+    /// Precedence: bulk, Auto-Submitted): goes to Other in a Focused Inbox.
+    #[serde(default)]
+    pub bulk: bool,
 }
 
 /// An image embedded in an HTML body and referenced as `cid:`.
@@ -339,6 +343,12 @@ pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
         attachments: attachment_parts(&message).map(attachment_info).collect(),
         in_reply_to: id_list(message.in_reply_to()).into_iter().next(),
         references: id_list(message.references()),
+        bulk: crate::focus::bulk_headers(
+            message.header_raw("List-Unsubscribe").is_some(),
+            message.header_raw("List-Id").is_some(),
+            message.header_raw("Precedence"),
+            message.header_raw("Auto-Submitted"),
+        ),
     })
 }
 
@@ -479,5 +489,13 @@ SGVsbG8=\r\n\
         fn preview_respects_the_limit(text in ".{0,1000}", max in 0usize..200) {
             prop_assert!(make_preview(&text, max).chars().count() <= max);
         }
+    }
+
+    #[test]
+    fn list_headers_mark_mail_as_bulk() {
+        let news = b"From: editor@paper.example\r\nTo: me@x.example\r\nSubject: News\r\nList-Unsubscribe: <mailto:u@paper.example>\r\n\r\nHi";
+        assert!(parse_summary(news).unwrap().bulk);
+        let person = b"From: peter@client.example\r\nTo: me@x.example\r\nSubject: Quote\r\n\r\nHi";
+        assert!(!parse_summary(person).unwrap().bulk);
     }
 }

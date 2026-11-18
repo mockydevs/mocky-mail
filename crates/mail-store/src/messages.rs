@@ -67,6 +67,10 @@ pub struct ListQuery {
     pub offset: u32,
     /// Page size, capped at [`MAX_PAGE_SIZE`].
     pub limit: u32,
+    /// Focused Inbox: only this half of inbox folders (other folders are
+    /// unaffected). `None` shows everything.
+    #[serde(default)]
+    pub focus: Option<mail_core::focus::Focus>,
 }
 
 /// One row of the message list.
@@ -154,12 +158,41 @@ macro_rules! item_columns {
 macro_rules! list_where {
     () => {
         " FROM messages m JOIN folders f ON f.id = m.folder_id
+          LEFT JOIN focus_rules r1 ON r1.sender = lower(m.from_address)
+          LEFT JOIN focus_rules r2
+                 ON r2.sender = '@' || substr(lower(m.from_address), instr(m.from_address, '@') + 1)
           WHERE (?1 IS NULL OR m.account_id = ?1)
             AND (?2 IS NULL OR m.folder_id = ?2)
             AND (?3 IS NULL OR f.role = ?3)
             AND (?4 = 0 OR (?4 = 1 AND m.seen = 0) OR (?4 = 2 AND m.flagged = 1))
             AND (?5 IS NULL OR m.seq IN
-                 (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?5))"
+                 (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?5))
+            AND (?8 IS NULL OR f.role != 'inbox' OR coalesce(r1.focus, r2.focus,
+                 CASE
+                   WHEN lower(coalesce(m.from_address, '')) IN (
+                     SELECT lower(json_extract(t.value, '$.address'))
+                     FROM messages s JOIN folders sf ON sf.id = s.folder_id, json_each(s.to_json) t
+                     WHERE sf.role = 'sent') THEN 'focused'
+                   WHEN m.bulk = 1
+                     OR lower(coalesce(m.from_address, '')) GLOB 'noreply*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'no-reply*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'no_reply*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'donotreply*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'do-not-reply*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'do_not_reply*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'notification*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'newsletter*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'mailer-daemon*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'postmaster*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'bounce*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'marketing*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'news@*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'alerts@*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'alert@*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'updates@*'
+                     OR lower(coalesce(m.from_address, '')) GLOB 'digest@*' THEN 'other'
+                   ELSE 'focused'
+                 END) = ?8)"
     };
 }
 
@@ -306,7 +339,7 @@ fn update_headers(
              from_address = ?6, to_json = ?7, cc_json = ?8, reply_to_json = ?9,
              references_json = ?10, attachments_json = ?11, in_reply_to = ?12, date = ?13,
              preview = ?14, has_attachments = ?15, seen = ?16, flagged = ?17, answered = ?18,
-             size = ?19
+             size = ?19, bulk = ?20
          WHERE id = ?1",
         params![
             id,
@@ -328,6 +361,7 @@ fn update_headers(
             flags.flagged,
             flags.answered,
             size,
+            s.bulk,
         ],
     )?;
     Ok(())
@@ -479,12 +513,17 @@ impl Store {
         let role = query.role.map(role_str);
         let limit = i64::from(query.limit.min(MAX_PAGE_SIZE));
         let offset = i64::from(query.offset);
+        let focus = query.focus.map(mail_core::focus::Focus::as_str);
+        // ?6 and ?7 (page) are unused by the count but must be bound: ?8 is the focus.
         let selectors = params![
             query.account_id,
             query.folder_id,
             role,
             query.filter.code(),
-            search
+            search,
+            0,
+            0,
+            focus
         ];
         let conn = self.conn();
         let total: i64 = conn
@@ -505,7 +544,8 @@ impl Store {
                     query.filter.code(),
                     search,
                     limit,
-                    offset
+                    offset,
+                    focus
                 ],
                 ItemRow::read,
             )?
@@ -537,6 +577,7 @@ impl Store {
         let role = query.role.map(role_str);
         let limit = i64::from(query.limit.min(MAX_PAGE_SIZE));
         let offset = i64::from(query.offset);
+        let focus = query.focus.map(mail_core::focus::Focus::as_str);
         let conn = self.conn();
         let total: i64 = conn
             .prepare_cached(concat!(
@@ -549,7 +590,10 @@ impl Store {
                     query.folder_id,
                     role,
                     query.filter.code(),
-                    search
+                    search,
+                    0,
+                    0,
+                    focus
                 ],
                 |row| row.get(0),
             )?;
@@ -579,7 +623,8 @@ impl Store {
                 query.filter.code(),
                 search,
                 limit,
-                offset
+                offset,
+                focus
             ],
             |row| {
                 Ok((
@@ -1659,5 +1704,99 @@ mod tests {
         let page = f.store.list_threads(&query()).unwrap();
         assert_eq!(page.items.len(), 2);
         assert_eq!(f.store.get_thread(&only).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn focused_inbox_sorts_people_from_machines() {
+        use mail_core::focus::Focus;
+        let f = fixture();
+        let sent = add_folder(&f.store, &f.account, "Sent", FolderRole::Sent);
+        let archive = add_folder(&f.store, &f.account, "Archive", FolderRole::Archive);
+        let from = |subject: &str, date: i64, address: &str, bulk: bool| {
+            let mut m = summary(subject, date);
+            m.from = Some(mail_core::message::Mailbox {
+                name: None,
+                address: address.into(),
+            });
+            m.bulk = bulk;
+            m
+        };
+        add_message(
+            &f.store,
+            &f.inbox,
+            1,
+            &from("Quote", 1, "peter@client.example", false),
+        );
+        add_message(
+            &f.store,
+            &f.inbox,
+            2,
+            &from("Weekly news", 2, "editor@paper.example", true),
+        );
+        add_message(
+            &f.store,
+            &f.inbox,
+            3,
+            &from("Your code", 3, "noreply@bank.example", false),
+        );
+        add_message(
+            &f.store,
+            &f.inbox,
+            4,
+            &from("Agenda", 4, "events@club.example", true),
+        );
+        add_message(
+            &f.store,
+            &archive,
+            1,
+            &from("Old news", 5, "editor@paper.example", true),
+        );
+        // I write to the club: their list mail is Focused for me.
+        let mut mine = summary("Re: Agenda", 6);
+        mine.to = vec![mail_core::message::Mailbox {
+            name: None,
+            address: "Events@Club.example".into(),
+        }];
+        add_message(&f.store, &sent, 1, &mine);
+
+        let view = |focus| ListQuery {
+            role: Some(FolderRole::Inbox),
+            focus: Some(focus),
+            ..query()
+        };
+        assert_eq!(
+            subjects(&f.store.list_messages(&view(Focus::Focused)).unwrap()),
+            ["Agenda", "Quote"]
+        );
+        assert_eq!(
+            subjects(&f.store.list_messages(&view(Focus::Other)).unwrap()),
+            ["Your code", "Weekly news"]
+        );
+        assert_eq!(f.store.list_threads(&view(Focus::Other)).unwrap().total, 2);
+        // Other folders ignore the split.
+        let archived = ListQuery {
+            folder_id: Some(archive.clone()),
+            focus: Some(Focus::Focused),
+            ..query()
+        };
+        assert_eq!(
+            subjects(&f.store.list_messages(&archived).unwrap()),
+            ["Old news"]
+        );
+
+        // Rules by address and by domain win.
+        f.store
+            .set_focus_rule("@paper.example", Some(Focus::Focused))
+            .unwrap();
+        f.store
+            .set_focus_rule("peter@client.example", Some(Focus::Other))
+            .unwrap();
+        assert_eq!(
+            subjects(&f.store.list_messages(&view(Focus::Focused)).unwrap()),
+            ["Agenda", "Weekly news"]
+        );
+        assert_eq!(f.store.focus_rules().unwrap().len(), 2);
+        f.store.set_focus_rule("@paper.example", None).unwrap();
+        assert_eq!(f.store.focus_rules().unwrap().len(), 1);
     }
 }

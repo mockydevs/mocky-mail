@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useRef, useState, type SyntheticEvent } from 're
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, AttachmentMeta, FolderRole, MessageDetail, MessageListItem } from '../../api/types';
+import type { Account, AppError, AttachmentMeta, Focus, FolderRole, MessageDetail, MessageListItem } from '../../api/types';
 import { formatBytes, formatListTime, formatLongDate, nowSeconds } from '../../lib/format';
 import { useLoad } from '../../lib/useLoad';
 import type { Theme } from '../../theme/useTheme';
@@ -42,6 +42,10 @@ interface Props extends ReaderActions {
   narrow?: boolean;
   /** Phone layout: back to the message list. */
   onBack?: () => void;
+  /** Focused Inbox: the half this message is shown in, or null when the inbox isn't split. */
+  focusTab?: Focus | null;
+  /** Always put this sender's mail in the other half. */
+  onFocusRule?: (sender: string, focus: Focus) => void;
 }
 
 export const ReadingPane = forwardRef<HTMLElement, Props>(function ReadingPane(props, ref) {
@@ -202,7 +206,21 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
   };
 
   // Whole-message actions, in the More menu on both layouts.
-  const extras: { key: string; label: string; icon: 'print' | 'download' | 'code'; run: () => void }[] = [
+  const senderAddress = message.from?.address;
+  const moveTo: Focus | null = props.focusTab === 'focused' ? 'other' : props.focusTab === 'other' ? 'focused' : null;
+  const extras: { key: string; label: string; icon: 'print' | 'download' | 'code' | 'inbox'; run: () => void }[] = [
+    ...(moveTo && senderAddress && props.onFocusRule
+      ? [
+          {
+            key: 'focus',
+            label: moveTo === 'other' ? 'Always move this sender to Other' : 'Always move this sender to Focused',
+            icon: 'inbox' as const,
+            run: () => {
+              props.onFocusRule?.(senderAddress, moveTo);
+            },
+          },
+        ]
+      : []),
     {
       key: 'print',
       label: 'Print',

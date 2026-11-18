@@ -5,6 +5,49 @@ use rusqlite::{OptionalExtension, params};
 use crate::{Result, Store};
 
 impl Store {
+    /// Set (`Some`) or clear (`None`) the Focused Inbox rule for a sender
+    /// key: an address, or `@domain`.
+    ///
+    /// # Errors
+    /// Fails on a database error.
+    pub fn set_focus_rule(
+        &self,
+        sender: &str,
+        focus: Option<mail_core::focus::Focus>,
+    ) -> Result<()> {
+        match focus {
+            Some(focus) => self.conn().execute(
+                "INSERT INTO focus_rules (sender, focus) VALUES (?1, ?2)
+                 ON CONFLICT (sender) DO UPDATE SET focus = excluded.focus",
+                params![sender, focus.as_str()],
+            )?,
+            None => self
+                .conn()
+                .execute("DELETE FROM focus_rules WHERE sender = ?1", params![sender])?,
+        };
+        Ok(())
+    }
+
+    /// The user's Focused Inbox rules: sender key and where it goes.
+    ///
+    /// # Errors
+    /// Fails on a database error.
+    pub fn focus_rules(&self) -> Result<Vec<(String, mail_core::focus::Focus)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT sender, focus FROM focus_rules ORDER BY sender")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (sender, focus) = row?;
+            if let Some(focus) = mail_core::focus::Focus::parse(&focus) {
+                out.push((sender, focus));
+            }
+        }
+        Ok(out)
+    }
+
     /// The stored value for `key`, if any.
     ///
     /// # Errors

@@ -3394,3 +3394,27 @@ button.contact-row:hover,
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Focused Inbox: Focused | Other, above the read filters. */
+.focus-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.focus-tab {
+  padding: 6px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.focus-tab[aria-selected='true'] {
+  border-bottom-color: var(--primary);
+  color: var(--text);
+}

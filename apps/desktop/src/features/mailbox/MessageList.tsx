@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import type { Account, AppError, FolderRole, MessageListItem, ReadFilter } from '../../api/types';
+import type { Account, AppError, Focus, FolderRole, MessageListItem, ReadFilter } from '../../api/types';
 import { dayGroup, formatListTime } from '../../lib/format';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
@@ -23,6 +23,9 @@ interface Props {
   hasMore: boolean;
   loadingMore: boolean;
   onFilter: (filter: ReadFilter) => void;
+  /** Focused Inbox: the half shown, or null when the inbox isn't split. */
+  focus?: Focus | null;
+  onFocus?: (focus: Focus) => void;
   onSelect: (id: string) => void;
   onLoadMore: () => void;
   onRetry: () => void;
@@ -101,6 +104,24 @@ export function MessageList(props: Props) {
             {props.subtitle}
           </span>
         </div>
+        {props.focus && (
+          <div className="focus-tabs" role="tablist" aria-label="Focused Inbox">
+            {(['focused', 'other'] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                role="tab"
+                className="focus-tab"
+                aria-selected={props.focus === f}
+                onClick={() => {
+                  props.onFocus?.(f);
+                }}
+              >
+                {f === 'focused' ? 'Focused' : 'Other'}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="tabs" role="group" aria-label="Show">
           {FILTERS.map((f) => (
             <button
