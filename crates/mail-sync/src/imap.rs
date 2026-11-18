@@ -739,6 +739,26 @@ impl ImapConnection {
         Ok(())
     }
 
+    /// Rename a folder (its subfolders move with it).
+    ///
+    /// # Errors
+    /// Network or server errors, including a name already in use.
+    pub async fn rename_folder(&mut self, from: &str, to: &str) -> Result<(), SyncError> {
+        let host = self.host.clone();
+        within(&host, self.session.rename(from, to)).await??;
+        Ok(())
+    }
+
+    /// Delete a folder and the messages in it.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn delete_folder(&mut self, path: &str) -> Result<(), SyncError> {
+        let host = self.host.clone();
+        within(&host, self.session.delete(path)).await??;
+        Ok(())
+    }
+
     /// Store a message in a folder (a copy in Sent, or a draft).
     ///
     /// # Errors

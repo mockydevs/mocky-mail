@@ -28,6 +28,7 @@ import { playChime } from '../features/notifications/chime';
 import { ReadingPane } from '../features/reader/ReadingPane';
 import { SettingsView } from '../features/settings/SettingsView';
 import { ContactsView } from '../features/contacts/ContactsView';
+import { ManageFolders } from '../features/mailbox/ManageFolders';
 import { HelpSheet } from '../features/shortcuts/HelpSheet';
 import { shortcutFor, type ShortcutAction } from '../features/shortcuts/shortcuts';
 import { nowSeconds } from '../lib/format';
@@ -247,6 +248,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [pinned, setPinned] = useState<MessageListItem | null>(null);
   const [loaded, setLoaded] = useState<MessageDetail | null>(null);
   const [help, setHelp] = useState(false);
+  // The account whose folders are being managed, if any.
+  const [managing, setManaging] = useState<string | null>(null);
+  const managedAccount = managing === null ? undefined : accounts.find((a) => a.id === managing);
   const phone = usePhone();
   /** Phones: the folder menu slid in over the list. */
   const [drawer, setDrawer] = useState(false);
@@ -755,6 +759,10 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
                 setDrawer(false);
                 setScreen({ kind: 'contacts' });
               }}
+              onManageFolders={(accountId) => {
+                setDrawer(false);
+                setManaging(accountId);
+              }}
               onAddAccount={() => {
                 setDrawer(false);
                 setScreen({ kind: 'addAccount' });
@@ -806,6 +814,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             <Icon name="close" />
           </button>
         </div>
+      )}
+      {managedAccount && (
+        <ManageFolders
+          account={managedAccount}
+          folders={foldersByAccount[managedAccount.id] ?? []}
+          onClose={() => {
+            setManaging(null);
+          }}
+        />
       )}
       {help && (
         <HelpSheet

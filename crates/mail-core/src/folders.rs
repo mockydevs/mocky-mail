@@ -147,6 +147,89 @@ fn decode_base64_utf16(chunk: &str) -> Option<String> {
     String::from_utf16(&units).ok()
 }
 
+/// Longest folder name accepted, in characters.
+pub const MAX_FOLDER_NAME_CHARS: usize = 100;
+
+/// A folder name as typed, checked and tidied. `delimiter` is the server's
+/// level separator (`/` or `.`), which a name can't contain.
+///
+/// # Errors
+/// Plain words for the user when the name can't be used.
+pub fn clean_folder_name(name: &str, delimiter: Option<&str>) -> Result<String, String> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Err("Type a name for the folder.".to_owned());
+    }
+    if name.chars().count() > MAX_FOLDER_NAME_CHARS {
+        return Err(format!(
+            "Use a shorter name (up to {MAX_FOLDER_NAME_CHARS} characters)."
+        ));
+    }
+    if name.eq_ignore_ascii_case("inbox") {
+        return Err("Inbox is taken; choose another name.".to_owned());
+    }
+    if let Some(d) = delimiter.filter(|d| !d.is_empty())
+        && name.contains(d)
+    {
+        return Err(format!(
+            "Folder names can't contain \"{d}\" on this server."
+        ));
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '*' | '%' | '"' | '\\'))
+    {
+        return Err("Folder names can't contain * % \" or \\.".to_owned());
+    }
+    Ok(name)
+}
+
+/// Encode a folder name for IMAP (modified UTF-7, RFC 3501 5.1.3).
+#[must_use]
+pub fn encode_folder_name(name: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,";
+    let mut out = String::with_capacity(name.len());
+    let mut pending: Vec<u16> = Vec::new();
+    let flush = |pending: &mut Vec<u16>, out: &mut String| {
+        if pending.is_empty() {
+            return;
+        }
+        out.push('&');
+        let mut bits: u32 = 0;
+        let mut count: u32 = 0;
+        for unit in pending.drain(..) {
+            bits = (bits << 16) | u32::from(unit);
+            count = count.saturating_add(16);
+            while count >= 6 {
+                count = count.saturating_sub(6);
+                let index = usize::try_from((bits >> count) & 0x3f).unwrap_or(0);
+                out.push(char::from(ALPHABET.get(index).copied().unwrap_or(b'A')));
+            }
+            bits &= (1u32 << count).saturating_sub(1);
+        }
+        if count > 0 {
+            let index = usize::try_from((bits << (6u32.saturating_sub(count))) & 0x3f).unwrap_or(0);
+            out.push(char::from(ALPHABET.get(index).copied().unwrap_or(b'A')));
+        }
+        out.push('-');
+    };
+    for c in name.chars() {
+        if (' '..='~').contains(&c) {
+            flush(&mut pending, &mut out);
+            if c == '&' {
+                out.push_str("&-");
+            } else {
+                out.push(c);
+            }
+        } else {
+            let mut buf = [0u16; 2];
+            pending.extend_from_slice(c.encode_utf16(&mut buf));
+        }
+    }
+    flush(&mut pending, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +291,45 @@ mod tests {
         #[test]
         fn ascii_without_ampersand_is_unchanged(name in "[ -%'-~]{0,60}") {
             prop_assert_eq!(decode_folder_name(&name), name);
+        }
+    }
+
+    #[test]
+    fn folder_names_encode_for_imap_and_back() {
+        assert_eq!(encode_folder_name("Clients"), "Clients");
+        assert_eq!(encode_folder_name("R&D"), "R&-D");
+        assert_eq!(encode_folder_name("Entwürfe"), "Entw&APw-rfe");
+        assert_eq!(encode_folder_name("台北"), "&U,BTFw-");
+        for name in [
+            "Wateja 2026",
+            "Café ☕ orders",
+            "Tickets & Quotes",
+            "😀 Fun",
+            "日本語/テスト",
+        ] {
+            assert_eq!(decode_folder_name(&encode_folder_name(name)), name);
+        }
+    }
+
+    #[test]
+    fn folder_names_are_checked() {
+        assert_eq!(
+            clean_folder_name("  Client   Orders ", Some("/")).unwrap(),
+            "Client Orders"
+        );
+        assert!(clean_folder_name("", Some("/")).is_err());
+        assert!(clean_folder_name("a/b", Some("/")).is_err());
+        assert!(clean_folder_name("a.b", Some(".")).is_err());
+        assert!(clean_folder_name("a.b", Some("/")).is_ok());
+        assert!(clean_folder_name("INBOX", None).is_err());
+        assert!(clean_folder_name("x*", None).is_err());
+        assert!(clean_folder_name(&"x".repeat(101), None).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn any_name_round_trips(name in "\\PC{1,30}") {
+            prop_assert_eq!(decode_folder_name(&encode_folder_name(&name)), name);
         }
     }
 }

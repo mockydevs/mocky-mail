@@ -16,6 +16,7 @@ mod error;
 mod events;
 #[cfg(target_os = "android")]
 mod files_android;
+mod folders;
 #[cfg(target_os = "android")]
 mod google_android;
 mod mail;
@@ -157,6 +158,9 @@ pub fn run() {
             accounts::update_account,
             accounts::remove_account,
             mail::list_folders,
+            folders::create_folder,
+            folders::rename_folder,
+            folders::delete_folder,
             mail::list_messages,
             mail::get_message,
             mail::set_flags,

@@ -99,6 +99,9 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `remove_account` | `{ id }` | `void` (deletes local mail and keyring entry, not server mail) |
 | `list_accounts` | | `Account[]` |
 | `list_folders` | `{ accountId }` | `Folder[]` (sorted by role, then name) |
+| `create_folder` | `{ accountId, name, parentId: string \| null }` | `void` (IMAP CREATE now, online only; name encoded as modified UTF-7; top-level folders go under `INBOX.` on servers that keep everything there; the folder list is re-read and `mail://changed` emitted) |
+| `rename_folder` | `{ folderId, name }` | `void` (own folders only; built-in ones are refused with `invalid`) |
+| `delete_folder` | `{ folderId }` | `void` (own folders only, and not while they contain folders; the mail in it is deleted on the server) |
 | `list_messages` | `{ query: ListQuery }` | `MessagePage` (newest first) |
 | `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read) |
 | `set_flags` | `{ ids, seen?: boolean, flagged?: boolean }` | `void` (local at once, server when online) |

@@ -382,7 +382,7 @@ fn leaf_name(path: &str, delimiter: Option<&str>) -> String {
     decode_folder_name(leaf)
 }
 
-async fn refresh_folders(
+pub(crate) async fn refresh_folders(
     state: &AppState,
     account: &Account,
     conn: &mut ImapConnection,

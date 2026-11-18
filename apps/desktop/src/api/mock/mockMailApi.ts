@@ -369,6 +369,51 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
 
     listAccounts: () => run('listAccounts', () => accounts),
 
+    createFolder: (accountId, name, parentId) =>
+      run('createFolder', () => {
+        const clean = name.trim().replace(/\s+/g, ' ');
+        if (!clean) throw appError('invalid', 'Type a name for the folder.');
+        const parent = parentId ? folders.find((f) => f.id === parentId) : undefined;
+        const delimiter = parent?.delimiter ?? '/';
+        if (clean.includes(delimiter)) throw appError('invalid', `Folder names can't contain "${delimiter}" on this server.`);
+        const path = parent ? `${parent.path}${delimiter}${clean}` : clean;
+        if (folders.some((f) => f.accountId === accountId && f.path.toLowerCase() === path.toLowerCase())) {
+          throw appError('invalid', "There's already a folder with that name here.");
+        }
+        folders = [...folders, { id: `${accountId}:${path}`, accountId, name: clean, path, role: 'other', delimiter }];
+        changed(accountId, []);
+      }),
+
+    renameFolder: (folderId, name) =>
+      run('renameFolder', () => {
+        const folder = folders.find((f) => f.id === folderId);
+        if (!folder) throw appError('not_found', 'That folder no longer exists.');
+        if (folder.role !== 'other') throw appError('invalid', `${folder.name} is a built-in folder, so it can't be renamed or deleted.`);
+        const clean = name.trim();
+        if (!clean) throw appError('invalid', 'Type a name for the folder.');
+        const d = folder.delimiter ?? '/';
+        const parent = folder.path.includes(d) ? folder.path.slice(0, folder.path.lastIndexOf(d) + 1) : '';
+        const path = `${parent}${clean}`;
+        folders = folders.map((f) =>
+          f.id === folderId ? { ...f, name: clean, path } : f.path.startsWith(`${folder.path}${d}`) ? { ...f, path: path + f.path.slice(folder.path.length) } : f,
+        );
+        changed(folder.accountId, []);
+      }),
+
+    deleteFolder: (folderId) =>
+      run('deleteFolder', () => {
+        const folder = folders.find((f) => f.id === folderId);
+        if (!folder) throw appError('not_found', 'That folder no longer exists.');
+        if (folder.role !== 'other') throw appError('invalid', `${folder.name} is a built-in folder, so it can't be renamed or deleted.`);
+        const d = folder.delimiter ?? '/';
+        if (folders.some((f) => f.path.startsWith(`${folder.path}${d}`) && f.accountId === folder.accountId)) {
+          throw appError('invalid', `${folder.name} has folders inside it. Delete or move those first.`);
+        }
+        folders = folders.filter((f) => f.id !== folderId);
+        messages = messages.filter((m) => m.folderId !== folderId);
+        changed(folder.accountId, []);
+      }),
+
     listFolders: (accountId) =>
       run('listFolders', () =>
         folders

@@ -3225,3 +3225,63 @@ button.contact-row:hover,
 .toolbar__more {
   margin-left: auto;
 }
+
+/* "Manage folders" link under an account's folders, and its dialog. */
+.nav__item--quiet {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.folder-manage__new {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 16px 0 20px;
+}
+
+.folder-manage__new .form-field {
+  width: 100%;
+}
+
+.folder-manage__title {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.folder-manage__list {
+  display: flex;
+  flex-direction: column;
+  max-height: 40vh;
+  margin: 0 0 12px;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.folder-manage__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.folder-manage__name {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.folder-manage__rename {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.folder-manage__rename .field {
+  flex: 1 1 160px;
+}

@@ -320,6 +320,12 @@ export interface MailApi {
   removeAccount(id: string): Promise<void>;
   listAccounts(): Promise<Account[]>;
   listFolders(accountId: string): Promise<Folder[]>;
+  /** A new folder on the server, at the top or inside `parentId`. */
+  createFolder(accountId: string, name: string, parentId: string | null): Promise<void>;
+  /** Rename one of the user's own folders. */
+  renameFolder(folderId: string, name: string): Promise<void>;
+  /** Delete one of the user's own folders and the mail in it. */
+  deleteFolder(folderId: string): Promise<void>;
   listMessages(query: ListQuery): Promise<MessagePage>;
   getMessage(id: string, allowRemote: boolean): Promise<MessageDetail>;
   setFlags(ids: string[], change: FlagChange): Promise<void>;
