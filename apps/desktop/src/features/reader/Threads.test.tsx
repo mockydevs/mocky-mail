@@ -83,7 +83,7 @@ describe('conversations', () => {
   });
 
   it('can be switched off in Settings', async () => {
-    renderApp({ messages, settings: { theme: 'system', remoteImages: 'block', notifications: false, sound: false, undoSendSecs: 5, markRead: 'open', threads: false, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3 } });
+    renderApp({ messages, settings: { theme: 'system', remoteImages: 'block', notifications: false, sound: false, undoSendSecs: 5, markRead: 'open', threads: false, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15 } });
     const list = await rows();
     expect(list.getAllByRole('button', { name: /Kitchen quote/ })).toHaveLength(2);
   });

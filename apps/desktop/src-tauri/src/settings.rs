@@ -37,7 +37,14 @@ pub struct Settings {
     pub check_every_mins: u32,
     /// Seconds a message must stay open to count as read ("delay").
     pub mark_read_delay_secs: u32,
+    /// Notifications before calendar events.
+    pub event_reminders: bool,
+    /// Reminder for new events, minutes before; -1 for none.
+    pub default_reminder_mins: i32,
 }
+
+/// Default-reminder choices offered in Settings, minutes (-1: none).
+pub const REMINDER_CHOICES: [i32; 9] = [-1, 0, 5, 10, 15, 30, 60, 120, 1440];
 
 /// Check-interval choices offered in Settings, minutes.
 pub const CHECK_EVERY_CHOICES: [u32; 6] = [1, 2, 5, 10, 15, 30];
@@ -60,6 +67,8 @@ impl Default for Settings {
             focused_inbox: false,
             check_every_mins: 2,
             mark_read_delay_secs: 3,
+            event_reminders: true,
+            default_reminder_mins: 15,
         }
     }
 }
@@ -83,6 +92,9 @@ impl Settings {
         }
         if !MARK_READ_DELAY_CHOICES.contains(&self.mark_read_delay_secs) {
             self.mark_read_delay_secs = 3;
+        }
+        if !REMINDER_CHOICES.contains(&self.default_reminder_mins) {
+            self.default_reminder_mins = 15;
         }
         self
     }
@@ -137,6 +149,8 @@ mod tests {
             focused_inbox: true,
             check_every_mins: 7,
             mark_read_delay_secs: 0,
+            event_reminders: false,
+            default_reminder_mins: 7,
         }
         .normalized();
         assert_eq!(s.theme, "system");
@@ -146,6 +160,7 @@ mod tests {
         assert_eq!(s.mark_read, "open");
         assert_eq!(s.check_every_mins, 2);
         assert_eq!(s.mark_read_delay_secs, 3);
+        assert_eq!(s.default_reminder_mins, 15);
     }
 
     #[test]

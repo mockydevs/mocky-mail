@@ -25,6 +25,7 @@ mod mail;
 mod mailto;
 mod message_tools;
 mod outbox;
+mod reminders;
 mod settings;
 mod signatures;
 mod state;
@@ -126,6 +127,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     contacts::start(handle.clone(), Arc::clone(&state));
     calendar::start(handle.clone(), Arc::clone(&state));
+    reminders::start(handle.clone(), Arc::clone(&state));
     tauri::async_runtime::spawn(outbox::run(handle, state));
     Ok(())
 }

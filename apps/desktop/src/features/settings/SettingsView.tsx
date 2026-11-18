@@ -1,28 +1,20 @@
-import { useId, useRef, useState, type SyntheticEvent } from "react";
+import { useId, useRef, useState, type SyntheticEvent } from 'react';
 
-import { useMailApi } from "../../api/MailApiContext";
-import { toAppError } from "../../api/errors";
-import type {
-  Account,
-  AppError,
-  Settings,
-  ThemeSetting,
-  MarkReadSetting,
-} from "../../api/types";
-import { ConfirmDialog } from "../../ui/Modal";
-import { Icon } from "../../ui/Icon";
-import { PasswordField } from "../../ui/PasswordField";
-import { playChime } from "../notifications/chime";
-import { accountErrorCopy } from "../accounts/providers";
-import { SignatureEditor } from "./SignatureEditor";
+import { useMailApi } from '../../api/MailApiContext';
+import { toAppError } from '../../api/errors';
+import type { Account, AppError, Settings, ThemeSetting, MarkReadSetting } from '../../api/types';
+import { ConfirmDialog } from '../../ui/Modal';
+import { Icon } from '../../ui/Icon';
+import { PasswordField } from '../../ui/PasswordField';
+import { reminderText } from '../calendar/calendarTime';
+import { playChime } from '../notifications/chime';
+import { accountErrorCopy } from '../accounts/providers';
+import { SignatureEditor } from './SignatureEditor';
 
 const MARK_READ: readonly [MarkReadSetting, string][] = [
-  ["open", "Mark as read as soon as I open a message"],
-  [
-    "delay",
-    "Mark as read after a few seconds open (a quick peek stays unread)",
-  ],
-  ["manual", "Only when I choose Mark as read"],
+  ['open', 'Mark as read as soon as I open a message'],
+  ['delay', 'Mark as read after a few seconds open (a quick peek stays unread)'],
+  ['manual', 'Only when I choose Mark as read'],
 ];
 
 /** Same choices as the backend accepts (settings.rs). */
@@ -41,14 +33,7 @@ interface Props {
   onClose: () => void;
 }
 
-export function SettingsView({
-  settings,
-  accounts,
-  onChange,
-  onAccountsChanged,
-  onAddAccount,
-  onClose,
-}: Props) {
+export function SettingsView({ settings, accounts, onChange, onAccountsChanged, onAddAccount, onClose }: Props) {
   const id = useId();
 
   return (
@@ -57,12 +42,7 @@ export function SettingsView({
         <h1 id={`${id}-title`} className="settings__title">
           Settings
         </h1>
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label="Close settings"
-          onClick={onClose}
-        >
+        <button type="button" className="icon-btn" aria-label="Close settings" onClick={onClose}>
           <Icon name="close" />
         </button>
       </header>
@@ -71,7 +51,7 @@ export function SettingsView({
         <div className="settings__columns">
           <fieldset className="settings__group">
             <legend className="settings__legend">Appearance</legend>
-            {(["system", "light", "dark"] as ThemeSetting[]).map((theme) => (
+            {(['system', 'light', 'dark'] as ThemeSetting[]).map((theme) => (
               <label key={theme} className="choice">
                 <input
                   type="radio"
@@ -81,11 +61,7 @@ export function SettingsView({
                     onChange({ ...settings, theme });
                   }}
                 />
-                {theme === "system"
-                  ? "Match my system"
-                  : theme === "light"
-                    ? "Light"
-                    : "Dark"}
+                {theme === 'system' ? 'Match my system' : theme === 'light' ? 'Light' : 'Dark'}
               </label>
             ))}
           </fieldset>
@@ -96,21 +72,20 @@ export function SettingsView({
               <input
                 type="radio"
                 name={`${id}-images`}
-                checked={settings.remoteImages === "block"}
+                checked={settings.remoteImages === 'block'}
                 onChange={() => {
-                  onChange({ ...settings, remoteImages: "block" });
+                  onChange({ ...settings, remoteImages: 'block' });
                 }}
               />
-              Ask before loading images from the internet (recommended; stops
-              senders tracking when you read)
+              Ask before loading images from the internet (recommended; stops senders tracking when you read)
             </label>
             <label className="choice">
               <input
                 type="radio"
                 name={`${id}-images`}
-                checked={settings.remoteImages === "allow"}
+                checked={settings.remoteImages === 'allow'}
                 onChange={() => {
-                  onChange({ ...settings, remoteImages: "allow" });
+                  onChange({ ...settings, remoteImages: 'allow' });
                 }}
               />
               Always load images
@@ -150,10 +125,9 @@ export function SettingsView({
                   onChange({ ...settings, focusedInbox: e.target.checked });
                 }}
               />
-              Focused Inbox: put newsletters and notifications in a separate
-              Other tab
+              Focused Inbox: put newsletters and notifications in a separate Other tab
             </label>
-            {settings.markRead === "delay" && (
+            {settings.markRead === 'delay' && (
               <label className="form-field">
                 <span className="form-field__label">Mark as read after</span>
                 <select
@@ -168,7 +142,7 @@ export function SettingsView({
                 >
                   {READ_DELAY.map((secs) => (
                     <option key={secs} value={secs}>
-                      {secs === 1 ? "1 second" : `${String(secs)} seconds`}
+                      {secs === 1 ? '1 second' : `${String(secs)} seconds`}
                     </option>
                   ))}
                 </select>
@@ -179,9 +153,7 @@ export function SettingsView({
           <fieldset className="settings__group">
             <legend className="settings__legend">Checking for mail</legend>
             <label className="form-field">
-              <span className="form-field__label">
-                Check for new mail every
-              </span>
+              <span className="form-field__label">Check for new mail every</span>
               <select
                 className="field"
                 value={settings.checkEveryMins}
@@ -194,15 +166,14 @@ export function SettingsView({
               >
                 {CHECK_EVERY.map((mins) => (
                   <option key={mins} value={mins}>
-                    {mins === 1 ? "1 minute" : `${String(mins)} minutes`}
+                    {mins === 1 ? '1 minute' : `${String(mins)} minutes`}
                   </option>
                 ))}
               </select>
             </label>
             <p className="form-hint">
-              Most servers tell Mocky Mail about new mail straight away; this is
-              for those that can't. Other folders are checked at least every 10
-              minutes.
+              Most servers tell Mocky Mail about new mail straight away; this is for those that can't. Other folders are
+              checked at least every 10 minutes.
             </p>
           </fieldset>
 
@@ -222,16 +193,12 @@ export function SettingsView({
               >
                 {UNDO_SEND.map((secs) => (
                   <option key={secs} value={secs}>
-                    {secs === 0
-                      ? "Off: send at once"
-                      : `${String(secs)} seconds`}
+                    {secs === 0 ? 'Off: send at once' : `${String(secs)} seconds`}
                   </option>
                 ))}
               </select>
             </label>
-            <p className="form-hint">
-              After you tap Send, you have this long to take a message back.
-            </p>
+            <p className="form-hint">After you tap Send, you have this long to take a message back.</p>
           </fieldset>
 
           <fieldset className="settings__group">
@@ -268,33 +235,47 @@ export function SettingsView({
                 Play sound
               </button>
             </div>
+            <label className="choice">
+              <input
+                type="checkbox"
+                checked={settings.eventReminders}
+                onChange={(e) => {
+                  onChange({ ...settings, eventReminders: e.target.checked });
+                }}
+              />
+              Remind me before calendar events
+            </label>
+            <label className="form-field">
+              <span className="form-field__label">Reminder for new events</span>
+              <select
+                className="field"
+                value={settings.defaultReminderMins}
+                onChange={(e) => {
+                  onChange({ ...settings, defaultReminderMins: Number(e.target.value) });
+                }}
+              >
+                {[-1, 0, 5, 10, 15, 30, 60, 120, 1440].map((m) => (
+                  <option key={m} value={m}>
+                    {reminderText(m)}
+                  </option>
+                ))}
+              </select>
+            </label>
             <p className="form-hint">
-              If nothing appears, check that notifications are allowed for Mocky
-              Mail in your system settings.
+              If nothing appears, check that notifications are allowed for Mocky Mail in your system settings.
             </p>
           </fieldset>
 
-          <section
-            className="settings__group settings__group--wide"
-            aria-labelledby={`${id}-accounts`}
-          >
+          <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`}>
             <h2 id={`${id}-accounts`} className="settings__legend">
               Accounts
             </h2>
             <ul className="account-list">
               {accounts.map((account) => (
-                <AccountRow
-                  key={account.id}
-                  account={account}
-                  onChanged={onAccountsChanged}
-                />
+                <AccountRow key={account.id} account={account} onChanged={onAccountsChanged} />
               ))}
             </ul>
-            <button
-              type="button"
-              className="btn btn--secondary"
-              onClick={onAddAccount}
-            >
+            <button type="button" className="btn btn--secondary" onClick={onAddAccount}>
               <Icon name="plus" />
               Add account
             </button>
@@ -305,13 +286,7 @@ export function SettingsView({
   );
 }
 
-function AccountRow({
-  account,
-  onChanged,
-}: {
-  account: Account;
-  onChanged: () => void;
-}) {
+function AccountRow({ account, onChanged }: { account: Account; onChanged: () => void }) {
   const api = useMailApi();
   const id = useId();
   const passwordRef = useRef<HTMLInputElement>(null);
@@ -343,35 +318,27 @@ function AccountRow({
     event.preventDefault();
     const trimmed = name.trim();
     if (!trimmed || trimmed === account.displayName) return;
-    run(api.updateAccount(account.id, { displayName: trimmed }), "Name saved.");
+    run(api.updateAccount(account.id, { displayName: trimmed }), 'Name saved.');
   };
 
   const updatePassword = (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
     const field = passwordRef.current;
-    const password = field?.value ?? "";
-    if (field) field.value = "";
+    const password = field?.value ?? '';
+    if (field) field.value = '';
     if (!password) return;
     setChangingPassword(false);
-    run(api.updateAccount(account.id, { password }), "Password updated.");
+    run(api.updateAccount(account.id, { password }), 'Password updated.');
   };
 
   const copy = error ? accountErrorCopy(error, account.email) : null;
   const authLabel =
-    account.auth === "password"
-      ? "Password"
-      : account.auth === "google"
-        ? "Google sign-in"
-        : "Microsoft sign-in";
+    account.auth === 'password' ? 'Password' : account.auth === 'google' ? 'Google sign-in' : 'Microsoft sign-in';
 
   return (
     <li className="account-row">
       <div className="account-row__head">
-        <span
-          className="dot"
-          style={{ background: account.color }}
-          aria-hidden="true"
-        />
+        <span className="dot" style={{ background: account.color }} aria-hidden="true" />
         <div className="account-row__who">
           <p className="account-row__email">{account.email}</p>
           <p className="muted small">
@@ -402,29 +369,21 @@ function AccountRow({
             }}
           />
         </label>
-        <button
-          type="submit"
-          className="btn btn--secondary"
-          disabled={busy || name.trim() === account.displayName}
-        >
+        <button type="submit" className="btn btn--secondary" disabled={busy || name.trim() === account.displayName}>
           Save name
         </button>
       </form>
 
       <SignatureEditor accountId={account.id} />
 
-      {account.auth === "password" &&
+      {account.auth === 'password' &&
         (changingPassword ? (
           <form className="inline-form" onSubmit={updatePassword}>
             <div className="form-field">
               <label className="form-field__label" htmlFor={`${id}-password`}>
                 New password or app password
               </label>
-              <PasswordField
-                id={`${id}-password`}
-                inputRef={passwordRef}
-                autoComplete="new-password"
-              />
+              <PasswordField id={`${id}-password`} inputRef={passwordRef} autoComplete="new-password" />
             </div>
             <button type="submit" className="btn btn--primary" disabled={busy}>
               Update password
@@ -475,7 +434,7 @@ function AccountRow({
           }}
           onConfirm={() => {
             setConfirming(false);
-            run(api.removeAccount(account.id), "Account removed.");
+            run(api.removeAccount(account.id), 'Account removed.');
           }}
         />
       )}

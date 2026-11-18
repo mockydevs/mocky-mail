@@ -2896,6 +2896,7 @@ name = "mocky-mail-desktop"
 version = "0.2.1"
 dependencies = [
  "android-bridge",
+ "chrono",
  "futures",
  "mail-auth",
  "mail-core",

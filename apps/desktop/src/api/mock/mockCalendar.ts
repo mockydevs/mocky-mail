@@ -30,6 +30,7 @@ function event(partial: Partial<CalendarEvent> & Pick<CalendarEvent, 'id' | 'tit
     organizer: null,
     attendees: [],
     tentative: false,
+    reminders: [15],
     ...partial,
   };
 }
@@ -135,5 +136,6 @@ export function mockSave(old: CalendarEvent | undefined, input: EventInput, id: 
     repeat,
     recurring: repeat !== 'none',
     recurrenceId: null,
+    reminders: input.reminders ?? old?.reminders ?? [],
   };
 }

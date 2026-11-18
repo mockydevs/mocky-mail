@@ -98,6 +98,13 @@ fn checked(mut input: EventInput) -> AppResult<EventInput> {
     if input.repeat == Repeat::Custom {
         input.repeat = Repeat::Keep;
     }
+    if let Some(reminders) = &input.reminders
+        && (reminders.len() > 5 || reminders.iter().any(|m| *m > 4 * 7 * 24 * 60))
+    {
+        return Err(AppError::invalid(
+            "Choose up to five reminders, at most four weeks before.",
+        ));
+    }
     Ok(input)
 }
 
@@ -461,6 +468,7 @@ mod tests {
             end: 1_795_003_600,
             repeat: Repeat::Custom,
             time_zone: "Africa/Nairobi".into(),
+            reminders: None,
         }
     }
 

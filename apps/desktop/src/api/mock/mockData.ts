@@ -238,4 +238,6 @@ export const MOCK_SETTINGS: Settings = {
   focusedInbox: false,
   checkEveryMins: 2,
   markReadDelaySecs: 3,
+  eventReminders: true,
+  defaultReminderMins: 15,
 };

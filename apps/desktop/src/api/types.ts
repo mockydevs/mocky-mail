@@ -258,6 +258,8 @@ export interface CalendarEvent {
   organizer: EventPerson | null;
   attendees: EventPerson[];
   tentative: boolean;
+  /** Reminders, minutes before the start (0: at the start). */
+  reminders: number[];
 }
 
 /** An event from the editor. `repeat: 'keep'` leaves a series' rule alone. */
@@ -273,6 +275,8 @@ export interface EventInput {
   repeat: Exclude<Repeat, 'custom'> | 'keep';
   /** The device's time zone, such as `Africa/Nairobi`. */
   timeZone: string;
+  /** Reminders, minutes before; null leaves an edited event's reminders as they are. */
+  reminders: number[] | null;
 }
 
 /** Whether an account's calendars sync with its server. */
@@ -375,6 +379,10 @@ export interface Settings {
   checkEveryMins: number;
   /** Seconds a message must stay open to count as read (markRead "delay"). */
   markReadDelaySecs: number;
+  /** Notifications before calendar events. */
+  eventReminders: boolean;
+  /** Reminder for new events, minutes before; -1 for none. */
+  defaultReminderMins: number;
 }
 
 /** "open": as soon as it is opened; "delay": after a few seconds open; "manual": only with Mark as read. */

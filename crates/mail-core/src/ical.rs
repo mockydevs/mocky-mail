@@ -90,6 +90,8 @@ pub struct Occurrence {
     pub attendees: Vec<Person>,
     /// `STATUS:TENTATIVE`.
     pub tentative: bool,
+    /// Reminders: minutes before the start (0: at the start), soonest last.
+    pub reminders: Vec<u32>,
 }
 
 /// An event as typed in the editor.
@@ -113,6 +115,10 @@ pub struct EventInput {
     /// The device's time zone (IANA name, such as `Africa/Nairobi`), so
     /// times stay put for people elsewhere and across daylight saving.
     pub time_zone: String,
+    /// Reminders, minutes before the start. `None` leaves an edited event's
+    /// reminders as they are.
+    #[serde(default)]
+    pub reminders: Option<Vec<u32>>,
 }
 
 // ---------------------------------------------------------------- reading
@@ -450,8 +456,76 @@ fn base(event: &Component) -> Option<Base> {
             tentative: event
                 .prop("STATUS")
                 .is_some_and(|p| p.value.trim().eq_ignore_ascii_case("TENTATIVE")),
+            reminders: reminders_of(event, begin, end),
         },
     })
+}
+
+/// Most reminder lead time read: four weeks, in minutes.
+const MAX_REMINDER_MINS: i64 = 4 * 7 * 24 * 60;
+
+/// The event's alarms as minutes before its start. Alarms after the start,
+/// emails and procedures are left out.
+fn reminders_of(event: &Component, start: i64, end: i64) -> Vec<u32> {
+    let mut out: Vec<u32> = event
+        .children
+        .iter()
+        .filter(|c| c.name == "VALARM")
+        .filter(|alarm| {
+            alarm.prop("ACTION").is_none_or(|a| {
+                matches!(
+                    a.value.trim().to_ascii_uppercase().as_str(),
+                    "DISPLAY" | "AUDIO"
+                )
+            })
+        })
+        .filter_map(|alarm| {
+            let trigger = alarm.prop("TRIGGER")?;
+            let at = if trigger
+                .param("VALUE")
+                .is_some_and(|v| v.eq_ignore_ascii_case("DATE-TIME"))
+            {
+                parse_value(&trigger.value, false, Tz::UTC)?.timestamp()
+            } else {
+                let offset = parse_duration(&trigger.value)?;
+                let from_end = trigger
+                    .param("RELATED")
+                    .is_some_and(|r| r.eq_ignore_ascii_case("END"));
+                (if from_end { end } else { start }).checked_add(offset)?
+            };
+            let before = start.checked_sub(at)?.checked_div(60)?;
+            (0..=MAX_REMINDER_MINS)
+                .contains(&before)
+                .then(|| u32::try_from(before).ok())
+                .flatten()
+        })
+        .collect();
+    out.sort_unstable_by(|a, b| b.cmp(a));
+    out.dedup();
+    out
+}
+
+/// `VALARM` blocks for reminders, minutes before the start.
+fn alarm_lines(reminders: &[u32]) -> Vec<String> {
+    let mut sorted: Vec<u32> = reminders
+        .iter()
+        .copied()
+        .filter(|m| i64::from(*m) <= MAX_REMINDER_MINS)
+        .collect();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    sorted.dedup();
+    sorted
+        .into_iter()
+        .flat_map(|m| {
+            [
+                "BEGIN:VALARM".to_owned(),
+                "ACTION:DISPLAY".to_owned(),
+                "DESCRIPTION:Reminder".to_owned(),
+                format!("TRIGGER:-PT{m}M"),
+                "END:VALARM".to_owned(),
+            ]
+        })
+        .collect()
 }
 
 fn at(tz: Tz, seconds: i64) -> Option<DateTime<Tz>> {
@@ -897,6 +971,7 @@ pub fn new_event(uid: &str, input: &EventInput, now: i64) -> String {
     lines.push(format!("CREATED:{}", utc_stamp(now)));
     lines.extend(fields);
     lines.extend(rule_line(input.repeat));
+    lines.extend(alarm_lines(input.reminders.as_deref().unwrap_or_default()));
     lines.push("END:VEVENT".to_owned());
     lines.push("END:VCALENDAR".to_owned());
     finish(&lines)
@@ -948,22 +1023,48 @@ fn blocks(lines: &[&str]) -> Vec<Block> {
 }
 
 /// Lines of a `VEVENT` (between `BEGIN` and `END`), with the event's own
-/// properties named in `drop` removed (alarms and other parts are kept).
-fn kept_lines<'a>(lines: &[&'a str], block: &Block, drop: &[&str]) -> Vec<&'a str> {
+/// properties named in `drop` removed. Other parts are kept, and alarms
+/// too unless `drop_alarms`.
+fn kept_lines<'a>(
+    lines: &[&'a str],
+    block: &Block,
+    drop: &[&str],
+    drop_alarms: bool,
+) -> Vec<&'a str> {
     let mut depth = 0usize;
+    // Inside an alarm being dropped: its depth.
+    let mut skipping: Option<usize> = None;
     let mut out = Vec::new();
     for raw in lines
         .get(block.begin.saturating_add(1)..block.end)
         .unwrap_or_default()
     {
-        let name = split_line(raw).map(|l| l.name).unwrap_or_default();
+        let line = split_line(raw);
+        let name = line.as_ref().map(|l| l.name.clone()).unwrap_or_default();
         match name.as_str() {
-            "BEGIN" => depth = depth.saturating_add(1),
-            "END" => depth = depth.saturating_sub(1),
+            "BEGIN" => {
+                depth = depth.saturating_add(1);
+                if drop_alarms
+                    && depth == 1
+                    && line.is_some_and(|l| l.value.trim().eq_ignore_ascii_case("VALARM"))
+                {
+                    skipping = Some(depth);
+                }
+            }
+            "END" => {
+                let closing = depth;
+                depth = depth.saturating_sub(1);
+                if skipping == Some(closing) {
+                    skipping = None;
+                    continue;
+                }
+            }
             n if depth == 0 && drop.contains(&n) => continue,
             _ => {}
         }
-        out.push(*raw);
+        if skipping.is_none() {
+            out.push(*raw);
+        }
     }
     out
 }
@@ -1028,10 +1129,13 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
                 out.extend(rule_line(input.repeat));
             }
             out.extend(
-                kept_lines(&lines, master, &drop)
+                kept_lines(&lines, master, &drop, input.reminders.is_some())
                     .into_iter()
                     .map(str::to_owned),
             );
+            if let Some(reminders) = &input.reminders {
+                out.extend(alarm_lines(reminders));
+            }
             continue;
         }
         if i > master.begin && i < master.end {
@@ -1558,6 +1662,7 @@ mod tests {
             end: ts("2026-11-18T07:00:00Z"),
             repeat,
             time_zone: "Africa/Nairobi".into(),
+            reminders: None,
         }
     }
 
@@ -1757,6 +1862,34 @@ mod tests {
             .unwrap();
         assert_eq!(peter.status.as_deref(), Some("declined"));
         assert!(apply_reply(&updated, &answer).is_none());
+    }
+
+    #[test]
+    fn reminders_are_read_and_written() {
+        let ics = cal(
+            "BEGIN:VEVENT\r\nUID:r\r\nDTSTART:20261118T060000Z\r\nDTEND:20261118T070000Z\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nBEGIN:VALARM\r\nACTION:AUDIO\r\nTRIGGER;RELATED=START:-P1D\r\nEND:VALARM\r\nBEGIN:VALARM\r\nACTION:EMAIL\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\nBEGIN:VALARM\r\nTRIGGER;VALUE=DATE-TIME:20261118T055500Z\r\nEND:VALARM\r\nBEGIN:VALARM\r\nTRIGGER;RELATED=END:-PT90M\r\nEND:VALARM\r\nBEGIN:VALARM\r\nTRIGGER:PT10M\r\nEND:VALARM\r\nEND:VEVENT\r\n",
+        );
+        // 1 day, 30 min (an hour before the end, 90 min), 15 min, 5 min
+        // (absolute); not the email or the one after the start.
+        assert_eq!(master(&ics).unwrap().reminders, [1440, 30, 15, 5]);
+
+        let mut with = input(Repeat::None);
+        with.reminders = Some(vec![10, 60, 10]);
+        let made = new_event("u", &with, 0);
+        assert_eq!(made.matches("BEGIN:VALARM").count(), 2);
+        assert_eq!(master(&made).unwrap().reminders, [60, 10]);
+
+        // Editing: None keeps them; Some replaces them, other parts stay.
+        let kept = edit_event(&ics, &input(Repeat::Keep), 0).unwrap();
+        assert_eq!(master(&kept).unwrap().reminders, [1440, 30, 15, 5]);
+        let mut change = input(Repeat::Keep);
+        change.reminders = Some(vec![0]);
+        let changed = edit_event(&ics, &change, 0).unwrap();
+        assert_eq!(master(&changed).unwrap().reminders, [0]);
+        assert_eq!(changed.matches("BEGIN:VALARM").count(), 1);
+        assert_eq!(changed.matches("END:VALARM").count(), 1);
+        change.reminders = Some(vec![]);
+        assert!(!edit_event(&ics, &change, 0).unwrap().contains("VALARM"));
     }
 
     #[test]

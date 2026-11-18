@@ -279,7 +279,7 @@ describe('sync status and notifications', () => {
 
     cleanup();
     chime.mockClear();
-    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3 } });
+    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15 } });
     await rows();
     act(() => {
       quiet.api.emit('mail://new-mail', { accountId: 'work', count: 1 });

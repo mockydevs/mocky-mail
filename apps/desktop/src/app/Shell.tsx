@@ -119,6 +119,8 @@ const DEFAULT_SETTINGS: Settings = {
   focusedInbox: false,
   checkEveryMins: 2,
   markReadDelaySecs: 3,
+  eventReminders: true,
+  defaultReminderMins: 15,
 };
 
 /**
@@ -707,6 +709,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         <CalendarView
           accounts={accounts}
           phone={phone}
+          defaultReminder={settings?.defaultReminderMins ?? 15}
           onClose={() => {
             setScreen({ kind: 'mail' });
           }}

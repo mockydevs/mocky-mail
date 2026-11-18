@@ -269,6 +269,7 @@ async fn finds_the_calendar_and_reads_and_writes_events() {
         end: 1_795_003_600,
         repeat: mail_core::ical::Repeat::None,
         time_zone: "Africa/Nairobi".into(),
+        reminders: Some(vec![15]),
     };
     let text = mail_core::ical::new_event("new-1@mocky.mail", &input, 1_794_000_000);
     let (new_href, _) = dav
