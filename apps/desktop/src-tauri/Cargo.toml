@@ -29,7 +29,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10"
-tauri = { version = "2.12.5", features = [] }
+tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-notification = "2.8.1"
 tauri-plugin-opener = "2.7.3"
@@ -38,6 +38,7 @@ tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs", "proce
 # Desktop only: one running copy at a time. Android runs one copy anyway.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.5.5"
+tauri-plugin-autostart = "2.7.0"
 
 # Windows only: notifications from the Microsoft Store (MSIX) package must use
 # the package's own app id, which the notification plugin can't do.

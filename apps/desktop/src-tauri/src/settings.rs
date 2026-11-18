@@ -1,7 +1,7 @@
 //! App settings, stored as one JSON value in the database.
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::error::AppResult;
 use crate::state::AppState;
@@ -41,6 +41,23 @@ pub struct Settings {
     pub event_reminders: bool,
     /// Reminder for new events, minutes before; -1 for none.
     pub default_reminder_mins: i32,
+    /// Closing the window keeps the app running in the tray (computers).
+    pub close_to_tray: bool,
+    /// Open at login, into the tray (computers). Read from the system.
+    pub start_at_login: bool,
+    /// Read only: what this device offers, for the Settings screen.
+    pub device: Device,
+}
+
+/// What the device offers (filled in by `get_settings`, ignored on save).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Device {
+    /// A computer: tray icon and closing to it.
+    pub tray: bool,
+    /// Start at login can be set from the app (not inside a Store package,
+    /// which Windows starts through its own settings).
+    pub start_at_login: bool,
 }
 
 /// Default-reminder choices offered in Settings, minutes (-1: none).
@@ -69,6 +86,9 @@ impl Default for Settings {
             mark_read_delay_secs: 3,
             event_reminders: true,
             default_reminder_mins: 15,
+            close_to_tray: true,
+            start_at_login: false,
+            device: Device::default(),
         }
     }
 }
@@ -113,23 +133,66 @@ pub fn load(state: &AppState) -> AppResult<Settings> {
         .normalized())
 }
 
-/// `get_settings` command.
-#[tauri::command]
-pub fn get_settings(state: State<'_, std::sync::Arc<AppState>>) -> AppResult<Settings> {
-    load(&state)
+fn device() -> Device {
+    Device {
+        tray: cfg!(desktop),
+        start_at_login: cfg!(desktop) && !crate::events::packaged(),
+    }
 }
 
-/// `set_settings` command.
+/// With what the device offers, and start at login as the system has it.
+fn as_shown(app: &AppHandle, mut settings: Settings) -> Settings {
+    settings.device = device();
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        if settings.device.start_at_login
+            && let Ok(on) = app.autolaunch().is_enabled()
+        {
+            settings.start_at_login = on;
+        }
+    }
+    #[cfg(not(desktop))]
+    let _ = app;
+    settings
+}
+
+/// `get_settings` command.
+#[tauri::command]
+pub fn get_settings(
+    app: AppHandle,
+    state: State<'_, std::sync::Arc<AppState>>,
+) -> AppResult<Settings> {
+    Ok(as_shown(&app, load(&state)?))
+}
+
+/// `set_settings` command. Start at login is applied to the system.
 #[tauri::command]
 pub fn set_settings(
+    app: AppHandle,
     state: State<'_, std::sync::Arc<AppState>>,
     settings: Settings,
 ) -> AppResult<Settings> {
     let settings = settings.normalized();
+    #[cfg(desktop)]
+    if device().start_at_login {
+        use tauri_plugin_autostart::ManagerExt;
+        let launcher = app.autolaunch();
+        if launcher.is_enabled().ok() != Some(settings.start_at_login) {
+            let result = if settings.start_at_login {
+                launcher.enable()
+            } else {
+                launcher.disable()
+            };
+            result.map_err(|e| {
+                crate::error::AppError::invalid(format!("Couldn't change start at login: {e}"))
+            })?;
+        }
+    }
     let json = serde_json::to_string(&settings)
         .map_err(|e| crate::error::AppError::internal(e.to_string()))?;
     state.store.set_setting(KEY, &json)?;
-    Ok(settings)
+    Ok(as_shown(&app, settings))
 }
 
 #[cfg(test)]
@@ -151,6 +214,9 @@ mod tests {
             mark_read_delay_secs: 0,
             event_reminders: false,
             default_reminder_mins: 7,
+            close_to_tray: false,
+            start_at_login: false,
+            device: Device::default(),
         }
         .normalized();
         assert_eq!(s.theme, "system");

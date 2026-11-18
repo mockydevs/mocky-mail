@@ -31,6 +31,8 @@ mod settings;
 mod signatures;
 mod state;
 mod sync;
+#[cfg(desktop)]
+mod tray;
 mod updates;
 
 use std::sync::Arc;
@@ -83,7 +85,9 @@ fn create_window(app: &tauri::App) -> tauri::Result<()> {
     let builder = builder
         .title("Mocky Mail")
         .inner_size(1280.0, 820.0)
-        .min_inner_size(900.0, 600.0);
+        .min_inner_size(900.0, 600.0)
+        // Started at login: wait in the tray.
+        .visible(!tray::start_hidden());
     builder
         // Link clicks in email arrive here; nothing opens inside the app.
         .on_new_window(move |url, _features| {
@@ -121,6 +125,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     let state = Arc::new(AppState::new(store, Arc::new(KeyringStore), cache_dir));
     app.manage(Arc::clone(&state));
+    #[cfg(desktop)]
+    tray::build(app);
 
     let handle = app.handle().clone();
     for account in state.store.list_accounts()? {
@@ -144,10 +150,8 @@ pub fn run() {
     // Must be first: a second copy would sync and send in parallel.
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
+        // Opening it again brings the window back, even from the tray.
+        tray::show(app);
         // A mailto: link opened while the app runs: start a message.
         if let Some(url) = mailto::from_args(args.iter().map(String::as_str)) {
             let _ = app.emit("mail://mailto", serde_json::json!({ "url": url }));
@@ -159,6 +163,14 @@ pub fn run() {
     // Android: pick, save and open files through the phone's own screens.
     #[cfg(target_os = "android")]
     let builder = builder.plugin(files_android::init());
+    // Start at login, into the tray.
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![tray::HIDDEN_ARG]),
+        ))
+        .on_window_event(tray::on_window_event);
     let result = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

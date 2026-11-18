@@ -240,4 +240,7 @@ export const MOCK_SETTINGS: Settings = {
   markReadDelaySecs: 3,
   eventReminders: true,
   defaultReminderMins: 15,
+  closeToTray: true,
+  startAtLogin: false,
+  device: { tray: true, startAtLogin: true },
 };

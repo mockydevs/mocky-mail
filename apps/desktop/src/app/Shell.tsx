@@ -121,6 +121,9 @@ const DEFAULT_SETTINGS: Settings = {
   markReadDelaySecs: 3,
   eventReminders: true,
   defaultReminderMins: 15,
+  closeToTray: true,
+  startAtLogin: false,
+  device: { tray: false, startAtLogin: false },
 };
 
 /**
@@ -483,6 +486,18 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   // mailto: links from other apps and web pages start a new message,
   // once accounts are loaded so it has a From.
   const pendingMailto = useRef<Mailto | null>(null);
+  // The tray icon's "New message".
+  const newMessageRef = useRef(newMessage);
+  useEffect(() => {
+    newMessageRef.current = newMessage;
+  });
+  useEffect(
+    () =>
+      api.on('mail://compose', () => {
+        newMessageRef.current();
+      }),
+    [api],
+  );
   const openMailtoRef = useRef<() => void>(() => undefined);
   useEffect(() => {
     openMailtoRef.current = () => {

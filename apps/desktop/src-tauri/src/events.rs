@@ -160,6 +160,19 @@ pub fn new_mail(app: &AppHandle, state: &AppState, account: &Account, count: u32
     }
 }
 
+/// Running from a Microsoft Store (MSIX) package.
+#[must_use]
+pub fn packaged() -> bool {
+    #[cfg(windows)]
+    {
+        store_app_id().is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Show a system notification (new mail, event reminders).
 pub fn notify(app: &AppHandle, title: &str, body: &str) {
     #[cfg(windows)]

@@ -408,6 +408,12 @@ export interface Settings {
   eventReminders: boolean;
   /** Reminder for new events, minutes before; -1 for none. */
   defaultReminderMins: number;
+  /** Computers: closing the window keeps the app running in the tray. */
+  closeToTray: boolean;
+  /** Computers: open at login, into the tray. */
+  startAtLogin: boolean;
+  /** Read only: what this device offers. */
+  device: { tray: boolean; startAtLogin: boolean };
 }
 
 /** "open": as soon as it is opened; "delay": after a few seconds open; "manual": only with Mark as read. */
@@ -469,6 +475,8 @@ export interface MailEvents {
   'mail://calendar-changed': { calendars: CalendarStatus[] };
   /** A mailto: link opened while the app runs (desktop). */
   'mail://mailto': { url: string };
+  /** The tray icon's New message. */
+  'mail://compose': Record<string, never>;
 }
 export type MailEventName = keyof MailEvents;
 

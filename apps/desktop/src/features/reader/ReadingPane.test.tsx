@@ -20,7 +20,7 @@ describe('reading pane', () => {
   });
 
   it('shows HTML mail dark in dark mode, with a per-email switch back to original colours', async () => {
-    const { user } = renderApp({ settings: { theme: 'dark', remoteImages: 'block', notifications: false, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15 } });
+    const { user } = renderApp({ settings: { theme: 'dark', remoteImages: 'block', notifications: false, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15, closeToTray: true, startAtLogin: false, device: { tray: true, startAtLogin: true } } });
     await user.click((await rows()).getByRole('button', { name: /Build server/ }));
     const frame = await within(reader()).findByTitle('Message: Nightly build passed on main');
     expect(frame.getAttribute('srcdoc')).toContain('invert(1)');
@@ -39,7 +39,7 @@ describe('reading pane', () => {
   });
 
   it('has no colours switch in light mode', async () => {
-    const { user } = renderApp({ settings: { theme: 'light', remoteImages: 'block', notifications: false, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15 } });
+    const { user } = renderApp({ settings: { theme: 'light', remoteImages: 'block', notifications: false, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15, closeToTray: true, startAtLogin: false, device: { tray: true, startAtLogin: true } } });
     await user.click((await rows()).getByRole('button', { name: /Build server/ }));
     await within(reader()).findByTitle('Message: Nightly build passed on main');
     expect(within(reader()).queryByRole('button', { name: 'Show original colours' })).not.toBeInTheDocument();

@@ -37,7 +37,8 @@
     },
     "linux": {
       "deb": {
-        "desktopTemplate": "../../../packaging/linux/mocky-mail.desktop.hbs"
+        "desktopTemplate": "../../../packaging/linux/mocky-mail.desktop.hbs",
+        "depends": ["libayatana-appindicator3-1"]
       }
     }
   }

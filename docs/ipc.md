@@ -144,7 +144,7 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `outbox_cancel` | `{ id }` | `void` |
 | `outbox_edit` | `{ id }` | `Draft` (removes it from the outbox) |
 | `sync_now` | `{ accountId: string \| null }` | `void` |
-| `get_settings` / `set_settings` | `{ settings }` | `Settings` |
+| `get_settings` / `set_settings` | `{ settings }` | `Settings`. On computers also `closeToTray` (closing the window hides it to the tray icon: Open, New message (emits `mail://compose`), Check for mail, Quit) and `startAtLogin` (applied to the system through tauri-plugin-autostart, launching with `--hidden` into the tray); `device: { tray, startAtLogin }` is read only (start at login is off inside a Store package). |
 | `list_contacts` | `{ query }` | `Contact[]` (saved contacts matching name, email, phone or company, by name; `Contact = { id, accountId: string \| null, uid, name, emails, phones, organization, title, notes, state: 'synced' \| 'changed' \| 'deleted' }`) |
 | `get_contact` | `{ id }` | `Contact` |
 | `save_contact` | `{ contact: { id?, accountId: string \| null, name, emails, phones, organization, title, notes } }` | `Contact` (saved here at once; a contact of an account syncs to its server's address book in the background; null `accountId` keeps it on this device) |

@@ -267,6 +267,38 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
             </p>
           </fieldset>
 
+          {settings.device.tray && (
+            <fieldset className="settings__group">
+              <legend className="settings__legend">On this computer</legend>
+              <label className="choice">
+                <input
+                  type="checkbox"
+                  checked={settings.closeToTray}
+                  onChange={(e) => {
+                    onChange({ ...settings, closeToTray: e.target.checked });
+                  }}
+                />
+                Keep running in the tray when the window is closed
+              </label>
+              {settings.device.startAtLogin && (
+                <label className="choice">
+                  <input
+                    type="checkbox"
+                    checked={settings.startAtLogin}
+                    onChange={(e) => {
+                      onChange({ ...settings, startAtLogin: e.target.checked });
+                    }}
+                  />
+                  Open Mocky Mail when I sign in to this computer
+                </label>
+              )}
+              <p className="form-hint">
+                In the tray, Mocky Mail keeps checking for mail and showing notifications. Quit it from the tray icon.
+                {settings.device.startAtLogin ? ' At sign-in it opens straight into the tray.' : ''}
+              </p>
+            </fieldset>
+          )}
+
           {accounts.length > 0 && <OutOfOffice accounts={accounts} />}
 
           <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`}>
