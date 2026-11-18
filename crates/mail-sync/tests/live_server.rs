@@ -81,6 +81,7 @@ async fn send(host: &str, subject: &str, with_attachment: bool) -> String {
         } else {
             vec![]
         },
+        inline_images: vec![],
     })
     .unwrap();
     smtp::send(

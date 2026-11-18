@@ -119,8 +119,11 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `outbox_edit` | `{ id }` | `Draft` (removes it from the outbox) |
 | `sync_now` | `{ accountId: string \| null }` | `void` |
 | `get_settings` / `set_settings` | `{ settings }` | `Settings` |
-| `get_signature` | `{ accountId }` | `Signature \| null` (`{ html, text }`: sanitized HTML and its plain text) |
-| `set_signature` | `{ accountId, html }` | `Signature \| null`; the HTML is sanitized like incoming mail, empty clears it. Sending adds an HTML alternative with the full signature when its plain block (`-- \n` + text) is still in the body. |
+| `get_signature` | `{ accountId }` | `Signature \| null` (`{ html, text, image? }`: sanitized HTML, its plain text, and an optional picture `{ mimeType, data (base64), width, naturalWidth, naturalHeight }`) |
+| `set_signature` | `{ accountId, html }` | `Signature \| null`; the HTML is sanitized like incoming mail, empty clears it. Sending adds an HTML alternative with the full signature when its plain block (`-- \n` + text) is still in the body. Changing the words keeps the picture. |
+| `set_signature_image` | `{ accountId }` | `Signature \| null` (picker; PNG, JPEG or GIF checked by its bytes, up to 1 MB; null if cancelled; a picture-only signature uses the account name as its text). Sent as a `multipart/related` part (`cid:signature-image@mocky.mail`) so it shows without loading remote images. |
+| `set_signature_image_width` | `{ accountId, width }` | `Signature \| null` (display width, 40 to 600 px, never wider than the picture) |
+| `remove_signature_image` | `{ accountId }` | `Signature \| null` (keeps the words) |
 | `check_for_update` | — | `UpdateInfo \| null` (`{ version, notes, how: 'install' \| 'download', page }`); reads `latest.json` on the download site; null for store installs |
 | `install_update` | — | `void`; downloads this install's installer, checks its SHA-256, runs it (the app closes or restarts) |
 | `open_external` | `{ url }` | `void` (http, https, mailto only) |

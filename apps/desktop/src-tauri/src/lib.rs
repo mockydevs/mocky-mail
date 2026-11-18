@@ -178,6 +178,9 @@ pub fn run() {
             settings::set_settings,
             signatures::get_signature,
             signatures::set_signature,
+            signatures::set_signature_image,
+            signatures::set_signature_image_width,
+            signatures::remove_signature_image,
             updates::check_for_update,
             updates::install_update,
         ])

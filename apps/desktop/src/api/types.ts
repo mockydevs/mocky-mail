@@ -137,10 +137,22 @@ export interface UpdateInfo {
   page: string;
 }
 
-/** An email signature: cleaned HTML, and the plain text compose shows. */
+/** A picture under the signature (PNG, JPEG or GIF), sent inside the message. */
+export interface SignatureImage {
+  mimeType: string;
+  /** Base64. */
+  data: string;
+  /** Width shown in messages, px. */
+  width: number;
+  naturalWidth: number;
+  naturalHeight: number;
+}
+
+/** An email signature: cleaned HTML, the plain text compose shows, and an optional picture. */
 export interface Signature {
   html: string;
   text: string;
+  image?: SignatureImage;
 }
 
 export interface Draft {
@@ -304,6 +316,12 @@ export interface MailApi {
   getSignature(accountId: string): Promise<Signature | null>;
   /** Clean and store a signature (pasted HTML or typed text); empty clears it. Returns what was stored. */
   setSignature(accountId: string, html: string): Promise<Signature | null>;
+  /** Choose a picture (PNG, JPG or GIF, up to 1 MB) for the signature; null if cancelled. */
+  setSignatureImage(accountId: string): Promise<Signature | null>;
+  /** How wide the signature picture shows, px. */
+  setSignatureImageWidth(accountId: string, width: number): Promise<Signature | null>;
+  /** Drop the picture, keep the words. */
+  removeSignatureImage(accountId: string): Promise<Signature | null>;
   getSettings(): Promise<Settings>;
   setSettings(settings: Settings): Promise<Settings>;
   openExternal(url: string): Promise<void>;

@@ -235,3 +235,36 @@ async fn pick_paths(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
 pub fn preview_for(info: &AttachmentInfo) -> Option<PreviewKind> {
     preview::preview_kind(&info.file_name, &info.mime_type, info.size)
 }
+
+/// Choose one picture (signature images). `None` if cancelled.
+pub async fn pick_image(app: &AppHandle) -> AppResult<Option<PathBuf>> {
+    pick_image_path(app).await
+}
+
+#[cfg(target_os = "android")]
+async fn pick_image_path(_app: &AppHandle) -> AppResult<Option<PathBuf>> {
+    // A little over the 1 MB limit, so a too-big file gets the clear message.
+    Ok(crate::files_android::pick_files(2 * 1024 * 1024)
+        .await?
+        .into_iter()
+        .next()
+        .map(|p| p.path))
+}
+
+#[cfg(not(target_os = "android"))]
+async fn pick_image_path(app: &AppHandle) -> AppResult<Option<PathBuf>> {
+    use tauri_plugin_dialog::DialogExt;
+    let dialog = app
+        .dialog()
+        .file()
+        .add_filter("Pictures", &["png", "jpg", "jpeg", "gif"]);
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_file())
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    picked
+        .map(|file| {
+            file.into_path()
+                .map_err(|_| AppError::invalid("Pick a picture on this computer."))
+        })
+        .transpose()
+}

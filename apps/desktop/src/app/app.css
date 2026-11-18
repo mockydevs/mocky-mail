@@ -2715,6 +2715,34 @@ kbd {
   gap: 8px 16px;
 }
 
+/* Signature picture: preview at the size it is sent. */
+.signature-editor__picture {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.signature-editor__image {
+  max-width: 100%;
+  height: auto;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.signature-editor__size {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-width: 320px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* Email signature editor in Settings. */
 .signature-editor {
   display: flex;
@@ -2918,4 +2946,27 @@ kbd {
 
 .viewer__notice--error {
   color: #ffb4ab;
+}
+
+/* Signature picture preview under the compose body. */
+.compose__signature {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.compose__signature img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.compose__signature .form-hint {
+  margin: 0;
 }

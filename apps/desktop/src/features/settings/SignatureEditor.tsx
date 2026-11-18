@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type ClipboardEvent, type DragEvent
 
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
-import type { AppError, Signature } from '../../api/types';
+import type { AppError, Signature, SignatureImage } from '../../api/types';
 
 /**
  * An account's email signature. Paste one from webmail (SOGo, Gmail, …) to
@@ -44,6 +44,47 @@ export function SignatureEditor({ accountId }: { accountId: string }) {
     };
   }, [api, accountId]);
 
+  /** Run a signature change and show what was stored. */
+  const change = (run: () => Promise<Signature | null>, success: string, keepText = false) => {
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    run().then(
+      (signature) => {
+        setSaved(signature);
+        // Picture changes leave unsaved typing in the box alone.
+        if (!keepText) show(signature);
+        if (!keepText) setEdited(false);
+        setBusy(false);
+        setDone(success);
+      },
+      (e: unknown) => {
+        setError(toAppError(e));
+        setBusy(false);
+      },
+    );
+  };
+
+  const addPicture = () => {
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    api.setSignatureImage(accountId).then(
+      (signature) => {
+        setBusy(false);
+        // Null: the picker was cancelled.
+        if (signature) {
+          setSaved(signature);
+          setDone('Picture added. It will show under your signature in messages you send.');
+        }
+      },
+      (e: unknown) => {
+        setError(toAppError(e));
+        setBusy(false);
+      },
+    );
+  };
+
   const store = (html: string, success: string) => {
     setBusy(true);
     setError(null);
@@ -82,8 +123,8 @@ export function SignatureEditor({ accountId }: { accountId: string }) {
         Signature
       </p>
       <p className="form-hint" id={`${id}-hint`}>
-        Added to new messages, replies and forwards. Paste it from your webmail (for example SOGo's signature
-        settings) to keep its logo and links, or type it here.
+        Added to new messages, replies and forwards. Type it here or paste it from your webmail. To use a
+        signature you designed (for example in Illustrator), export it as a PNG or JPG and add it as a picture.
       </p>
       <div
         ref={box}
@@ -119,11 +160,78 @@ export function SignatureEditor({ accountId }: { accountId: string }) {
             className="btn btn--link"
             disabled={busy}
             onClick={() => {
-              store('', 'Signature removed.');
+              change(
+                () => api.removeSignatureImage(accountId).then(() => api.setSignature(accountId, '')),
+                'Signature removed.',
+              );
             }}
           >
             Remove signature
           </button>
+        )}
+      </div>
+
+      <div className="signature-editor__picture">
+        <p className="form-field__label" id={`${id}-picture`}>
+          Signature picture
+        </p>
+        {saved?.image ? (
+          <>
+            <img
+              className="signature-editor__image"
+              src={`data:${saved.image.mimeType};base64,${saved.image.data}`}
+              alt="Your signature"
+              style={{ width: saved.image.width }}
+            />
+            <label className="signature-editor__size">
+              <span>Size in messages</span>
+              <select
+                className="field"
+                value={saved.image.width}
+                disabled={busy}
+                onChange={(e) => {
+                  const width = Number(e.target.value);
+                  change(() => api.setSignatureImageWidth(accountId, width), 'Picture size saved.', true);
+                }}
+              >
+                {widthChoices(saved.image).map((w) => (
+                  <option key={w} value={w}>
+                    {sizeLabel(w)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="signature-editor__actions">
+              <button type="button" className="btn btn--secondary" disabled={busy} onClick={addPicture}>
+                Replace picture
+              </button>
+              <button
+                type="button"
+                className="btn btn--link"
+                disabled={busy}
+                onClick={() => {
+                  change(() => api.removeSignatureImage(accountId), 'Picture removed.', true);
+                }}
+              >
+                Remove picture
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="signature-editor__actions">
+            <button
+              type="button"
+              className="btn btn--secondary"
+              disabled={busy || !loaded}
+              aria-describedby={`${id}-picture-hint`}
+              onClick={addPicture}
+            >
+              Add a picture
+            </button>
+            <span className="form-hint" id={`${id}-picture-hint`}>
+              PNG, JPG or GIF, up to 1 MB
+            </span>
+          </div>
         )}
       </div>
       {error && (
@@ -138,6 +246,19 @@ export function SignatureEditor({ accountId }: { accountId: string }) {
       )}
     </div>
   );
+}
+
+const WIDTHS = [160, 240, 320, 400, 480, 600];
+
+/** Sizes offered: never wider than the picture, always including the current one. */
+function widthChoices(image: SignatureImage): number[] {
+  const fits = WIDTHS.filter((w) => w <= image.naturalWidth);
+  return [...new Set([...fits, image.width])].sort((a, b) => a - b);
+}
+
+function sizeLabel(width: number): string {
+  const name = width <= 160 ? 'Small' : width <= 320 ? 'Medium' : width <= 480 ? 'Large' : 'Extra large';
+  return `${name} (${String(width)} px wide)`;
 }
 
 /** Plain pasted text as HTML that keeps its lines. */

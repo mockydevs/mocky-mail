@@ -56,8 +56,10 @@ export interface MockMailApi extends MailApi {
 }
 
 /** 1x1 PNG, a one-line PDF and some text: what the dev preview shows. */
+const MOCK_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const MOCK_PNG = Uint8Array.from(
-  atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
+  atob(MOCK_PNG_BASE64),
   (c) => c.charCodeAt(0),
 );
 const MOCK_PDF = [
@@ -628,11 +630,51 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           .map((line) => line.trim())
           .filter(Boolean)
           .join('\n');
+        const image = signatures.get(accountId)?.image;
         if (text === '') {
+          if (image) {
+            const only = { html: '', text: account(accountId).displayName, image };
+            signatures.set(accountId, only);
+            return only;
+          }
           signatures.delete(accountId);
           return null;
         }
-        const signature = { html: clean, text };
+        const signature: Signature = image ? { html: clean, text, image } : { html: clean, text };
+        signatures.set(accountId, signature);
+        return signature;
+      }),
+
+    setSignatureImage: (accountId) =>
+      run('setSignatureImage', () => {
+        const image = { mimeType: 'image/png', data: MOCK_PNG_BASE64, width: 320, naturalWidth: 640, naturalHeight: 160 };
+        const old = signatures.get(accountId);
+        const signature: Signature = old?.html
+          ? { ...old, image }
+          : { html: '', text: account(accountId).displayName, image };
+        signatures.set(accountId, signature);
+        return signature;
+      }),
+
+    setSignatureImageWidth: (accountId, width) =>
+      run('setSignatureImageWidth', () => {
+        const old = signatures.get(accountId);
+        if (!old) return null;
+        const signature: Signature = old.image
+          ? { ...old, image: { ...old.image, width: Math.min(Math.max(width, 40), 600, old.image.naturalWidth) } }
+          : old;
+        signatures.set(accountId, signature);
+        return signature;
+      }),
+
+    removeSignatureImage: (accountId) =>
+      run('removeSignatureImage', () => {
+        const old = signatures.get(accountId);
+        if (!old?.html) {
+          signatures.delete(accountId);
+          return null;
+        }
+        const signature = { html: old.html, text: old.text };
         signatures.set(accountId, signature);
         return signature;
       }),

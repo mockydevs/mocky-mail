@@ -2,13 +2,13 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type SyntheticE
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, Draft, DraftAttachment, OutboxEntry } from '../../api/types';
+import type { Account, AppError, Draft, DraftAttachment, OutboxEntry, SignatureImage } from '../../api/types';
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
 import { RecipientField } from './RecipientField';
 import { parseRecipients } from './recipients';
-import { swapSignature } from './seed';
+import { signatureBlock, swapSignature } from './seed';
 
 interface Props {
   initial: Draft;
@@ -92,6 +92,8 @@ export function ComposeView({
   // The signature now in the body, so changing From can swap it.
   const signature = useRef<string | null>(null);
   const signatureLoaded = useRef(false);
+  // Its picture, previewed under the body; it is added when the message is sent.
+  const [signatureImage, setSignatureImage] = useState<{ text: string; image: SignatureImage } | null>(null);
   useEffect(() => {
     if (!addSignature) return;
     let active = true;
@@ -101,6 +103,7 @@ export function ComposeView({
         const previous = signature.current;
         const text = next?.text ?? null;
         signature.current = text;
+        setSignatureImage(next?.image && text !== null ? { text, image: next.image } : null);
         setDraft((d) => ({ ...d, bodyText: swapSignature(d.bodyText, previous, text) }));
         // Adding it at the start isn't a change the user made.
         if (!signatureLoaded.current) {
@@ -354,6 +357,17 @@ export function ComposeView({
           update({ bodyText: e.target.value });
         }}
       />
+
+      {signatureImage && draft.bodyText.includes(signatureBlock(signatureImage.text)) && (
+        <figure className="compose__signature">
+          <img
+            src={`data:${signatureImage.image.mimeType};base64,${signatureImage.image.data}`}
+            alt="Your signature"
+            style={{ width: Math.min(signatureImage.image.width, 240) }}
+          />
+          <figcaption className="form-hint">Your signature picture is added under your signature when sent.</figcaption>
+        </figure>
+      )}
 
       {loadingAttachments && (
         <p className="compose__loading form-hint" role="status" aria-busy="true">

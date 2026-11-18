@@ -18,6 +18,19 @@ pub struct OutgoingAttachment {
     pub data: Vec<u8>,
 }
 
+/// A picture shown inside the HTML body (`<img src="cid:...">`), such as a
+/// signature image. Sent as a related part, so it shows without the
+/// recipient loading remote images.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImage {
+    /// Content-ID without angle brackets, as used after `cid:`.
+    pub content_id: String,
+    /// MIME type.
+    pub mime_type: String,
+    /// Image bytes.
+    pub data: Vec<u8>,
+}
+
 /// A message to build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutgoingMessage {
@@ -41,6 +54,8 @@ pub struct OutgoingMessage {
     pub references: Vec<String>,
     /// Attachments.
     pub attachments: Vec<OutgoingAttachment>,
+    /// Pictures the HTML body refers to by `cid:`. Ignored without HTML.
+    pub inline_images: Vec<InlineImage>,
 }
 
 /// The built message.
@@ -162,19 +177,34 @@ pub fn build(message: &OutgoingMessage) -> Result<BuiltMessage, SyncError> {
     }
 
     let text = SinglePart::plain(message.body_text.clone());
+    // Text and HTML of the same message; readers show the HTML. Pictures the
+    // HTML uses ride along with it in a multipart/related part.
+    let alternative = |html: &String| -> Result<MultiPart, SyncError> {
+        if message.inline_images.is_empty() {
+            return Ok(MultiPart::alternative_plain_html(
+                message.body_text.clone(),
+                html.clone(),
+            ));
+        }
+        let mut related = MultiPart::related().singlepart(SinglePart::html(html.clone()));
+        for image in &message.inline_images {
+            let content_type = ContentType::parse(&image.mime_type)
+                .map_err(|e| SyncError::Invalid(e.to_string()))?;
+            related = related.singlepart(
+                Attachment::new_inline(display_safe(&image.content_id))
+                    .body(image.data.clone(), content_type),
+            );
+        }
+        Ok(MultiPart::alternative()
+            .singlepart(SinglePart::plain(message.body_text.clone()))
+            .multipart(related))
+    };
     let email = match (&message.body_html, message.attachments.is_empty()) {
         (None, true) => builder.singlepart(text),
-        // Text and HTML of the same message; readers show the HTML.
-        (Some(html), true) => builder.multipart(MultiPart::alternative_plain_html(
-            message.body_text.clone(),
-            html.clone(),
-        )),
+        (Some(html), true) => builder.multipart(alternative(html)?),
         (html, false) => {
             let mut parts = match html {
-                Some(html) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(
-                    message.body_text.clone(),
-                    html.clone(),
-                )),
+                Some(html) => MultiPart::mixed().multipart(alternative(html)?),
                 None => MultiPart::mixed().singlepart(text),
             };
             for a in &message.attachments {
@@ -233,6 +263,7 @@ mod tests {
                 mime_type: "application/pdf".into(),
                 data: b"%PDF-1.4".to_vec(),
             }],
+            inline_images: vec![],
         }
     }
 
@@ -319,5 +350,27 @@ mod tests {
     fn mime_types() {
         assert_eq!(mime_for_file_name("Report.PDF"), "application/pdf");
         assert_eq!(mime_for_file_name("noext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn inline_images_are_sent_with_the_html() {
+        let mut m = base();
+        m.body_html = Some(r#"<p>Hi</p><img src="cid:sig@mocky.mail">"#.into());
+        m.inline_images = vec![InlineImage {
+            content_id: "sig@mocky.mail".into(),
+            mime_type: "image/png".into(),
+            data: b"\x89PNG\r\n\x1a\nfake".to_vec(),
+        }];
+        let built = build(&m).unwrap();
+        let raw = String::from_utf8_lossy(&built.raw);
+        assert!(raw.contains("multipart/related"));
+        assert!(raw.contains("Content-ID: <sig@mocky.mail>"));
+        assert!(raw.contains("Content-Disposition: inline"));
+        // Still a mixed message with the PDF attached.
+        assert!(raw.contains("multipart/mixed"));
+        // Readers see the HTML and only the PDF as an attachment.
+        let body = mail_core::message::parse_body(&built.raw).unwrap();
+        assert!(body.html.unwrap().contains("cid:sig@mocky.mail"));
+        assert_eq!(body.attachments.len(), 1);
     }
 }

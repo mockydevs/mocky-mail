@@ -136,6 +136,10 @@ async fn measure(state: &AppState, draft: &Draft) -> AppResult<(Account, u64, u6
     for attachment in &draft.attachments {
         sizes.push(check_picked(state, attachment).await?.1);
     }
+    // The signature picture travels inside the message.
+    if let Some(image) = crate::signatures::load(state, &account.id)?.and_then(|s| s.image) {
+        sizes.push(u64::try_from(image.data.len()).unwrap_or(u64::MAX));
+    }
     let estimated = estimate_message_size(
         u64::try_from(draft.body_text.len()).unwrap_or(u64::MAX),
         &sizes,
@@ -163,6 +167,17 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
             data,
         });
     }
+    let signature = crate::signatures::load(state, &account.id)?;
+    // The full signature, if its block is still in the body as compose put it.
+    let body_html = signature
+        .as_ref()
+        .and_then(|signature| html_with_signature(&draft.body_text, signature));
+    let inline_images = match (&body_html, &signature) {
+        (Some(_), Some(signature)) => crate::signatures::inline_image(signature)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    };
     let message = OutgoingMessage {
         from: Mailbox {
             name: Some(account.display_name.clone()),
@@ -173,12 +188,11 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
         bcc: field("Bcc", &draft.bcc)?,
         subject: draft.subject.clone(),
         body_text: draft.body_text.clone(),
-        // The full signature, if its block is still in the body as compose put it.
-        body_html: crate::signatures::load(state, &account.id)?
-            .and_then(|signature| html_with_signature(&draft.body_text, &signature)),
+        body_html,
         in_reply_to: draft.in_reply_to.clone(),
         references: draft.references.clone(),
         attachments,
+        inline_images,
     };
     Ok((account, message))
 }
