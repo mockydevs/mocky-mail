@@ -276,7 +276,12 @@ async fn finds_the_calendar_and_reads_and_writes_events() {
         .put_event(&cal, None, "new-1@mocky.mail", &text, None)
         .await
         .unwrap();
-    assert_eq!(new_href, format!("{BOOK}new-1mocky.mail.ics"));
+    // The "@" can't go in the name, so a hash of the whole uid is added.
+    assert!(new_href.starts_with(&format!("{BOOK}new-1mocky.mail-")));
+    assert_eq!(
+        new_href.len(),
+        BOOK.len() + "new-1mocky.mail-0123456789abcdef.ics".len()
+    );
     assert_eq!(dav.list_resources(&cal).await.unwrap().len(), 2);
     dav.delete_event(&cal, &new_href, None).await.unwrap();
     dav.delete_event(&cal, &new_href, None).await.unwrap();

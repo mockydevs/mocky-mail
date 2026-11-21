@@ -71,6 +71,27 @@ pub struct BuiltMessage {
     pub recipients: Vec<String>,
 }
 
+/// A copy of a built message that records its Bcc recipients in a `Bcc`
+/// header, for the sender's own Drafts and Sent folders only. Without it
+/// a reopened draft has lost its Bcc list, and nobody can later see who a
+/// sent message was copied to. What is handed to SMTP must stay the
+/// original, which never names them.
+#[must_use]
+pub fn with_bcc_header(raw: &[u8], bcc: &[String]) -> Vec<u8> {
+    let addresses: Vec<&str> = bcc
+        .iter()
+        .map(String::as_str)
+        .filter(|address| mail_core::compose::is_valid_address(address))
+        .collect();
+    if addresses.is_empty() {
+        return raw.to_vec();
+    }
+    // One address per line (folded), so no line grows too long.
+    let mut out = format!("Bcc: {}\r\n", addresses.join(",\r\n ")).into_bytes();
+    out.extend_from_slice(raw);
+    out
+}
+
 /// MIME type for a file name, from a short list of common types.
 #[must_use]
 pub fn mime_for_file_name(name: &str) -> &'static str {

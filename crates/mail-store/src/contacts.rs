@@ -254,13 +254,17 @@ impl Store {
     }
 
     /// Delete a contact. One on a server is kept, marked `deleted`, until the
-    /// sync deletes the server copy.
+    /// sync deletes the server copy. So is an account's contact still
+    /// waiting to be sent: it may be on its way to the server right now,
+    /// and [`Store::contact_pushed`] needs the row to learn where it went.
     ///
     /// # Errors
     /// [`StoreError::NotFound`] for an unknown id.
     pub fn delete_contact(&self, id: &str) -> Result<()> {
         let sync = self.contact_sync(id)?;
-        if sync.href.is_some() {
+        let sending =
+            sync.contact.account_id.is_some() && sync.contact.state == ContactState::Changed;
+        if sync.href.is_some() || sending {
             self.conn().execute(
                 "UPDATE contacts SET state = 'deleted' WHERE id = ?1",
                 params![id],
@@ -375,6 +379,14 @@ impl Store {
     }
 
     /// A change reached the server: remember where, and its new version.
+    /// `vcard` is the text that was sent, which must be
+    /// `mail_core::vcard::write(card, server copy)` for the contact as it
+    /// was read from [`Store::contacts_to_push`].
+    ///
+    /// The contact is only marked `synced` if it is still what was sent.
+    /// Sending takes a while, and one edited or deleted here meanwhile
+    /// stays `changed` or `deleted` (now with its place on the server), so
+    /// the next sync sends that too instead of losing it.
     ///
     /// # Errors
     /// Database errors.
@@ -385,9 +397,29 @@ impl Store {
         etag: Option<&str>,
         vcard: &str,
     ) -> Result<()> {
-        self.conn().execute(
-            "UPDATE contacts SET state = 'synced', href = ?2, etag = ?3, vcard = ?4 WHERE id = ?1",
-            params![id, href, etag, vcard],
+        // One lock for the check and the update.
+        let conn = self.conn();
+        let row: Option<(String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT card, state, vcard FROM contacts WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((card, state, old_vcard)) = row else {
+            return Ok(());
+        };
+        let unchanged = state == ContactState::Changed.as_str()
+            && serde_json::from_str::<ContactCard>(&card)
+                .is_ok_and(|card| mail_core::vcard::write(&card, old_vcard.as_deref()) == vcard);
+        let state = if unchanged {
+            ContactState::Synced.as_str()
+        } else {
+            state.as_str()
+        };
+        conn.execute(
+            "UPDATE contacts SET state = ?5, href = ?2, etag = ?3, vcard = ?4 WHERE id = ?1",
+            params![id, href, etag, vcard, state],
         )?;
         Ok(())
     }
@@ -437,6 +469,11 @@ mod tests {
             .insert_account(&test_support::new_account("me@work.example"))
             .unwrap()
             .id
+    }
+
+    /// The text the sync sends for a pending contact.
+    fn sent(pending: &ContactSync) -> String {
+        mail_core::vcard::write(&pending.contact.card, pending.vcard.as_deref())
     }
 
     fn card(name: &str, email: &str) -> ContactCard {
@@ -495,7 +532,7 @@ mod tests {
         let push = store.contacts_to_push(&account).unwrap();
         assert_eq!(push.len(), 1);
         store
-            .contact_pushed(&c.id, "/dav/peter.vcf", Some("\"e1\""), "BEGIN:VCARD")
+            .contact_pushed(&c.id, "/dav/peter.vcf", Some("\"e1\""), &sent(&push[0]))
             .unwrap();
         assert!(store.contacts_to_push(&account).unwrap().is_empty());
         // Deleting keeps it until the server copy is gone.
@@ -508,6 +545,89 @@ mod tests {
         );
         store.forget_contact(&c.id).unwrap();
         assert!(store.contacts_to_push(&account).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_change_made_while_sending_is_not_lost() {
+        let store = Store::open_in_memory().unwrap();
+        let account = new_account(&store);
+        let c = store
+            .save_contact(
+                None,
+                Some(&account),
+                card("Peter", "peter@client.example"),
+                1,
+            )
+            .unwrap();
+        // The sync reads the contact and starts sending it...
+        let push = store.contacts_to_push(&account).unwrap();
+        let text = sent(&push[0]);
+        // ...and it is edited before the server answers.
+        let mut edited = c.card.clone();
+        edited.title = "Site manager".into();
+        store
+            .save_contact(Some(&c.id), Some(&account), edited, 2)
+            .unwrap();
+        store
+            .contact_pushed(&c.id, "/dav/peter.vcf", Some("\"e1\""), &text)
+            .unwrap();
+        // Still to send, now as an update of the server's copy.
+        let push = store.contacts_to_push(&account).unwrap();
+        assert_eq!(push.len(), 1);
+        assert_eq!(push[0].contact.state, ContactState::Changed);
+        assert_eq!(push[0].contact.card.title, "Site manager");
+        assert_eq!(push[0].href.as_deref(), Some("/dav/peter.vcf"));
+        assert_eq!(push[0].etag.as_deref(), Some("\"e1\""));
+        assert_eq!(push[0].vcard.as_deref(), Some(text.as_str()));
+        // The second send goes through untouched and settles it.
+        let text = sent(&push[0]);
+        assert!(text.contains("TITLE:Site manager"));
+        store
+            .contact_pushed(&c.id, "/dav/peter.vcf", Some("\"e2\""), &text)
+            .unwrap();
+        assert!(store.contacts_to_push(&account).unwrap().is_empty());
+        assert_eq!(
+            store.get_contact(&c.id).unwrap().state,
+            ContactState::Synced
+        );
+    }
+
+    #[test]
+    fn a_contact_deleted_while_first_sending_is_deleted_on_the_server_too() {
+        let store = Store::open_in_memory().unwrap();
+        let account = new_account(&store);
+        let c = store
+            .save_contact(
+                None,
+                Some(&account),
+                card("Peter", "peter@client.example"),
+                1,
+            )
+            .unwrap();
+        let push = store.contacts_to_push(&account).unwrap();
+        let text = sent(&push[0]);
+        store.delete_contact(&c.id).unwrap();
+        assert!(store.list_contacts("", 10).unwrap().is_empty());
+        store
+            .contact_pushed(&c.id, "/dav/peter.vcf", Some("\"e1\""), &text)
+            .unwrap();
+        // It stays deleted, and the sync knows which server copy to remove.
+        let push = store.contacts_to_push(&account).unwrap();
+        assert_eq!(push.len(), 1);
+        assert_eq!(push[0].contact.state, ContactState::Deleted);
+        assert_eq!(push[0].href.as_deref(), Some("/dav/peter.vcf"));
+        assert!(store.list_contacts("", 10).unwrap().is_empty());
+        // A device-only contact is still simply removed.
+        let local = store
+            .save_contact(None, None, card("Kept", "k@x.example"), 1)
+            .unwrap();
+        store.delete_contact(&local.id).unwrap();
+        assert!(store.contacts_to_push(&account).unwrap().len() == 1);
+        // A contact that is gone by the time the server answers is no error.
+        store.forget_contact(&c.id).unwrap();
+        store
+            .contact_pushed(&c.id, "/dav/x.vcf", None, &text)
+            .unwrap();
     }
 
     #[test]

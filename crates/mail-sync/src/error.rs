@@ -143,6 +143,72 @@ pub fn connect_reason(error: &std::io::Error) -> String {
     }
 }
 
+/// Most links followed in one error chain (a guard against a cycle).
+const MAX_CAUSES: usize = 16;
+
+/// Every error in a chain, outermost first. An `io::Error` that wraps
+/// another error leaves it out of `source()`, so it is unwrapped by hand:
+/// that is where TLS libraries put a certificate failure.
+fn causes<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Vec<&'a (dyn std::error::Error + 'static)> {
+    let mut out = Vec::new();
+    let mut next = Some(error);
+    while let Some(current) = next {
+        if out.len() >= MAX_CAUSES {
+            break;
+        }
+        out.push(current);
+        next = match current
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+        {
+            Some(inner) => Some(inner),
+            None => current.source(),
+        };
+    }
+    out
+}
+
+/// The TLS library's own words when a failure anywhere in the chain is
+/// about the secure connection (an untrusted, expired or wrong-name
+/// certificate, a failed handshake). `None` for anything else.
+pub(crate) fn tls_detail(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let chain = causes(error);
+    if let Some(tls) = chain.iter().find_map(|e| e.downcast_ref::<rustls::Error>()) {
+        return Some(tls.to_string());
+    }
+    // A verifier outside rustls reports in its own type; its text still
+    // names the certificate.
+    let innermost = chain.last()?.to_string();
+    innermost
+        .to_lowercase()
+        .contains("certificate")
+        .then_some(innermost)
+}
+
+/// Plain words for why a connection failed, from the innermost cause:
+/// HTTP and SMTP libraries wrap the operating system's error in layers
+/// whose own text only says "error sending request".
+pub(crate) fn cause_reason(error: &(dyn std::error::Error + 'static)) -> String {
+    let chain = causes(error);
+    if let Some(io) = chain
+        .iter()
+        .rev()
+        .find_map(|e| e.downcast_ref::<std::io::Error>())
+    {
+        return connect_reason(io);
+    }
+    connect_reason(&std::io::Error::other(innermost_text(error)))
+}
+
+/// The innermost cause's text.
+pub(crate) fn innermost_text(error: &(dyn std::error::Error + 'static)) -> String {
+    causes(error)
+        .last()
+        .map_or_else(|| error.to_string(), ToString::to_string)
+}
+
 impl SyncError {
     /// The category for the interface.
     #[must_use]
@@ -228,6 +294,28 @@ mod tests {
                 .to_string()
                 .starts_with("couldn't reach mail.example.com:993: this computer")
         );
+    }
+
+    #[test]
+    fn the_real_cause_is_found_under_the_wrappers() {
+        use std::io::{Error, ErrorKind as Io};
+        // A certificate failure as TLS libraries report it: inside an
+        // io::Error, which hides it from `source()`.
+        let bad_cert = Error::new(
+            Io::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired),
+        );
+        let wrapped = Error::other(bad_cert);
+        let detail = tls_detail(&wrapped).unwrap_or_default();
+        assert!(detail.to_lowercase().contains("certificate"), "{detail}");
+        assert!(detail.to_lowercase().contains("expired"), "{detail}");
+
+        let refused = Error::other(Error::from(Io::ConnectionRefused));
+        assert_eq!(tls_detail(&refused), None);
+        assert!(cause_reason(&refused).contains("refused the connection"));
+        let lookup = Error::other(Error::other("No such host is known. (os error 11001)"));
+        assert!(cause_reason(&lookup).contains("could not be found"));
+        assert_eq!(innermost_text(&Error::other(Error::other("deep"))), "deep");
     }
 
     #[test]

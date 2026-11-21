@@ -11,23 +11,24 @@
 use std::fmt::Write as _;
 
 /// Whether the text uses any formatting marks, so it should also be sent
-/// as HTML. Quoted replies (`> `) alone don't count.
+/// as HTML. Only what the author typed counts: quoted lines (`>`) are
+/// someone else's text, and their marks would restyle the whole message.
+/// Emphasis marks count when they wrap text (`**bold**`, `_word_`), not
+/// inside names such as `my_quote_v2.pdf` or `__init__`.
 #[must_use]
 pub fn has_formatting(text: &str) -> bool {
-    if ["**", "__", "~~", "`", "]("]
-        .iter()
-        .any(|m| text.contains(m))
-    {
-        return true;
-    }
-    text.lines().map(str::trim_start).any(|line| {
-        line.starts_with("- ")
-            || line.starts_with("* ")
-            || line.starts_with("# ")
-            || line.starts_with("## ")
-            || numbered(line)
-            || single_emphasis(line)
-    })
+    text.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with('>'))
+        .any(|line| {
+            ["~~", "`", "]("].iter().any(|m| line.contains(m))
+                || line.starts_with("- ")
+                || line.starts_with("* ")
+                || line.starts_with("# ")
+                || line.starts_with("## ")
+                || numbered(line)
+                || ["**", "__", "*", "_"].iter().any(|m| wraps(line, m))
+        })
 }
 
 /// `1. ` to `99. ` at the start of a line.
@@ -39,31 +40,44 @@ fn numbered(line: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(". "))
 }
 
-/// `*word*` or `_word_` with no space just inside the marks.
-fn single_emphasis(line: &str) -> bool {
-    for marker in ['*', '_'] {
-        let mut rest = line;
-        while let Some(start) = rest.find(marker) {
-            let after = rest.get(start.saturating_add(1)..).unwrap_or_default();
-            if let Some(end) = after.find(marker) {
-                let inner = after.get(..end).unwrap_or_default();
-                let before_ok = start == 0
-                    || rest
-                        .get(..start)
-                        .and_then(|b| b.chars().next_back())
-                        .is_none_or(|c| !c.is_alphanumeric());
-                if !inner.is_empty()
-                    && !inner.starts_with(' ')
-                    && !inner.ends_with(' ')
-                    && before_ok
-                {
-                    return true;
-                }
-                rest = after.get(end.saturating_add(1)..).unwrap_or_default();
-            } else {
-                break;
-            }
+/// Whether `marker` wraps some text on this line, as in `*word*` or
+/// `**two words**`: the opening mark not straight after a letter, digit
+/// or another mark, the closing one not straight before one, and no
+/// space just inside either. A double underscore around a single name
+/// (`__init__`, `__FILE__`) is code, not bold.
+fn wraps(line: &str, marker: &str) -> bool {
+    let mark = marker.chars().next().unwrap_or_default();
+    let outside = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != mark);
+    let inside = |c: Option<char>| c.is_some_and(|c| !c.is_whitespace() && c != mark);
+    let mut from = 0usize;
+    while let Some(start) = line
+        .get(from..)
+        .and_then(|rest| rest.find(marker))
+        .map(|at| from.saturating_add(at))
+    {
+        let open = start.saturating_add(marker.len());
+        let before = line.get(..start).unwrap_or_default();
+        let after = line.get(open..).unwrap_or_default();
+        from = open;
+        if !outside(before.chars().next_back()) || !inside(after.chars().next()) {
+            continue;
         }
+        // Only its nearest closing mark: that is the pair Markdown makes.
+        let Some(end) = after.find(marker) else {
+            break;
+        };
+        let inner = after.get(..end).unwrap_or_default();
+        let rest = after
+            .get(end.saturating_add(marker.len())..)
+            .unwrap_or_default();
+        let name = inner.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if inside(inner.chars().next_back())
+            && outside(rest.chars().next())
+            && !(marker == "__" && name)
+        {
+            return true;
+        }
+        from = open.saturating_add(end).saturating_add(marker.len());
     }
     false
 }
@@ -214,6 +228,27 @@ mod tests {
             "Price: KES 2,500",
         ] {
             assert!(!has_formatting(plain), "{plain}");
+        }
+    }
+
+    #[test]
+    fn quoted_text_and_code_names_are_not_formatting() {
+        for plain in [
+            // Marks in the quoted message are the other person's.
+            "Sure.\n\nOn Tue, Amina wrote:\n> Please **confirm** the `INV-0142` total\n> 1. Paint\n> - Tiles\n>> see [the quote](https://mocky.co.ke/q)",
+            "Call __init__ first, then set my_var_name in __main__.py",
+            "2 ** 3 is 8, and 4 * 5 * 6 is 120",
+            "Use snake_case for file_names and *args",
+        ] {
+            assert!(!has_formatting(plain), "{plain}");
+        }
+        for formatted in [
+            "This is __very important__",
+            "This is _really_ urgent",
+            "**Agreed.**\n\n> Lunch?",
+            "Fixed in `__init__`",
+        ] {
+            assert!(has_formatting(formatted), "{formatted}");
         }
     }
 

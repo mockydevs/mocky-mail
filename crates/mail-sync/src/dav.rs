@@ -99,6 +99,8 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>, SyncError> {
                 }
                 if let Some(r) = current.as_mut() {
                     mark_type(r, &path, &name);
+                    // <comp name="VTODO"></comp>, as some servers write it.
+                    mark_component(r, &path, &name, &e);
                 }
                 path.push(name);
                 text.clear();
@@ -107,18 +109,12 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>, SyncError> {
                 let name = local(e.local_name().as_ref());
                 if let Some(r) = current.as_mut() {
                     mark_type(r, &path, &name);
-                    if name == "comp"
-                        && path.last().map(String::as_str)
-                            == Some("supported-calendar-component-set")
-                        && let Ok(Some(attr)) = e.try_get_attribute("name")
-                    {
-                        r.components.push(attr.value.to_ascii_uppercase());
-                    }
+                    mark_component(r, &path, &name, &e);
                 }
             }
             Event::Text(t) => text.push_str(&unescape_xml(t.as_ref())),
             Event::GeneralRef(r) => {
-                // An entity such as &amp; arrives on its own.
+                // An entity such as &amp; or &#13; arrives on its own.
                 let name: &str = r.as_ref();
                 text.push_str(&unescape_xml(&format!("&{name};")));
             }
@@ -172,14 +168,69 @@ fn mark_type(r: &mut DavResponse, path: &[String], name: &str) {
     }
 }
 
+/// Note a `<comp name="VEVENT">` inside `supported-calendar-component-set`.
+fn mark_component(
+    r: &mut DavResponse,
+    path: &[String],
+    name: &str,
+    element: &quick_xml::events::BytesStart<'_>,
+) {
+    if name == "comp"
+        && path.last().map(String::as_str) == Some("supported-calendar-component-set")
+        && let Ok(Some(attr)) = element.try_get_attribute("name")
+    {
+        r.components.push(attr.value.to_ascii_uppercase());
+    }
+}
+
+/// Longest reference name looked for after an `&` (`#x10FFFF` is 8).
+const MAX_REFERENCE_LEN: usize = 10;
+
+/// Replace XML references with their characters: the five named ones and
+/// numeric ones in decimal (`&#13;`) or hex (`&#xD;`), which servers use
+/// for the line breaks and non-ASCII letters of card and event text.
+/// Anything else after an `&` is kept as written.
 fn unescape_xml(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#13;", "\r")
-        .replace("&#10;", "\n")
-        .replace("&amp;", "&")
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        let (before, tail) = rest.split_at(at);
+        out.push_str(before);
+        // `tail` starts with the one-byte `&`.
+        let after = tail.get(1..).unwrap_or_default();
+        let decoded = after
+            .find(';')
+            .filter(|end| *end <= MAX_REFERENCE_LEN)
+            .and_then(|end| Some((reference_char(after.get(..end)?)?, end)));
+        if let Some((c, end)) = decoded {
+            out.push(c);
+            rest = after.get(end.saturating_add(1)..).unwrap_or_default();
+        } else {
+            out.push('&');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The character a reference names (`amp`, `#13`, `#xD`), if it is one.
+fn reference_char(name: &str) -> Option<char> {
+    match name {
+        "lt" => return Some('<'),
+        "gt" => return Some('>'),
+        "quot" => return Some('"'),
+        "apos" => return Some('\''),
+        "amp" => return Some('&'),
+        _ => {}
+    }
+    let number = name.strip_prefix('#')?;
+    let code = match number.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => number.parse().ok()?,
+    };
+    // NUL is not a character XML can carry.
+    char::from_u32(code).filter(|c| *c != '\0')
 }
 
 /// A `WebDAV` connection to one server.
@@ -220,6 +271,12 @@ pub struct RemoteCard {
     pub vcard: String,
 }
 
+/// Whether a reply of the length the server announced is within
+/// [`MAX_RESPONSE_BYTES`].
+fn fits_in_memory(length: u64) -> bool {
+    usize::try_from(length).is_ok_and(|length| length <= MAX_RESPONSE_BYTES)
+}
+
 fn check_scheme(url: &Url) -> Result<(), SyncError> {
     if url.scheme() == "https" || (cfg!(feature = "insecure-plaintext") && url.scheme() == "http") {
         Ok(())
@@ -234,15 +291,61 @@ fn http_error(url: &Url, error: &reqwest::Error) -> SyncError {
     let host = url.host_str().unwrap_or_default().to_owned();
     if error.is_timeout() {
         SyncError::Timeout { host }
+    } else if let Some(detail) = crate::error::tls_detail(error) {
+        // A certificate that can't be trusted is not "offline": trying
+        // again won't help, and the person needs to know which it is.
+        SyncError::Tls { host, detail }
     } else if error.is_connect() {
         SyncError::Connect {
             port: url.port_or_known_default().unwrap_or(443),
             host,
-            reason: error.to_string(),
+            // The error's own text is only "error sending request for
+            // url"; the cause underneath says why.
+            reason: crate::error::cause_reason(error),
         }
     } else {
-        SyncError::Protocol(error.to_string())
+        SyncError::Protocol(crate::error::innermost_text(error))
     }
+}
+
+/// A collection's URL ending in `/`. Joining a name onto one without the
+/// slash would replace its last part and store the item in the parent.
+fn as_collection(url: &Url) -> Url {
+    let mut url = url.clone();
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    url
+}
+
+/// An `If-Match` value for a version tag. A tag that can't be sent is an
+/// error: leaving the header out would turn a guarded write or delete into
+/// one that overwrites whatever is on the server.
+fn if_match_value(etag: &str, kind: Kind) -> Result<HeaderValue, SyncError> {
+    HeaderValue::from_bytes(etag.as_bytes()).map_err(|_| {
+        SyncError::Refused(format!(
+            "the {}'s version on the server can't be checked (its version tag isn't usable)",
+            kind.noun()
+        ))
+    })
+}
+
+/// Whether card or event text has this `UID`. Lines may be folded, and the
+/// property may carry parameters (`UID;X-A=b:value`).
+fn has_uid(text: &str, uid: &str) -> bool {
+    let unfolded = text
+        .replace("\r\n ", "")
+        .replace("\r\n\t", "")
+        .replace("\n ", "")
+        .replace("\n\t", "");
+    unfolded.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        let name = name.split(';').next().unwrap_or_default().trim();
+        name.eq_ignore_ascii_case("UID") && value.trim() == uid
+    })
 }
 
 impl DavClient {
@@ -278,7 +381,7 @@ impl DavClient {
             if let Some(body) = &body {
                 request = request.body(body.clone());
             }
-            let response = request.send().await.map_err(|e| http_error(&url, &e))?;
+            let mut response = request.send().await.map_err(|e| http_error(&url, &e))?;
             let status = response.status();
             if status.is_redirection() {
                 let next = response
@@ -311,11 +414,21 @@ impl DavClient {
                 ));
             }
             let headers = response.headers().clone();
-            let bytes = response.bytes().await.map_err(|e| http_error(&url, &e))?;
-            if bytes.len() > MAX_RESPONSE_BYTES {
-                return Err(SyncError::Protocol(
-                    "the server's reply was too large".to_owned(),
-                ));
+            // The limit is applied as the body arrives, not after: a huge
+            // or endless reply must not be held in memory first.
+            let too_large = || SyncError::Protocol("the server's reply was too large".to_owned());
+            if response
+                .content_length()
+                .is_some_and(|length| !fits_in_memory(length))
+            {
+                return Err(too_large());
+            }
+            let mut bytes: Vec<u8> = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|e| http_error(&url, &e))? {
+                if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                    return Err(too_large());
+                }
+                bytes.extend_from_slice(&chunk);
             }
             return Ok((
                 url,
@@ -620,43 +733,72 @@ impl DavClient {
         if_match: Option<&str>,
         kind: Kind,
     ) -> Result<(String, Option<String>), SyncError> {
+        let book = as_collection(book);
         let url = match href {
             Some(href) => book.join(href),
             None => book.join(&format!("{}.{}", safe_name(uid), kind.extension())),
         }
         .map_err(|e| SyncError::Invalid(e.to_string()))?;
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(kind.content_type()));
+        let mut base = HeaderMap::new();
+        base.insert(CONTENT_TYPE, HeaderValue::from_static(kind.content_type()));
         if matches!(kind, Kind::Answered) {
-            headers.insert("Schedule-Reply", HeaderValue::from_static("F"));
+            base.insert("Schedule-Reply", HeaderValue::from_static("F"));
         }
+        let mut headers = base.clone();
         match (href, if_match) {
             (None, _) => {
                 headers.insert("If-None-Match", HeaderValue::from_static("*"));
             }
             (Some(_), Some(etag)) => {
-                if let Ok(value) = HeaderValue::from_str(etag) {
-                    headers.insert("If-Match", value);
-                }
+                headers.insert("If-Match", if_match_value(etag, kind)?);
             }
             (Some(_), None) => {}
         }
         let path = url.path().to_owned();
         let (_, status, headers, text) = self
+            .send(&Method::PUT, url.clone(), headers, Some(vcard.to_owned()))
+            .await?;
+        if status.is_success() {
+            return Ok((path, etag_of(&headers)));
+        }
+        let refused = |status: StatusCode, text: &str| {
+            SyncError::Refused(format!(
+                "the server didn't save the {} ({status}): {}",
+                kind.noun(),
+                text.chars().take(200).collect::<String>()
+            ))
+        };
+        if href.is_some() || status != StatusCode::PRECONDITION_FAILED {
+            return Err(refused(status, &text));
+        }
+        // A create answered "already there". If an earlier try got through
+        // and only its reply was lost, the item there is this one, and
+        // every further try would be refused the same way: take it as ours.
+        let (_, found, found_headers, stored) = self
+            .send(&Method::GET, url.clone(), HeaderMap::new(), None)
+            .await?;
+        if !found.is_success() || !has_uid(&stored, uid) {
+            return Err(refused(status, &text));
+        }
+        let etag = etag_of(&found_headers);
+        if stored.trim() == vcard.trim() {
+            return Ok((path, etag));
+        }
+        // It was edited again while the first try was in doubt (or the
+        // server rewrote it): store the text asked for now, guarded by the
+        // version just read.
+        let mut headers = base;
+        if let Some(etag) = &etag {
+            headers.insert("If-Match", if_match_value(etag, kind)?);
+        }
+        let (_, status, headers, text) = self
             .send(&Method::PUT, url, headers, Some(vcard.to_owned()))
             .await?;
         if status.is_success() {
-            let etag = headers
-                .get(ETAG)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            return Ok((path, etag));
+            Ok((path, etag_of(&headers)))
+        } else {
+            Err(refused(status, &text))
         }
-        Err(SyncError::Refused(format!(
-            "the server didn't save the {} ({status}): {}",
-            kind.noun(),
-            text.chars().take(200).collect::<String>()
-        )))
     }
 
     /// Delete a card. One already gone counts as deleted.
@@ -707,12 +849,12 @@ impl DavClient {
         if_match: Option<&str>,
         kind: Kind,
     ) -> Result<(), SyncError> {
-        let url = book
+        let url = as_collection(book)
             .join(href)
             .map_err(|e| SyncError::Invalid(e.to_string()))?;
         let mut headers = HeaderMap::new();
-        if let Some(value) = if_match.and_then(|e| HeaderValue::from_str(e).ok()) {
-            headers.insert("If-Match", value);
+        if let Some(etag) = if_match {
+            headers.insert("If-Match", if_match_value(etag, kind)?);
         }
         if matches!(kind, Kind::Answered) {
             headers.insert("Schedule-Reply", HeaderValue::from_static("F"));
@@ -761,18 +903,38 @@ impl Kind {
     }
 }
 
-/// A file name from a uid: letters, digits, `-`, `_`, `.` only.
+/// The `ETag` header of a reply, if it has one.
+fn etag_of(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// Longest part of a uid kept in a file name.
+const MAX_NAME_CHARS: usize = 100;
+
+/// A file name from a uid: letters, digits, `-`, `_`, `.` only. A uid that
+/// loses characters this way (or is cut short) gets a hash of the whole uid
+/// added, so two different uids never share a name: the second would be
+/// refused as "already there" for ever. A uid that fits is used as it is.
 fn safe_name(uid: &str) -> String {
-    let name: String = uid
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        .take(100)
-        .collect();
-    if name.is_empty() {
-        "contact".to_owned()
-    } else {
-        name
+    let safe = |c: &char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    let name: String = uid.chars().filter(safe).take(MAX_NAME_CHARS).collect();
+    if !name.is_empty() && name.len() == uid.len() {
+        return name;
     }
+    let kept = if name.is_empty() { "item" } else { &name };
+    format!("{kept}-{:016x}", fnv1a(uid.as_bytes()))
+}
+
+/// 64-bit FNV-1a. Written out because the name it goes into must come out
+/// the same on every run and every version of the app, which the standard
+/// library's hasher doesn't promise.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 fn escape_xml(text: &str) -> String {
@@ -874,8 +1036,120 @@ mod tests {
     #[test]
     fn card_names_are_safe() {
         assert_eq!(safe_name("a1b2-c3.vcf"), "a1b2-c3.vcf");
-        assert_eq!(safe_name("../../etc/passwd"), "....etcpasswd");
-        assert_eq!(safe_name("ü/€"), "contact");
+        let stripped = safe_name("../../etc/passwd");
+        assert!(stripped.starts_with("....etcpasswd-"), "{stripped}");
+        assert!(!stripped.contains('/'));
+        let foreign = safe_name("ü/€");
+        assert!(foreign.starts_with("item-"), "{foreign}");
+        assert!(foreign.is_ascii());
+    }
+
+    #[test]
+    fn different_uids_never_share_a_name() {
+        // All non-ASCII: both used to become "contact".
+        assert_ne!(safe_name("ü/€"), safe_name("名前"));
+        // The same once the unsafe characters are dropped.
+        assert_ne!(safe_name("a/b@x"), safe_name("a/bx"));
+        assert_ne!(safe_name("a/b@x"), safe_name("ab@x"));
+        // The same first hundred characters.
+        let long = "u".repeat(150);
+        let longer = format!("{long}2");
+        assert_ne!(safe_name(&long), safe_name(&longer));
+        assert!(safe_name(&long).len() <= MAX_NAME_CHARS + 17);
+        // A name is the same every time, or a retry would miss the first try.
+        assert_eq!(safe_name("ü/€"), safe_name("ü/€"));
+        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+        // A uid that fits keeps its plain name, as before.
+        let plain = "5A1F-22.33_x";
+        assert_eq!(safe_name(plain), plain);
+        assert_eq!(safe_name(&"u".repeat(100)), "u".repeat(100));
+    }
+
+    #[test]
+    fn numeric_references_become_their_characters() {
+        assert_eq!(unescape_xml("a&#13;&#10;b"), "a\r\nb");
+        assert_eq!(unescape_xml("a&#xD;&#xA;b&#x9;c&#9;d"), "a\r\nb\tc\td");
+        assert_eq!(unescape_xml("Caf&#233; &#xE9; &#x1F600;"), "Café é 😀");
+        assert_eq!(
+            unescape_xml("&lt;b&gt; &quot;x&quot; &apos;y&apos;"),
+            "<b> \"x\" 'y'"
+        );
+        // Decoded once: &amp;lt; is the text "&lt;", not "<".
+        assert_eq!(unescape_xml("&amp;lt; &amp;#13;"), "&lt; &#13;");
+        // Not references: kept as written.
+        assert_eq!(
+            unescape_xml("a & b; &nbsp; &#; &#xZZ; &#0; &#xD800; &"),
+            "a & b; &nbsp; &#; &#xZZ; &#0; &#xD800; &"
+        );
+        assert_eq!(unescape_xml("&#99999999999;"), "&#99999999999;");
+        assert_eq!(reference_char("#X41"), Some('A'));
+        assert_eq!(reference_char("13"), None);
+    }
+
+    #[test]
+    fn reads_card_text_with_hex_and_other_numeric_references() {
+        let xml = "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:carddav\"><d:response><d:href>/b/1.vcf</d:href><d:propstat><d:prop><c:address-data>BEGIN:VCARD&#xD;&#xA;FN:Ren&#233;e &#x1F600;&#xD;&#xA;NOTE:a&#9;b&#xD;&#xA;END:VCARD&#xD;&#xA;</c:address-data></d:prop></d:propstat></d:response></d:multistatus>";
+        let r = parse_multistatus(xml).unwrap();
+        assert_eq!(
+            r[0].data.as_deref(),
+            Some("BEGIN:VCARD\r\nFN:Renée 😀\r\nNOTE:a\tb\r\nEND:VCARD\r\n")
+        );
+    }
+
+    #[test]
+    fn components_are_read_in_either_form() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:response><D:href>/c/tasks/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/><C:calendar/></D:resourcetype><C:supported-calendar-component-set><C:comp name="VTODO"></C:comp></C:supported-calendar-component-set></D:prop></D:propstat></D:response></D:multistatus>"#;
+        let r = parse_multistatus(xml).unwrap();
+        assert!(r[0].is_calendar);
+        assert_eq!(r[0].components, ["VTODO"]);
+    }
+
+    #[test]
+    fn items_are_stored_inside_the_collection() {
+        let bare = Url::parse("https://x.example/dav/me/Contacts/personal").unwrap();
+        assert_eq!(
+            as_collection(&bare).join("a.vcf").unwrap().path(),
+            "/dav/me/Contacts/personal/a.vcf"
+        );
+        let slashed = Url::parse("https://x.example/dav/personal/").unwrap();
+        assert_eq!(as_collection(&slashed), slashed);
+        // A full path from the server still wins.
+        assert_eq!(
+            as_collection(&bare)
+                .join("/dav/other/b.vcf")
+                .unwrap()
+                .path(),
+            "/dav/other/b.vcf"
+        );
+    }
+
+    #[test]
+    fn a_version_tag_that_cannot_be_sent_is_an_error() {
+        assert!(if_match_value("\"gcs00000001\"", Kind::Card).is_ok());
+        assert!(if_match_value("W/\"é\"", Kind::Card).is_ok());
+        let bad = if_match_value("\"a\nb\"", Kind::Event).unwrap_err();
+        assert!(matches!(bad, SyncError::Refused(_)), "{bad:?}");
+    }
+
+    #[test]
+    fn finds_the_uid_of_stored_text() {
+        let card = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:abc-1\r\nFN:A\r\nEND:VCARD\r\n";
+        assert!(has_uid(card, "abc-1"));
+        assert!(!has_uid(card, "abc"));
+        assert!(!has_uid(card, "A"));
+        assert!(has_uid("uid;x-a=b:urn:uuid:12\n", "urn:uuid:12"));
+        // Folded across lines.
+        assert!(has_uid("UID:long-\r\n uid-value\r\n", "long-uid-value"));
+        assert!(!has_uid("NOTE:UID:abc-1\r\n", "abc-1"));
+    }
+
+    #[test]
+    fn an_announced_length_over_the_limit_is_refused_unread() {
+        assert!(fits_in_memory(0));
+        assert!(fits_in_memory(MAX_RESPONSE_BYTES as u64));
+        assert!(!fits_in_memory(MAX_RESPONSE_BYTES as u64 + 1));
+        assert!(!fits_in_memory(u64::MAX));
     }
 
     #[test]

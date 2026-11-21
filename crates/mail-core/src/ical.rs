@@ -10,7 +10,9 @@
 //! Editing keeps everything the app doesn't show (alarms, attendees,
 //! other properties): only the fields the editor changes are replaced.
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Offset, TimeDelta, TimeZone, Utc};
+use chrono::{
+    DateTime, Datelike, NaiveDate, NaiveDateTime, Offset, TimeDelta, TimeZone, Utc, Weekday,
+};
 use rrule::{RRule, RRuleSet, Tz, Unvalidated};
 use serde::{Deserialize, Serialize};
 
@@ -239,13 +241,281 @@ fn parse(text: &str) -> Vec<Component> {
     top
 }
 
-fn vevents(text: &str) -> Vec<Component> {
-    parse(text)
+/// The resource's events and its own time zone definitions.
+fn calendar(text: &str) -> (Vec<Component>, Zones) {
+    let mut events = Vec::new();
+    let mut zones = Vec::new();
+    for child in parse(text)
         .into_iter()
         .filter(|c| c.name == "VCALENDAR")
         .flat_map(|c| c.children)
-        .filter(|c| c.name == "VEVENT")
-        .collect()
+    {
+        match child.name.as_str() {
+            "VEVENT" => events.push(child),
+            "VTIMEZONE" => zones.push(child),
+            _ => {}
+        }
+    }
+    (events, Zones(zones))
+}
+
+fn vevents(text: &str) -> Vec<Component> {
+    calendar(text).0
+}
+
+/// The calendar's own zone definitions (`VTIMEZONE`), for a `TZID` that is
+/// neither an IANA name nor a known Windows one (Exchange writes
+/// "Customized Time Zone", other servers their own labels).
+#[derive(Debug, Default)]
+struct Zones(Vec<Component>);
+
+impl Zones {
+    /// Seconds east of UTC in zone `id` at the wall-clock time `at`: the
+    /// `TZOFFSETTO` of the observance that started last before it. A time
+    /// before every observance gets the standard one.
+    fn offset(&self, id: &str, at: NaiveDateTime) -> Option<i32> {
+        let zone = self.0.iter().find(|z| z.text("TZID") == id.trim())?;
+        // (start, is standard, offset) of the best so far.
+        let mut chosen: Option<(NaiveDateTime, bool, i32)> = None;
+        let mut fallback: Option<(bool, i32)> = None;
+        for observance in zone
+            .children
+            .iter()
+            .filter(|c| c.name == "STANDARD" || c.name == "DAYLIGHT")
+        {
+            let Some(offset) = observance
+                .prop("TZOFFSETTO")
+                .and_then(|p| parse_offset(&p.value))
+            else {
+                continue;
+            };
+            let standard = observance.name == "STANDARD";
+            if fallback.is_none_or(|(s, _)| standard && !s) {
+                fallback = Some((standard, offset));
+            }
+            if let Some(from) = onset(observance, at)
+                && chosen.is_none_or(|(best, s, _)| from > best || (from == best && standard && !s))
+            {
+                chosen = Some((from, standard, offset));
+            }
+        }
+        chosen.map(|(_, _, o)| o).or(fallback.map(|(_, o)| o))
+    }
+}
+
+/// A wall-clock value (`20261118T090000`, a trailing `Z` ignored).
+fn naive(raw: &str) -> Option<NaiveDateTime> {
+    let raw = raw.trim();
+    let raw = raw.strip_suffix(['Z', 'z']).unwrap_or(raw);
+    NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%S").ok()
+}
+
+/// `+0300`, `-0330` or `+053000` in seconds.
+fn parse_offset(raw: &str) -> Option<i32> {
+    let raw = raw.trim();
+    let (sign, digits) = match raw.strip_prefix('-') {
+        Some(rest) => (-1, rest),
+        None => (1, raw.strip_prefix('+').unwrap_or(raw)),
+    };
+    if !matches!(digits.len(), 4 | 6) || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let part = |range: std::ops::Range<usize>| digits.get(range)?.parse::<i32>().ok();
+    let seconds = if digits.len() == 6 { part(4..6)? } else { 0 };
+    part(0..2)?
+        .checked_mul(3600)?
+        .checked_add(part(2..4)?.checked_mul(60)?)?
+        .checked_add(seconds)?
+        .checked_mul(sign)
+}
+
+fn weekday_of(code: &str) -> Option<Weekday> {
+    Some(match code.to_ascii_uppercase().as_str() {
+        "MO" => Weekday::Mon,
+        "TU" => Weekday::Tue,
+        "WE" => Weekday::Wed,
+        "TH" => Weekday::Thu,
+        "FR" => Weekday::Fri,
+        "SA" => Weekday::Sat,
+        "SU" => Weekday::Sun,
+        _ => return None,
+    })
+}
+
+fn weekday_code(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Mon => "MO",
+        Weekday::Tue => "TU",
+        Weekday::Wed => "WE",
+        Weekday::Thu => "TH",
+        Weekday::Fri => "FR",
+        Weekday::Sat => "SA",
+        Weekday::Sun => "SU",
+    }
+}
+
+/// The `n`th `weekday` of a month; negative `n` counts from its end.
+fn nth_weekday(year: i32, month: u32, weekday: Weekday, n: i32) -> Option<NaiveDate> {
+    if n > 0 {
+        return NaiveDate::from_weekday_of_month_opt(year, month, weekday, u8::try_from(n).ok()?);
+    }
+    if !(-5..0).contains(&n) {
+        return None;
+    }
+    let (next_year, next_month) = if month == 12 {
+        (year.checked_add(1)?, 1)
+    } else {
+        (year, month.checked_add(1)?)
+    };
+    let last_day = NaiveDate::from_ymd_opt(next_year, next_month, 1)?.pred_opt()?;
+    let back = last_day
+        .weekday()
+        .num_days_from_monday()
+        .checked_add(7)?
+        .checked_sub(weekday.num_days_from_monday())?
+        % 7;
+    let weeks = i64::from(n.checked_neg()?.checked_sub(1)?);
+    last_day.checked_sub_signed(TimeDelta::days(
+        i64::from(back).checked_add(weeks.checked_mul(7)?)?,
+    ))
+}
+
+/// When a yearly observance rule (`FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU`, the
+/// form zone definitions use) starts in `year`. `None` for other rules.
+fn yearly_onset(rule: &str, start: NaiveDateTime, year: i32) -> Option<NaiveDateTime> {
+    let mut yearly = false;
+    let mut month = start.month();
+    let mut by_day: Option<(i32, Weekday)> = None;
+    let mut month_days: Vec<u32> = Vec::new();
+    for part in rule.split(';') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim().to_ascii_uppercase().as_str() {
+            "FREQ" => yearly = value.eq_ignore_ascii_case("YEARLY"),
+            "INTERVAL" if value != "1" => return None,
+            "BYMONTH" => month = value.parse().ok()?,
+            "BYDAY" => {
+                let split = value.len().checked_sub(2)?;
+                let (n, day) = (value.get(..split)?, value.get(split..)?);
+                let n = if n.is_empty() { 0 } else { n.parse().ok()? };
+                by_day = Some((n, weekday_of(day)?));
+            }
+            "BYMONTHDAY" => {
+                month_days = value
+                    .split(',')
+                    .filter_map(|d| d.trim().parse().ok())
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    if !yearly {
+        return None;
+    }
+    let date = match by_day {
+        // "The Sunday among the 8th to the 14th".
+        Some((0, weekday)) => month_days
+            .iter()
+            .filter_map(|d| NaiveDate::from_ymd_opt(year, month, *d))
+            .find(|d| d.weekday() == weekday)?,
+        Some((n, weekday)) => nth_weekday(year, month, weekday, n)?,
+        None => NaiveDate::from_ymd_opt(
+            year,
+            month,
+            month_days.first().copied().unwrap_or(start.day()),
+        )?,
+    };
+    Some(date.and_time(start.time()))
+}
+
+/// The last time an observance (`STANDARD`/`DAYLIGHT`) started at or
+/// before `at`; `None` when it only starts later.
+fn onset(observance: &Component, at: NaiveDateTime) -> Option<NaiveDateTime> {
+    let start = observance
+        .prop("DTSTART")
+        .and_then(|p| naive(&p.value))
+        .unwrap_or(NaiveDateTime::MIN);
+    if start > at {
+        return None;
+    }
+    let mut best = start;
+    for prop in observance.props.iter().filter(|p| p.name == "RDATE") {
+        for when in prop.value.split(',').filter_map(naive) {
+            if when <= at && when > best {
+                best = when;
+            }
+        }
+    }
+    if let Some(rule) = observance.prop("RRULE") {
+        // UNTIL is in UTC and the starts are wall-clock: a day's slack.
+        let until = rule
+            .value
+            .split(';')
+            .filter_map(|part| part.split_once('='))
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case("UNTIL"))
+            .and_then(|(_, value)| {
+                naive(value).or_else(|| {
+                    NaiveDate::parse_from_str(value.trim(), "%Y%m%d")
+                        .ok()?
+                        .and_hms_opt(0, 0, 0)
+                })
+            })
+            .and_then(|u| u.checked_add_signed(TimeDelta::days(1)));
+        let mut years = vec![at.year(), at.year().saturating_sub(1)];
+        if let Some(until) = until {
+            years.extend([until.year(), until.year().saturating_sub(1)]);
+        }
+        for year in years {
+            if let Some(when) = yearly_onset(&rule.value, start, year)
+                && when >= start
+                && when <= at
+                && until.is_none_or(|u| when <= u)
+                && when > best
+            {
+                best = when;
+            }
+        }
+    }
+    Some(best)
+}
+
+/// Zones half or three quarters of an hour off, to stand in for such an
+/// offset from a `VTIMEZONE`: those that keep one offset all year first.
+const ODD_OFFSET_ZONES: &[chrono_tz::Tz] = &[
+    chrono_tz::Tz::Asia__Kolkata,
+    chrono_tz::Tz::Asia__Kathmandu,
+    chrono_tz::Tz::Asia__Kabul,
+    chrono_tz::Tz::Asia__Yangon,
+    chrono_tz::Tz::Australia__Darwin,
+    chrono_tz::Tz::Australia__Eucla,
+    chrono_tz::Tz::Pacific__Marquesas,
+    chrono_tz::Tz::Asia__Tehran,
+    chrono_tz::Tz::America__St_Johns,
+    chrono_tz::Tz::Australia__Adelaide,
+    chrono_tz::Tz::Australia__Lord_Howe,
+    chrono_tz::Tz::Pacific__Chatham,
+];
+
+/// A zone that is `offset` seconds east of UTC at the wall-clock time
+/// `at`. Whole hours have exact fixed zones (`Etc/GMT-3` is UTC+3); the
+/// time type here can't carry any other offset, so the rest borrow a real
+/// zone with that offset on that date.
+fn fixed_zone(offset: i32, at: NaiveDateTime) -> Option<chrono_tz::Tz> {
+    if offset % 3600 == 0 {
+        let hours = offset / 3600;
+        if hours == 0 {
+            return Some(chrono_tz::Tz::UTC);
+        }
+        // The sign in these names is the other way round.
+        return format!("Etc/GMT{:+}", hours.checked_neg()?).parse().ok();
+    }
+    ODD_OFFSET_ZONES.iter().copied().find(|zone| {
+        zone.offset_from_local_datetime(&at)
+            .earliest()
+            .is_some_and(|o| o.fix().local_minus_utc() == offset)
+    })
 }
 
 /// The IANA zone for a Windows time zone name, as Outlook and Exchange
@@ -347,9 +617,21 @@ fn zone_for(id: &str) -> Option<chrono_tz::Tz> {
     windows_zone(id).and_then(|name| name.parse().ok())
 }
 
-fn tz_of(prop: &Prop) -> Tz {
-    prop.param("TZID")
-        .and_then(|id| zone_for(&id))
+/// The zone a value is in. A `TZID` that names no known zone is read from
+/// the calendar's own definition of it, as the offset it has on that date;
+/// only without one are the times taken as the device's.
+fn tz_of(prop: &Prop, zones: &Zones) -> Tz {
+    let Some(id) = prop.param("TZID") else {
+        return Tz::LOCAL;
+    };
+    if let Some(zone) = zone_for(&id) {
+        return Tz::Tz(zone);
+    }
+    prop.value
+        .split(',')
+        .next()
+        .and_then(naive)
+        .and_then(|at| fixed_zone(zones.offset(&id, at)?, at))
         .map_or(Tz::LOCAL, Tz::Tz)
 }
 
@@ -385,9 +667,12 @@ fn is_date(prop: &Prop) -> bool {
         || prop.value.trim().len() == 8
 }
 
-fn when(prop: &Prop) -> Option<(DateTime<Tz>, bool)> {
+fn when(prop: &Prop, zones: &Zones) -> Option<(DateTime<Tz>, bool)> {
     let all_day = is_date(prop);
-    Some((parse_value(&prop.value, all_day, tz_of(prop))?, all_day))
+    Some((
+        parse_value(&prop.value, all_day, tz_of(prop, zones))?,
+        all_day,
+    ))
 }
 
 /// An iCalendar duration (`PT1H30M`, `P1D`, `-PT15M`) in seconds.
@@ -475,11 +760,11 @@ struct Base {
     occurrence: Occurrence,
 }
 
-fn base(event: &Component) -> Option<Base> {
-    let (start, all_day) = when(event.prop("DTSTART")?)?;
+fn base(event: &Component, zones: &Zones) -> Option<Base> {
+    let (start, all_day) = when(event.prop("DTSTART")?, zones)?;
     let begin = start.timestamp();
     let end = match (event.prop("DTEND"), event.prop("DURATION")) {
-        (Some(end), _) => parse_value(&end.value, all_day, tz_of(end))
+        (Some(end), _) => parse_value(&end.value, all_day, tz_of(end, zones))
             .map(|e| e.timestamp())
             .filter(|e| *e >= begin),
         (None, Some(length)) => parse_duration(&length.value).and_then(|d| begin.checked_add(d)),
@@ -639,7 +924,7 @@ fn rule_variants(rule: &str, start: &DateTime<Tz>) -> Vec<String> {
     variants
 }
 
-fn rule_set(event: &Component, start: DateTime<Tz>) -> Option<RRuleSet> {
+fn rule_set(event: &Component, start: DateTime<Tz>, zones: &Zones) -> Option<RRuleSet> {
     let rule = event.prop("RRULE")?.value.trim().to_owned();
     let valid = rule_variants(&rule, &start)
         .into_iter()
@@ -657,7 +942,7 @@ fn rule_set(event: &Component, start: DateTime<Tz>) -> Option<RRuleSet> {
                 continue;
             }
             for value in prop.value.split(',') {
-                if let Some(when) = parse_value(value, all_day, tz_of(prop)) {
+                if let Some(when) = parse_value(value, all_day, tz_of(prop, zones)) {
                     set = if add {
                         set.rdate(when)
                     } else {
@@ -672,11 +957,17 @@ fn rule_set(event: &Component, start: DateTime<Tz>) -> Option<RRuleSet> {
 
 /// The starts of a repeating event between `from` and `to`, or `None`
 /// when its rule can't be read (then only its first date shows).
-fn starts_between(event: &Component, base: &Base, from: i64, to: i64) -> Option<Vec<i64>> {
+fn starts_between(
+    event: &Component,
+    base: &Base,
+    from: i64,
+    to: i64,
+    zones: &Zones,
+) -> Option<Vec<i64>> {
     // Years 1 to 9999: what dates can hold.
     let (from, to) = (from.max(-62_135_596_800), to.min(253_402_300_799));
     let tz = base.start.timezone();
-    let set = rule_set(event, base.start)?
+    let set = rule_set(event, base.start, zones)?
         .after(at(tz, from.saturating_sub(base.length).saturating_sub(1))?)
         .before(at(tz, to)?);
     Some(
@@ -696,7 +987,7 @@ fn overlaps(start: i64, end: i64, from: i64, to: i64) -> bool {
 /// (Unix seconds). Cancelled events and dates are left out.
 #[must_use]
 pub fn occurrences(ics: &str, from: i64, to: i64) -> Vec<Occurrence> {
-    let events = vevents(ics);
+    let (events, zones) = calendar(ics);
     let (masters, overrides): (Vec<_>, Vec<_>) = events
         .iter()
         .partition(|e| e.prop("RECURRENCE-ID").is_none());
@@ -704,7 +995,7 @@ pub fn occurrences(ics: &str, from: i64, to: i64) -> Vec<Occurrence> {
     let moved: Vec<(String, i64)> = overrides
         .iter()
         .filter_map(|e| {
-            let (rid, _) = when(e.prop("RECURRENCE-ID")?)?;
+            let (rid, _) = when(e.prop("RECURRENCE-ID")?, &zones)?;
             Some((e.text("UID"), rid.timestamp()))
         })
         .collect();
@@ -713,7 +1004,7 @@ pub fn occurrences(ics: &str, from: i64, to: i64) -> Vec<Occurrence> {
         if master.cancelled() {
             continue;
         }
-        let Some(base) = base(master) else {
+        let Some(base) = base(master, &zones) else {
             continue;
         };
         let first = base.occurrence.start;
@@ -723,7 +1014,7 @@ pub fn occurrences(ics: &str, from: i64, to: i64) -> Vec<Occurrence> {
             }
             continue;
         }
-        let starts = starts_between(master, &base, from, to).unwrap_or_else(|| vec![first]);
+        let starts = starts_between(master, &base, from, to, &zones).unwrap_or_else(|| vec![first]);
         for start in starts {
             let end = start.saturating_add(base.length);
             if !overlaps(start, end, from, to)
@@ -745,9 +1036,10 @@ pub fn occurrences(ics: &str, from: i64, to: i64) -> Vec<Occurrence> {
         if event.cancelled() {
             continue;
         }
-        let (Some(base), Some((rid, _))) =
-            (base(event), event.prop("RECURRENCE-ID").and_then(when))
-        else {
+        let (Some(base), Some((rid, _))) = (
+            base(event, &zones),
+            event.prop("RECURRENCE-ID").and_then(|p| when(p, &zones)),
+        ) else {
             continue;
         };
         let mut occurrence = base.occurrence;
@@ -770,12 +1062,12 @@ pub fn occurrences(ics: &str, from: i64, to: i64) -> Vec<Occurrence> {
 /// The event itself (a series' first date and rule), for the editor.
 #[must_use]
 pub fn master(ics: &str) -> Option<Occurrence> {
-    let events = vevents(ics);
+    let (events, zones) = calendar(ics);
     let event = events
         .iter()
         .find(|e| e.prop("RECURRENCE-ID").is_none())
         .or_else(|| events.first())?;
-    base(event).map(|b| b.occurrence)
+    base(event, &zones).map(|b| b.occurrence)
 }
 
 /// When the resource's events start and end, for finding it by date:
@@ -784,8 +1076,9 @@ pub fn master(ics: &str) -> Option<Occurrence> {
 pub fn span(ics: &str) -> (Option<i64>, Option<i64>) {
     let mut first: Option<i64> = None;
     let mut last: Option<i64> = Some(i64::MIN);
-    for event in vevents(ics) {
-        let Some(base) = base(&event) else {
+    let (events, zones) = calendar(ics);
+    for event in events {
+        let Some(base) = base(&event, &zones) else {
             continue;
         };
         first = Some(first.map_or(base.occurrence.start, |f| f.min(base.occurrence.start)));
@@ -795,7 +1088,7 @@ pub fn span(ics: &str) -> (Option<i64>, Option<i64>) {
                 .map(|p| p.value.to_ascii_uppercase())
                 .unwrap_or_default();
             if rule.contains("COUNT=") || rule.contains("UNTIL=") {
-                rule_set(&event, base.start).and_then(|set| {
+                rule_set(&event, base.start, &zones).and_then(|set| {
                     let all = set.all(MAX_OCCURRENCES);
                     if all.limited {
                         None
@@ -909,66 +1202,199 @@ fn offset_text(seconds: i32) -> String {
     }
 }
 
-/// A `VTIMEZONE` for `zone`, with its clock changes from the year before
-/// `year` to the year after, so other apps read the times the same way.
-fn vtimezone(zone: chrono_tz::Tz, year: i32) -> Vec<String> {
+/// One clock change of a zone.
+struct Change {
+    /// When, in UTC.
+    at: NaiveDateTime,
+    /// Seconds east of UTC before and after.
+    from: i32,
+    to: i32,
+    /// The zone's short name after it (`BST`).
+    name: String,
+}
+
+impl Change {
+    /// The wall-clock time it happens at, on the clock before the change.
+    fn local(&self) -> NaiveDateTime {
+        self.at
+            .checked_add_signed(TimeDelta::seconds(i64::from(self.from)))
+            .unwrap_or(self.at)
+    }
+}
+
+fn new_year(year: i32) -> NaiveDateTime {
+    NaiveDate::from_ymd_opt(year, 1, 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .unwrap_or_default()
+}
+
+/// The zone's clock changes in `years` years from `first_year`, to the
+/// quarter hour.
+fn clock_changes(zone: chrono_tz::Tz, first_year: i32, years: i32) -> Vec<Change> {
     let offset_at = |t: NaiveDateTime| {
         let offset = zone.offset_from_utc_datetime(&t);
         (offset.fix().local_minus_utc(), offset.to_string())
     };
-    let start = NaiveDate::from_ymd_opt(year.saturating_sub(1), 1, 1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .unwrap_or_default();
-    let stop = NaiveDate::from_ymd_opt(year.saturating_add(2), 1, 1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .unwrap_or_default();
-    let (mut previous, first_name) = offset_at(start);
-    let mut changes = Vec::new();
-    let mut t = start;
-    while t < stop {
-        let Some(next) = t.checked_add_signed(TimeDelta::minutes(15)) else {
+    let stop = new_year(first_year.saturating_add(years));
+    let mut out = Vec::new();
+    let mut day = new_year(first_year);
+    while day < stop {
+        let Some(next_day) = day.checked_add_signed(TimeDelta::days(1)) else {
             break;
         };
-        let (offset, name) = offset_at(next);
-        if offset != previous {
-            changes.push((next, previous, offset, name));
-            previous = offset;
+        let (mut previous, _) = offset_at(day);
+        // Only a day with a change is looked at closely.
+        if offset_at(next_day).0 != previous {
+            let mut t = day;
+            while t < next_day {
+                let Some(next) = t.checked_add_signed(TimeDelta::minutes(15)) else {
+                    break;
+                };
+                let (offset, name) = offset_at(next);
+                if offset != previous {
+                    out.push(Change {
+                        at: next,
+                        from: previous,
+                        to: offset,
+                        name,
+                    });
+                    previous = offset;
+                }
+                t = next;
+            }
         }
-        t = next;
+        day = next_day;
     }
+    out
+}
+
+/// The yearly rule these changes follow (`FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU`):
+/// one each year from `first_year`, in the same month, on the same weekday
+/// (the same one counted from the start of the month, or always the last)
+/// at the same time. `None` when they don't, as for zones that move their
+/// clocks by decree or with Ramadan.
+fn yearly_rule(changes: &[&Change], first_year: i32) -> Option<String> {
+    let first = changes.first()?;
+    let start = first.local();
+    let nth = |t: &NaiveDateTime| t.day0() / 7;
+    let mut year = first_year;
+    let mut same_nth = true;
+    let mut all_last = true;
+    for change in changes {
+        let local = change.local();
+        if local.year() != year
+            || local.month() != start.month()
+            || local.weekday() != start.weekday()
+            || local.time() != start.time()
+            || change.from != first.from
+            || change.to != first.to
+        {
+            return None;
+        }
+        year = year.saturating_add(1);
+        same_nth &= nth(&local) == nth(&start);
+        all_last &= local
+            .checked_add_signed(TimeDelta::days(7))
+            .is_some_and(|next| next.month() != local.month());
+    }
+    let position = if same_nth {
+        i64::from(nth(&start)).saturating_add(1)
+    } else if all_last {
+        -1
+    } else {
+        return None;
+    };
+    Some(format!(
+        "FREQ=YEARLY;BYMONTH={};BYDAY={position}{}",
+        start.month(),
+        weekday_code(start.weekday())
+    ))
+}
+
+/// How many years of clock changes must agree before a yearly rule is
+/// written for them.
+const RULE_YEARS: i32 = 12;
+
+/// A `VTIMEZONE` for `zone`, so other apps read the times the same way.
+/// Zones that change their clocks on a regular day get a yearly rule,
+/// which holds for a repeating event's later years too; others get their
+/// changes listed from the year before `year` to the year after.
+fn vtimezone(zone: chrono_tz::Tz, year: i32) -> Vec<String> {
+    let first_year = year.saturating_sub(1);
+    let changes = clock_changes(zone, first_year, RULE_YEARS);
+    let block =
+        |kind: &str, start: String, from: i32, to: i32, name: &str, rule: Option<String>| {
+            let mut lines = vec![
+                format!("BEGIN:{kind}"),
+                format!("DTSTART:{start}"),
+                format!("TZOFFSETFROM:{}", offset_text(from)),
+                format!("TZOFFSETTO:{}", offset_text(to)),
+                format!("TZNAME:{name}"),
+            ];
+            lines.extend(rule.map(|r| format!("RRULE:{r}")));
+            lines.push(format!("END:{kind}"));
+            lines
+        };
+    let stamp = |t: NaiveDateTime| t.format("%Y%m%dT%H%M%S").to_string();
+    let standard = changes.iter().map(|c| c.to).min().unwrap_or_default();
+    let kind = |c: &Change| {
+        if c.to > standard {
+            "DAYLIGHT"
+        } else {
+            "STANDARD"
+        }
+    };
+    let (daylight, winter): (Vec<&Change>, Vec<&Change>) =
+        changes.iter().partition(|c| c.to > standard);
     let mut lines = vec![
         "BEGIN:VTIMEZONE".to_owned(),
         format!("TZID:{}", zone.name()),
     ];
-    if changes.is_empty() {
-        let (offset, _) = offset_at(start);
-        lines.extend([
-            "BEGIN:STANDARD".to_owned(),
-            "DTSTART:19700101T000000".to_owned(),
-            format!("TZOFFSETFROM:{}", offset_text(offset)),
-            format!("TZOFFSETTO:{}", offset_text(offset)),
-            format!("TZNAME:{first_name}"),
-            "END:STANDARD".to_owned(),
-        ]);
+    if changes.len() == usize::try_from(RULE_YEARS).unwrap_or(0).saturating_mul(2)
+        && let (Some(daylight_rule), Some(winter_rule)) = (
+            yearly_rule(&daylight, first_year),
+            yearly_rule(&winter, first_year),
+        )
+    {
+        let mut rules = [(daylight, daylight_rule), (winter, winter_rule)];
+        rules.sort_by_key(|(list, _)| list.first().map(|c| c.at));
+        for (list, rule) in rules {
+            if let Some(c) = list.first() {
+                lines.extend(block(
+                    kind(c),
+                    stamp(c.local()),
+                    c.from,
+                    c.to,
+                    &c.name,
+                    Some(rule),
+                ));
+            }
+        }
     } else {
-        let standard = changes.iter().map(|c| c.2).min().unwrap_or_default();
-        for (when, from, to, name) in changes {
-            let kind = if to > standard {
-                "DAYLIGHT"
-            } else {
-                "STANDARD"
-            };
-            let local = when
-                .checked_add_signed(TimeDelta::seconds(i64::from(from)))
-                .unwrap_or(when);
-            lines.extend([
-                format!("BEGIN:{kind}"),
-                format!("DTSTART:{}", local.format("%Y%m%dT%H%M%S")),
-                format!("TZOFFSETFROM:{}", offset_text(from)),
-                format!("TZOFFSETTO:{}", offset_text(to)),
-                format!("TZNAME:{name}"),
-                format!("END:{kind}"),
-            ]);
+        // Three years of them, listed one by one.
+        let stop = new_year(first_year.saturating_add(3));
+        let listed: Vec<&Change> = changes.iter().filter(|c| c.at < stop).collect();
+        for c in &listed {
+            lines.extend(block(
+                kind(c),
+                stamp(c.local()),
+                c.from,
+                c.to,
+                &c.name,
+                None,
+            ));
+        }
+        if listed.is_empty() {
+            let offset = zone.offset_from_utc_datetime(&new_year(first_year));
+            let seconds = offset.fix().local_minus_utc();
+            lines.extend(block(
+                "STANDARD",
+                "19700101T000000".to_owned(),
+                seconds,
+                seconds,
+                &offset.to_string(),
+                None,
+            ));
         }
     }
     lines.push("END:VTIMEZONE".to_owned());
@@ -1175,6 +1601,10 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
                 .any(|c| c.name == "VTIMEZONE" && c.text("TZID") == name)
         })
     };
+    // No longer a series: the changed copies of single dates
+    // (`RECURRENCE-ID`) go with the rule, or each would show as an event
+    // of its own.
+    let drop_overrides = input.repeat == Repeat::None;
     let mut out: Vec<String> = Vec::new();
     for (i, raw) in lines.iter().enumerate() {
         if i == master.begin {
@@ -1202,6 +1632,10 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
         if i > master.begin && i < master.end {
             continue;
         }
+        let dropped = drop_overrides
+            && found
+                .iter()
+                .any(|b| b.is_override && !std::ptr::eq(b, master) && i >= b.begin && i <= b.end);
         // A zone for the first event goes before it, even when the master
         // comes after an override.
         if let Some(zone) = zone
@@ -1211,7 +1645,9 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
         {
             out.extend(vtimezone(zone, year_of(input.start)));
         }
-        out.push((*raw).to_owned());
+        if !dropped {
+            out.push((*raw).to_owned());
+        }
     }
     Some(finish(&out))
 }
@@ -1223,6 +1659,7 @@ pub fn skip_occurrence(original: &str, recurrence_id: i64) -> Option<String> {
     let unfolded = unfold(original);
     let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
     let found = blocks(&lines);
+    let zones = calendar(original).1;
     let master = found.iter().find(|b| !b.is_override)?;
     let start = lines
         .get(master.begin..master.end)?
@@ -1239,7 +1676,7 @@ pub fn skip_occurrence(original: &str, recurrence_id: i64) -> Option<String> {
     } else if start.value.trim().ends_with(['Z', 'z']) {
         format!("EXDATE:{}", utc_stamp(recurrence_id))
     } else {
-        let tz = tz_of(&start);
+        let tz = tz_of(&start, &zones);
         let local = at(tz, recurrence_id)?.format("%Y%m%dT%H%M%S").to_string();
         match start.param("TZID") {
             Some(id) if !tz.is_local() => format!("EXDATE;TZID={id}:{local}"),
@@ -1258,11 +1695,14 @@ pub fn skip_occurrence(original: &str, recurrence_id: i64) -> Option<String> {
                     .filter_map(|l| split_line(l))
                     .find(|l| l.name == "RECURRENCE-ID")
                     .and_then(|l| {
-                        when(&Prop {
-                            name: l.name,
-                            params: l.params.to_owned(),
-                            value: l.value.to_owned(),
-                        })
+                        when(
+                            &Prop {
+                                name: l.name,
+                                params: l.params.to_owned(),
+                                value: l.value.to_owned(),
+                            },
+                            &zones,
+                        )
                     })
                     .is_some_and(|(rid, _)| rid.timestamp() == recurrence_id)
         })
@@ -1339,13 +1779,13 @@ fn calendar_method(ics: &str) -> String {
 /// The invitation in a calendar part. `me` is the account's address.
 #[must_use]
 pub fn invitation(ics: &str, me: &str) -> Option<Invitation> {
-    let events = vevents(ics);
+    let (events, zones) = calendar(ics);
     let event = events
         .iter()
         .find(|e| e.prop("RECURRENCE-ID").is_none())
         .or_else(|| events.first())?;
-    let mut occurrence = base(event)?.occurrence;
-    if let Some((rid, _)) = event.prop("RECURRENCE-ID").and_then(when) {
+    let mut occurrence = base(event, &zones)?.occurrence;
+    if let Some((rid, _)) = event.prop("RECURRENCE-ID").and_then(|p| when(p, &zones)) {
         occurrence.recurrence_id = Some(rid.timestamp());
     }
     if occurrence.uid.is_empty() {
@@ -1787,6 +2227,114 @@ mod tests {
             0,
         );
         assert!(utc.contains("DTSTART:20261118T060000Z\r\n"));
+    }
+
+    #[test]
+    fn regular_zones_get_a_yearly_rule_and_irregular_ones_a_list() {
+        let london = vtimezone(chrono_tz::Tz::Europe__London, 2026).join("\n");
+        assert!(london.contains(
+            "BEGIN:DAYLIGHT\nDTSTART:20250330T010000\nTZOFFSETFROM:+0000\nTZOFFSETTO:+0100\nTZNAME:BST\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\nEND:DAYLIGHT"
+        ));
+        assert!(london.contains(
+            "BEGIN:STANDARD\nDTSTART:20251026T020000\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0000\nTZNAME:GMT\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nEND:STANDARD"
+        ));
+        assert_eq!(london.matches("BEGIN:DAYLIGHT").count(), 1);
+        let new_york = vtimezone(chrono_tz::Tz::America__New_York, 2026).join("\n");
+        assert!(new_york.contains("RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU"));
+        assert!(new_york.contains("RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU"));
+        // The southern half of the year works the same way.
+        let sydney = vtimezone(chrono_tz::Tz::Australia__Sydney, 2026).join("\n");
+        assert!(sydney.contains("RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=1SU"));
+        assert!(sydney.contains("RRULE:FREQ=YEARLY;BYMONTH=4;BYDAY=1SU"));
+        // Morocco moves its clocks with Ramadan: each change is listed.
+        let casablanca = vtimezone(chrono_tz::Tz::Africa__Casablanca, 2026).join("\n");
+        assert!(!casablanca.contains("RRULE"));
+        assert!(casablanca.matches("DTSTART:").count() >= 4);
+        // No clock changes: one fixed offset.
+        let nairobi = vtimezone(chrono_tz::Tz::Africa__Nairobi, 2026).join("\n");
+        assert!(!nairobi.contains("RRULE") && !nairobi.contains("DAYLIGHT"));
+        assert!(nairobi.contains("TZOFFSETTO:+0300"));
+    }
+
+    /// A zone definition under a name no zone table knows.
+    fn custom_zone(zone: chrono_tz::Tz) -> String {
+        let mut text = String::new();
+        for line in vtimezone(zone, 2026) {
+            if line.starts_with("TZID:") {
+                text.push_str("TZID:Customized Time Zone\r\n");
+            } else {
+                text.push_str(&line);
+                text.push_str("\r\n");
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn an_unknown_zone_name_is_read_from_its_own_definition() {
+        // New York's rules under Exchange's label: summer is UTC-4, winter UTC-5.
+        let ics = cal(&format!(
+            "{}BEGIN:VEVENT\r\nUID:s\r\nDTSTART;TZID=\"Customized Time Zone\":20260715T090000\r\nDTEND;TZID=\"Customized Time Zone\":20260715T100000\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:w\r\nDTSTART;TZID=Customized Time Zone:20270115T090000\r\nEND:VEVENT\r\n",
+            custom_zone(chrono_tz::Tz::America__New_York)
+        ));
+        let all = occurrences(&ics, ts("2026-01-01T00:00:00Z"), ts("2028-01-01T00:00:00Z"));
+        assert_eq!(all[0].start, ts("2026-07-15T13:00:00Z"));
+        assert_eq!(all[0].end, ts("2026-07-15T14:00:00Z"));
+        assert_eq!(all[1].start, ts("2027-01-15T14:00:00Z"));
+
+        // Standard time only, and not on a whole hour.
+        let ics = cal(
+            "BEGIN:VTIMEZONE\r\nTZID:Head Office\r\nBEGIN:STANDARD\r\nDTSTART:16010101T000000\r\nTZOFFSETFROM:+0530\r\nTZOFFSETTO:+0530\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:i\r\nDTSTART;TZID=Head Office:20261118T090000\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEND:VEVENT\r\n",
+        );
+        let all = occurrences(&ics, ts("2026-11-01T00:00:00Z"), ts("2026-12-01T00:00:00Z"));
+        assert_eq!(
+            all.iter().map(|o| o.start).collect::<Vec<_>>(),
+            [ts("2026-11-18T03:30:00Z"), ts("2026-11-19T03:30:00Z")]
+        );
+        // Skipping a date keeps the zone's own name.
+        let skipped = skip_occurrence(&ics, ts("2026-11-19T03:30:00Z")).unwrap();
+        assert!(skipped.contains("EXDATE;TZID=Head Office:20261119T090000\r\n"));
+
+        // Outlook's form: both halves from 1601, each with a yearly rule.
+        let zones = calendar(&cal(
+            "BEGIN:VTIMEZONE\r\nTZID:X\r\nBEGIN:STANDARD\r\nDTSTART:16010101T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=3\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\n",
+        ))
+        .1;
+        let at = |text: &str| naive(text).unwrap();
+        assert_eq!(zones.offset("X", at("20260328T120000")), Some(3600));
+        assert_eq!(zones.offset("X", at("20260329T120000")), Some(7200));
+        assert_eq!(zones.offset("X", at("20261025T120000")), Some(3600));
+        assert_eq!(zones.offset("X", at("20270101T000000")), Some(3600));
+        assert_eq!(zones.offset("Y", at("20270101T000000")), None);
+        assert_eq!(parse_offset("-0330"), Some(-12_600));
+        assert_eq!(parse_offset("+053015"), Some(19_815));
+        assert_eq!(parse_offset("0300"), Some(10_800));
+        assert_eq!(parse_offset("+3"), None);
+        assert_eq!(
+            fixed_zone(-18_000, at("20260101T000000")).map(chrono_tz::Tz::name),
+            Some("Etc/GMT+5")
+        );
+    }
+
+    #[test]
+    fn a_series_made_single_loses_its_changed_dates() {
+        let original = cal(
+            "BEGIN:VEVENT\r\nUID:d\r\nRECURRENCE-ID:20261104T070000Z\r\nDTSTART:20261104T100000Z\r\nSUMMARY:Stand-up (moved)\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:d\r\nDTSTART:20261102T070000Z\r\nDTEND:20261102T073000Z\r\nRRULE:FREQ=DAILY\r\nEXDATE:20261103T070000Z\r\nSUMMARY:Stand-up\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:d\r\nRECURRENCE-ID:20261105T070000Z\r\nDTSTART:20261105T090000Z\r\nSUMMARY:Stand-up (late)\r\nEND:VEVENT\r\n",
+        );
+        let once = edit_event(&original, &input(Repeat::None), 0).unwrap();
+        assert_eq!(once.matches("BEGIN:VEVENT").count(), 1);
+        assert_eq!(once.matches("END:VEVENT").count(), 1);
+        assert!(!once.contains("RECURRENCE-ID") && !once.contains("moved"));
+        assert!(!once.contains("RRULE") && !once.contains("EXDATE"));
+        assert!(once.contains("BEGIN:VTIMEZONE"));
+        let all = occurrences(&once, 0, ts("2030-01-01T00:00:00Z"));
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].title, "Design review");
+        // Still a series: its changed dates stay.
+        for repeat in [Repeat::Keep, Repeat::Weekly] {
+            let kept = edit_event(&original, &input(repeat), 0).unwrap();
+            assert_eq!(kept.matches("BEGIN:VEVENT").count(), 3);
+        }
     }
 
     #[test]

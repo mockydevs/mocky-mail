@@ -14,7 +14,10 @@ use crate::SyncError;
 
 /// The `ManageSieve` port.
 pub const PORT: u16 = 4190;
+/// How long a reply, or the whole of connecting and logging in, may take.
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// How long opening the connection may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 /// Largest reply read (scripts are small).
 const MAX_REPLY_BYTES: usize = 1024 * 1024;
 
@@ -89,33 +92,75 @@ async fn read_reply<S: AsyncRead + AsyncWrite + Unpin>(
             return Err(protocol("the filter server's reply was too large"));
         }
         let line = line.trim_end_matches(['\r', '\n']).to_owned();
-        let upper = line.to_ascii_uppercase();
-        for (word, ok) in [("OK", true), ("NO", false), ("BYE", false)] {
-            if upper == word || upper.starts_with(&format!("{word} ")) {
-                reply.ok = ok;
-                reply.text = line.get(word.len()..).unwrap_or_default().trim().to_owned();
+        if let Some((ok, rest)) = status_line(&line) {
+            reply.ok = ok;
+            // The human-readable text may come as a literal (RFC 5804
+            // section 1.3), as Dovecot sends a script's errors. Left
+            // unread, its bytes would be taken for the next reply.
+            let Some((before, size)) = literal_tail(rest) else {
+                rest.clone_into(&mut reply.text);
                 return Ok(reply);
-            }
-        }
-        if let Some(size) = literal_size(&line) {
-            if size > MAX_REPLY_BYTES {
-                return Err(protocol("the filter server's reply was too large"));
-            }
-            let mut data = vec![0u8; size];
+            };
+            let text = read_literal(stream, size).await?;
+            // The line the literal sat in still has its line break.
+            let mut end = String::new();
             stream
-                .read_exact(&mut data)
+                .read_line(&mut end)
                 .await
                 .map_err(|e| protocol(e.to_string()))?;
+            format!("{before} {}", text.trim())
+                .trim()
+                .clone_into(&mut reply.text);
+            return Ok(reply);
+        }
+        if let Some(size) = literal_size(&line) {
+            let text = read_literal(stream, size).await?;
             total = total.saturating_add(size);
-            reply
-                .items
-                .push(String::from_utf8_lossy(&data).into_owned());
+            reply.items.push(text);
             continue;
         }
         if !line.is_empty() {
             reply.items.push(line);
         }
     }
+}
+
+/// Read a literal's bytes as text.
+async fn read_literal<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut BufStream<S>,
+    size: usize,
+) -> Result<String, SyncError> {
+    if size > MAX_REPLY_BYTES {
+        return Err(protocol("the filter server's reply was too large"));
+    }
+    let mut data = vec![0u8; size];
+    stream
+        .read_exact(&mut data)
+        .await
+        .map_err(|e| protocol(e.to_string()))?;
+    Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+/// Whether a line is the status that ends a reply: `OK`, `NO` or `BYE`,
+/// alone or followed by a space. Gives success and the text after the word.
+fn status_line(line: &str) -> Option<(bool, &str)> {
+    [("OK", true), ("NO", false), ("BYE", false)]
+        .into_iter()
+        .find_map(|(word, ok)| {
+            let head = line.get(..word.len())?;
+            let rest = line.get(word.len()..)?;
+            (head.eq_ignore_ascii_case(word) && (rest.is_empty() || rest.starts_with(' ')))
+                .then(|| (ok, rest.trim()))
+        })
+}
+
+/// A status line's text that ends in a literal marker: what comes before
+/// the marker (such as a `(QUOTA)` code) and the literal's size.
+fn literal_tail(rest: &str) -> Option<(&str, usize)> {
+    let size = literal_size(rest)?;
+    let before = rest.get(..rest.rfind('{')?)?.trim_end();
+    // A marker counts only as a word of its own; `"see {3}` is just text.
+    (before.is_empty() || before.ends_with(')')).then_some((before, size))
 }
 
 /// `{123}` or `{123+}` at the end of a line.
@@ -175,12 +220,20 @@ impl SieveClient {
     }
 
     async fn connect_inner(host: &str, username: &str, password: &str) -> Result<Self, SyncError> {
-        let tcp = TcpStream::connect((host, PORT))
+        // Most servers that don't offer filters have the port firewalled, so
+        // the connection just hangs. That is "not offered" (a connect
+        // error), found quickly, not a server that is slow to answer.
+        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host, PORT)))
             .await
+            .map_err(|_| SyncError::Connect {
+                host: host.to_owned(),
+                port: PORT,
+                reason: "the server did not answer on the filter port".to_owned(),
+            })?
             .map_err(|e| SyncError::Connect {
                 host: host.to_owned(),
                 port: PORT,
-                reason: e.to_string(),
+                reason: crate::error::connect_reason(&e),
             })?;
         let mut plain = BufStream::new(tcp);
         let greeting = read_reply(&mut plain).await?;
@@ -352,6 +405,47 @@ mod tests {
         let no = reply_of("NO (QUOTA) \"Too big\"\r\n").await;
         assert!(!no.ok);
         assert!(no.text.contains("Too big"));
+    }
+
+    #[tokio::test]
+    async fn a_status_line_may_end_in_a_literal() {
+        // Two replies in a row: the literal of the first must not be left
+        // behind for the second.
+        let reason = "line 3: unknown command 'vacaton'";
+        let wire = format!(
+            "NO {{{}}}\r\n{reason}\r\n\"sogo\" ACTIVE\r\nOK\r\n",
+            reason.len()
+        );
+        let (mut a, b) = tokio::io::duplex(4096);
+        a.write_all(wire.as_bytes()).await.unwrap();
+        drop(a);
+        let mut stream = BufStream::new(b);
+        let no = read_reply(&mut stream).await.unwrap();
+        assert!(!no.ok);
+        assert_eq!(no.text, reason);
+        let next = read_reply(&mut stream).await.unwrap();
+        assert!(next.ok);
+        assert_eq!(next.items, ["\"sogo\" ACTIVE"]);
+
+        let coded = reply_of("NO (QUOTA/MAXSIZE) {7+}\r\nToo big\r\n").await;
+        assert_eq!(coded.text, "(QUOTA/MAXSIZE) Too big");
+    }
+
+    #[test]
+    fn status_lines_and_their_literals() {
+        assert_eq!(status_line("OK"), Some((true, "")));
+        assert_eq!(status_line("ok \"Done.\""), Some((true, "\"Done.\"")));
+        assert_eq!(status_line("NO {81}"), Some((false, "{81}")));
+        assert_eq!(status_line("BYE (TRYLATER)"), Some((false, "(TRYLATER)")));
+        assert_eq!(status_line("NOT a status"), None);
+        assert_eq!(status_line("\"OK\""), None);
+        assert_eq!(status_line(""), None);
+
+        assert_eq!(literal_tail("{81}"), Some(("", 81)));
+        assert_eq!(literal_tail("(QUOTA) {7+}"), Some(("(QUOTA)", 7)));
+        assert_eq!(literal_tail("\"Too big\""), None);
+        assert_eq!(literal_tail("\"see {3}"), None);
+        assert_eq!(literal_tail(""), None);
     }
 
     #[test]

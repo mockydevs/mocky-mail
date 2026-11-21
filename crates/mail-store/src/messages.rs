@@ -1,5 +1,8 @@
 //! Message headers, flags, cached raw bodies and the message list query.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use mail_core::folders::FolderRole;
 use mail_core::message::{AttachmentInfo, Mailbox, MessageSummary};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
@@ -13,6 +16,9 @@ use crate::search::{SearchTerms, fts_query};
 
 /// Largest page [`Store::list_messages`] returns; larger limits are capped.
 pub const MAX_PAGE_SIZE: u32 = 200;
+
+/// Most messages [`Store::get_thread`] reads for one conversation.
+pub const MAX_THREAD_MESSAGES: u32 = 200;
 
 /// IMAP flags the app tracks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -364,6 +370,57 @@ fn update_headers(
             s.bulk,
         ],
     )?;
+    link_thread(tx, id, s)
+}
+
+/// Finish a message's conversation key after its headers are saved. The
+/// schema's trigger has just set it from the headers alone: the first
+/// References id, else In-Reply-To, else the message's own id. Some
+/// clients send a reply with In-Reply-To and no References, and its
+/// parent's id is not the conversation's key when the parent is itself a
+/// reply, so the key is taken from the stored parent instead. The parent
+/// may also arrive after its replies (Sent is read after the Inbox), so
+/// replies of that kind already keyed by this message's id are moved to
+/// its conversation.
+fn link_thread(tx: &Transaction<'_>, id: &str, s: &MessageSummary) -> Result<()> {
+    let parent = s
+        .in_reply_to
+        .as_deref()
+        .map(bare_message_id)
+        .filter(|parent| !parent.is_empty());
+    if let Some(parent) = parent.filter(|_| s.references.is_empty()) {
+        tx.execute(
+            "UPDATE messages SET thread_key = coalesce(
+                 (SELECT p.thread_key FROM messages p
+                   WHERE p.account_id = messages.account_id
+                     AND p.message_id_header IN (?2, ?3)
+                     AND p.id <> messages.id AND p.thread_key IS NOT NULL
+                   ORDER BY p.seq LIMIT 1),
+                 thread_key)
+             WHERE id = ?1",
+            params![id, parent, format!("<{parent}>")],
+        )?;
+    }
+    let own = s
+        .message_id
+        .as_deref()
+        .map(bare_message_id)
+        .filter(|own| !own.is_empty());
+    if let Some(own) = own {
+        let (account_id, key): (String, Option<String>) = tx.query_row(
+            "SELECT account_id, thread_key FROM messages WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if let Some(key) = key {
+            tx.execute(
+                "UPDATE messages SET thread_key = ?2
+                 WHERE account_id = ?1 AND thread_key = lower(trim(?3, '<> '))
+                   AND thread_key <> ?2 AND json_array_length(references_json) = 0",
+                params![account_id, key, own],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -656,7 +713,8 @@ impl Store {
 
     /// Every message in a message's conversation in its account, oldest
     /// first: received and sent, in any folder except Trash and Spam
-    /// (unless the message itself is there).
+    /// (unless the message itself is there). A conversation longer than
+    /// [`MAX_THREAD_MESSAGES`] gives its newest messages.
     ///
     /// # Errors
     /// [`StoreError::NotFound`] for an unknown id.
@@ -672,23 +730,56 @@ impl Store {
             .optional()?
             .ok_or(StoreError::NotFound("message"))?;
         let hide_bin = role != "trash" && role != "junk";
+        // The newest of a very long conversation: those are the ones being
+        // read and answered.
         let mut stmt = conn.prepare_cached(concat!(
             "SELECT ",
             item_columns!(),
-            " FROM messages m JOIN folders f ON f.id = m.folder_id
+            ", m.seq, m.message_id_header
+             FROM messages m JOIN folders f ON f.id = m.folder_id
              WHERE m.account_id = ?1 AND coalesce(m.thread_key, m.id) = ?2
                AND (?3 = 0 OR f.role NOT IN ('trash', 'junk'))
-             ORDER BY m.date IS NULL, m.date ASC, m.seq ASC LIMIT 200"
+             ORDER BY m.date IS NULL, m.date DESC, m.seq DESC LIMIT ?4"
         ))?;
-        let rows = stmt.query_map(params![account_id, key, hide_bin], ItemRow::read)?;
+        let mut rows = stmt
+            .query_map(
+                params![account_id, key, hide_bin, MAX_THREAD_MESSAGES],
+                |row| {
+                    Ok((
+                        ItemRow::read(row)?,
+                        row.get::<_, i64>(13)?,
+                        row.get::<_, Option<String>>(14)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Oldest first, undated last.
+        rows.sort_by_key(|(item, seq, _)| (item.date.is_none(), item.date, *seq));
+        let mut seen_ids: Vec<String> = Vec::new();
         let mut items: Vec<MessageListItem> = Vec::new();
-        for row in rows {
-            let item = row?.into_item()?;
-            // The same message can sit in two folders (Gmail labels): show it once.
-            if !items
-                .iter()
-                .any(|i| i.date == item.date && i.subject == item.subject && i.from == item.from)
-            {
+        for (row, _, message_id) in rows {
+            let item = row.into_item()?;
+            // The same message can sit in two folders (Gmail labels): show
+            // it once. Its Message-ID says it is the same one; two
+            // different messages can share a sender, subject and second,
+            // so that only decides for a message without an id.
+            let message_id = message_id
+                .as_deref()
+                .map(bare_message_id)
+                .filter(|id| !id.is_empty());
+            let repeated = match message_id {
+                Some(id) => {
+                    let known = seen_ids.iter().any(|seen| seen == id);
+                    if !known {
+                        seen_ids.push(id.to_owned());
+                    }
+                    known
+                }
+                None => items.iter().any(|i| {
+                    i.date == item.date && i.subject == item.subject && i.from == item.from
+                }),
+            };
+            if !repeated {
                 items.push(item);
             }
         }
@@ -865,14 +956,11 @@ impl Store {
         if needle.is_empty() {
             return Ok(Vec::new());
         }
-        let escaped = needle
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let starts = format!("{escaped}%");
-        let word = format!("% {escaped}%");
-        let limit = i64::try_from(limit.min(MAX_SUGGESTIONS)).unwrap_or(8);
+        let word = format!(" {needle}");
         let conn = self.conn();
+        // Every name each address goes by. Matching is done below, not
+        // here: SQLite's lower() and LIKE only fold ASCII letters, so
+        // "él" would never find "Élodie".
         let mut stmt = conn.prepare(
             "WITH people(name, address, weight, date) AS (
                  SELECT m.from_name, m.from_address, 1, m.date
@@ -887,31 +975,90 @@ impl Store {
                    FROM messages m JOIN folders f ON f.id = m.folder_id, json_each(m.cc_json) j
                   WHERE f.role = 'sent'
              )
-             SELECT MAX(name), MIN(address), SUM(weight) AS score, MAX(date) AS last
+             SELECT name, address, SUM(weight), MAX(date)
                FROM people
               WHERE address LIKE '%@%'
-                AND (lower(address) LIKE ?1 ESCAPE '\\' OR lower(name) LIKE ?1 ESCAPE '\\'
-                     OR lower(name) LIKE ?2 ESCAPE '\\')
                 AND lower(address) NOT IN (SELECT lower(email) FROM accounts)
                 AND lower(address) NOT LIKE '%noreply%'
                 AND lower(address) NOT LIKE '%no-reply%'
                 AND lower(address) NOT LIKE '%donotreply%'
                 AND lower(address) NOT LIKE 'mailer-daemon@%'
-              GROUP BY lower(address)
-              ORDER BY score DESC, last DESC
-              LIMIT ?3",
+              GROUP BY address, name",
         )?;
-        let rows = stmt.query_map(params![starts, word, limit], |row| {
-            let address: String = row.get(1)?;
-            // A "name" that is just the address again adds nothing.
-            let name = row
-                .get::<_, Option<String>>(0)?
-                .map(|n| n.trim().trim_matches(['"', '\'']).to_owned())
-                .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&address));
-            Ok(Mailbox { name, address })
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
         })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        // One entry per address, from the rows that match: its greatest
+        // name and spelling, its messages counted, its latest date.
+        let mut people: HashMap<String, Suggestion> = HashMap::new();
+        for row in rows {
+            let (name, address, score, last) = row?;
+            let lower_address = address.to_lowercase();
+            let lower_name = name.as_deref().map(str::to_lowercase).unwrap_or_default();
+            if !(lower_address.starts_with(&needle)
+                || lower_name.starts_with(&needle)
+                || lower_name.contains(&word))
+            {
+                continue;
+            }
+            match people.entry(lower_address) {
+                Entry::Vacant(slot) => {
+                    slot.insert(Suggestion {
+                        name,
+                        address,
+                        score,
+                        last,
+                    });
+                }
+                Entry::Occupied(mut slot) => {
+                    let person = slot.get_mut();
+                    person.name = person.name.take().max(name);
+                    if address < person.address {
+                        person.address = address;
+                    }
+                    person.score = person.score.saturating_add(score);
+                    person.last = person.last.max(last);
+                }
+            }
+        }
+        let mut people: Vec<Suggestion> = people.into_values().collect();
+        // Best first; the address settles ties so the order is steady.
+        people.sort_by(|a, b| {
+            (b.score, b.last)
+                .cmp(&(a.score, a.last))
+                .then_with(|| a.address.cmp(&b.address))
+        });
+        people.truncate(limit.min(MAX_SUGGESTIONS));
+        Ok(people
+            .into_iter()
+            .map(|person| {
+                // A "name" that is just the address again adds nothing.
+                let name = person
+                    .name
+                    .map(|n| n.trim().trim_matches(['"', '\'']).to_owned())
+                    .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&person.address));
+                Mailbox {
+                    name,
+                    address: person.address,
+                }
+            })
+            .collect())
     }
+}
+
+/// Someone to suggest, while their messages are being added up.
+struct Suggestion {
+    name: Option<String>,
+    address: String,
+    /// Messages to and from them, those written to counted three times.
+    score: i64,
+    /// Date of the latest one.
+    last: Option<i64>,
 }
 
 #[cfg(test)]
@@ -1000,6 +1147,39 @@ mod tests {
         assert!(by_address("no-reply").is_empty());
         assert!(by_address("%").is_empty());
         assert!(by_address("  ").is_empty());
+    }
+
+    #[test]
+    fn suggestions_match_accented_names_in_any_case() {
+        let f = fixture();
+        for (uid, name, address) in [
+            (1, "Élodie Durand", "elodie@atelier.example"),
+            (2, "ÉLODIE DURAND", "Elodie@atelier.example"),
+            (3, "Jürgen Öztürk", "j.o@werk.example"),
+        ] {
+            let mut m = summary("hello", i64::from(uid));
+            m.from = Some(Mailbox {
+                name: Some(name.into()),
+                address: address.into(),
+            });
+            add_message(&f.store, &f.inbox, uid, &m);
+        }
+        let found = |q: &str| -> Vec<String> {
+            f.store
+                .suggest_recipients(q, 8)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.address)
+                .collect()
+        };
+        // One entry for both spellings of the address.
+        assert_eq!(found("él"), ["Elodie@atelier.example"]);
+        assert_eq!(found("ÉLO"), ["Elodie@atelier.example"]);
+        assert_eq!(found("özt"), ["j.o@werk.example"]);
+        assert_eq!(found("JÜR"), ["j.o@werk.example"]);
+        assert!(found("ö").len() == 1 && found("zt").is_empty());
+        // The limit still holds, with the most written-to first.
+        assert_eq!(f.store.suggest_recipients("e", 1).unwrap().len(), 1);
     }
 
     #[test]
@@ -1690,6 +1870,126 @@ mod tests {
             all.iter().map(|m| m.date).collect::<Vec<_>>(),
             [Some(100), Some(200), Some(300)]
         );
+    }
+
+    /// A reply that names only what it answers, as some clients write them.
+    fn bare_reply(subject: &str, date: i64, parent: &str) -> mail_core::message::MessageSummary {
+        let mut m = summary(subject, date);
+        m.in_reply_to = Some(format!("<{parent}>"));
+        m
+    }
+
+    fn thread_dates(store: &Store, id: &str) -> Vec<Option<i64>> {
+        store
+            .get_thread(id)
+            .unwrap()
+            .iter()
+            .map(|m| m.date)
+            .collect()
+    }
+
+    #[test]
+    fn a_reply_without_references_joins_its_parents_conversation() {
+        let f = fixture();
+        let quote = summary("Quote", 100);
+        let root = quote.message_id.clone().unwrap();
+        add_message(&f.store, &f.inbox, 1, &quote);
+        let second = reply("Re: Quote", 200, &root, &root);
+        let second_id = second.message_id.clone().unwrap();
+        add_message(&f.store, &f.inbox, 2, &second);
+        // In-Reply-To the second message, no References.
+        let third = bare_reply("RE: Quote", 300, &second_id);
+        let third_id = third.message_id.clone().unwrap();
+        let third_row = add_message(&f.store, &f.inbox, 3, &third);
+        // And an answer of the same kind to that one.
+        let fourth = add_message(
+            &f.store,
+            &f.inbox,
+            4,
+            &bare_reply("RE: Quote", 400, &third_id),
+        );
+        let all = [Some(100), Some(200), Some(300), Some(400)];
+        assert_eq!(thread_dates(&f.store, &fourth), all);
+        assert_eq!(f.store.list_threads(&query()).unwrap().total, 1);
+        // Reading the same message again (new flags) keeps it there.
+        f.store
+            .upsert_message(
+                &f.inbox,
+                3,
+                &third,
+                MessageFlags {
+                    seen: true,
+                    ..MessageFlags::default()
+                },
+                100,
+            )
+            .unwrap();
+        assert_eq!(thread_dates(&f.store, &third_row), all);
+    }
+
+    #[test]
+    fn replies_stored_before_their_parent_join_it_when_it_arrives() {
+        let f = fixture();
+        let sent = add_folder(&f.store, &f.account, "Sent", FolderRole::Sent);
+        let quote = summary("Quote", 100);
+        let root = quote.message_id.clone().unwrap();
+        let mine = reply("Re: Quote", 200, &root, &root);
+        let mine_id = mine.message_id.clone().unwrap();
+        let theirs = bare_reply("RE: Quote", 300, &mine_id);
+        let theirs_id = theirs.message_id.clone().unwrap();
+        // The Inbox is read first: the newest messages, then older ones.
+        let last = add_message(
+            &f.store,
+            &f.inbox,
+            3,
+            &bare_reply("RE: Quote", 400, &theirs_id),
+        );
+        add_message(&f.store, &f.inbox, 2, &theirs);
+        add_message(&f.store, &f.inbox, 1, &quote);
+        assert_eq!(thread_dates(&f.store, &last), [Some(300), Some(400)]);
+        // My reply, from Sent, ties them to the conversation.
+        add_message(&f.store, &sent, 1, &mine);
+        assert_eq!(
+            thread_dates(&f.store, &last),
+            [Some(100), Some(200), Some(300), Some(400)]
+        );
+        // Another account's mail is never pulled in.
+        let other = add_account(&f.store, "b@example.com");
+        let other_inbox = add_folder(&f.store, &other, "INBOX", FolderRole::Inbox);
+        let stray = add_message(
+            &f.store,
+            &other_inbox,
+            1,
+            &bare_reply("RE: Quote", 500, &mine_id),
+        );
+        assert_eq!(thread_dates(&f.store, &stray), [Some(500)]);
+    }
+
+    #[test]
+    fn long_conversations_show_their_newest_messages_once_each() {
+        let f = fixture();
+        let labels = add_folder(&f.store, &f.account, "Label", FolderRole::Other);
+        let quote = summary("Quote", 1);
+        let root = quote.message_id.clone().unwrap();
+        add_message(&f.store, &f.inbox, 1, &quote);
+        for n in 2..=250u32 {
+            // Two different messages from one sender in each second.
+            let date = i64::from(n / 2);
+            let mut m = reply("Re: Quote", date, &root, &root);
+            m.message_id = Some(format!("reply-{n}@example.com"));
+            add_message(&f.store, &f.inbox, n, &m);
+        }
+        // The newest one also sits in a second folder.
+        let mut newest = reply("Re: Quote", 125, &root, &root);
+        newest.message_id = Some("<reply-250@example.com>".into());
+        let copy = add_message(&f.store, &labels, 1, &newest);
+        let thread = f.store.get_thread(&copy).unwrap();
+        // 200 read: the 199 newest messages, one of them twice.
+        assert_eq!(thread.len(), 199);
+        assert_eq!(thread.last().unwrap().date, Some(125));
+        assert_eq!(thread.first().unwrap().date, Some(26));
+        assert!(thread.windows(2).all(|w| w[0].date <= w[1].date));
+        assert_eq!(thread.iter().filter(|m| m.date == Some(100)).count(), 2);
     }
 
     #[test]

@@ -133,6 +133,10 @@ fn handle(
                 "",
             )
         }
+        ("GET", path) => match cards.get(path) {
+            Some((etag, text)) => reply("200 OK", &[("ETag", format!("\"{etag}\""))], text),
+            None => reply("404 Not Found", &[], ""),
+        },
         ("DELETE", path) => {
             if cards.remove(path).is_some() {
                 reply("204 No Content", &[], "")
@@ -278,6 +282,49 @@ async fn finds_the_address_book_and_syncs_both_ways() {
     // Deleting something already gone is fine.
     dav.delete_card(&book, &new_href, None).await.unwrap();
     assert_eq!(dav.list_cards(&book).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_create_whose_reply_was_lost_is_not_stuck() {
+    let text = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:new-2\r\nFN:Wanjiru\r\nEND:VCARD\r\n";
+    let cards: Cards = Arc::default();
+    // The first try reached the server; its reply never arrived.
+    cards
+        .lock()
+        .unwrap()
+        .insert(format!("{BOOK}new-2.vcf"), (1, text.to_owned()));
+    let server = serve(Arc::clone(&cards)).await;
+    let dav = client("secret");
+    // No trailing slash: the card must still land inside the book.
+    let book = server.join(BOOK.trim_end_matches('/')).unwrap();
+
+    // The retry finds its own card there and takes it.
+    let (href, etag) = dav
+        .put_card(&book, None, "new-2", text, None)
+        .await
+        .unwrap();
+    assert_eq!(href, format!("{BOOK}new-2.vcf"));
+    assert_eq!(etag.as_deref(), Some("\"1\""));
+
+    // Edited while the first try was in doubt: the newer text is stored.
+    let newer = text.replace("FN:Wanjiru", "FN:Wanjiru Kamau");
+    let (_, etag) = dav
+        .put_card(&book, None, "new-2", &newer, None)
+        .await
+        .unwrap();
+    assert_eq!(etag.as_deref(), Some("\"2\""));
+    assert!(cards.lock().unwrap()[&href].1.contains("Kamau"));
+
+    // Someone else's card under the same name is left alone.
+    let other = text.replace("UID:new-2", "UID:someone-else");
+    cards
+        .lock()
+        .unwrap()
+        .insert(format!("{BOOK}new-3.vcf"), (1, other.clone()));
+    let mine = text.replace("UID:new-2", "UID:new-3");
+    let clash = dav.put_card(&book, None, "new-3", &mine, None).await;
+    assert!(matches!(clash, Err(SyncError::Refused(_))));
+    assert_eq!(cards.lock().unwrap()[&format!("{BOOK}new-3.vcf")].1, other);
 }
 
 #[tokio::test]

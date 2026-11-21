@@ -5,6 +5,8 @@
 //! the server. Given the server's original card, it replaces only those
 //! fields and keeps everything else (photos, addresses, birthdays, custom
 //! fields), so editing a contact here never loses what another app added.
+//! A name, address or number that wasn't edited keeps its line as the
+//! server had it: the name's parts, `TYPE=CELL`, Apple's `item1.` groups.
 
 use serde::{Deserialize, Serialize};
 
@@ -179,15 +181,12 @@ pub fn parse(text: &str) -> Option<ContactCard> {
                     .join(" ");
             }
             "EMAIL" => {
-                let email = unescape(line.value)
-                    .trim()
-                    .trim_start_matches("mailto:")
-                    .to_owned();
+                let email = email_of(line.value);
                 if email.contains('@')
                     && !card.emails.iter().any(|e| e.eq_ignore_ascii_case(&email))
                 {
                     // A preferred address goes first.
-                    if line.params.to_ascii_uppercase().contains("PREF") {
+                    if is_preferred(line.params) {
                         card.emails.insert(0, email);
                     } else {
                         card.emails.push(email);
@@ -195,7 +194,7 @@ pub fn parse(text: &str) -> Option<ContactCard> {
                 }
             }
             "TEL" => {
-                let phone = clean(unescape(line.value).trim_start_matches("tel:"));
+                let phone = phone_of(line.value);
                 if !phone.is_empty() && !card.phones.contains(&phone) {
                     card.phones.push(phone);
                 }
@@ -225,6 +224,82 @@ fn clean(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The address in an `EMAIL` value.
+fn email_of(value: &str) -> String {
+    unescape(value)
+        .trim()
+        .trim_start_matches("mailto:")
+        .to_owned()
+}
+
+/// The number in a `TEL` value.
+fn phone_of(value: &str) -> String {
+    clean(unescape(value).trim_start_matches("tel:"))
+}
+
+/// Whether a line's parameters mark it as the preferred one.
+fn is_preferred(params: &str) -> bool {
+    params.to_ascii_uppercase().contains("PREF")
+}
+
+/// The content lines inside the first card of an unfolded text, each with
+/// its text as written.
+fn card_lines(unfolded: &str) -> Vec<(Line<'_>, &str)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for raw in unfolded.lines() {
+        let Some(line) = split_line(raw) else {
+            continue;
+        };
+        match line.name.as_str() {
+            "BEGIN" if line.value.trim().eq_ignore_ascii_case("VCARD") => inside = true,
+            "END" if line.value.trim().eq_ignore_ascii_case("VCARD") => break,
+            "BEGIN" | "END" => {}
+            _ if inside => out.push((line, raw.trim_end_matches('\r'))),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A line as written but no longer marked preferred (`TYPE=work,pref`,
+/// `PREF=1`), for an address that is no longer the first. `None` when its
+/// parameters are too unusual to edit safely.
+fn without_preference(line: &Line<'_>, raw: &str) -> Option<String> {
+    if line.params.contains('"') {
+        return None;
+    }
+    let head = raw.get(..raw.len().checked_sub(line.value.len())?.checked_sub(1)?)?;
+    let name = head.split_once(';').map_or(head, |(name, _)| name);
+    let mut out = name.to_owned();
+    for param in line.params.split(';') {
+        let (key, value) = param.split_once('=').unwrap_or((param, ""));
+        if key.trim().eq_ignore_ascii_case("PREF") {
+            continue;
+        }
+        if key.trim().eq_ignore_ascii_case("TYPE") {
+            let kinds: Vec<&str> = value
+                .split(',')
+                .filter(|kind| !kind.trim().eq_ignore_ascii_case("PREF"))
+                .collect();
+            if !kinds.is_empty() {
+                out.push(';');
+                out.push_str(key);
+                out.push('=');
+                out.push_str(&kinds.join(","));
+            }
+            continue;
+        }
+        if !param.is_empty() {
+            out.push(';');
+            out.push_str(param);
+        }
+    }
+    out.push(':');
+    out.push_str(line.value);
+    Some(out)
+}
+
 /// Fold a content line at 75 octets (RFC 6350 3.2), on character bounds.
 pub(crate) fn fold(line: &str, out: &mut String) {
     let mut width = 0usize;
@@ -241,9 +316,25 @@ pub(crate) fn fold(line: &str, out: &mut String) {
 }
 
 /// Write a card for the server. With `original` (the server's copy), its
-/// other fields are kept and only the app's fields are replaced.
+/// other fields are kept and only the app's fields are replaced. Of the
+/// app's own fields, the structured name (`N`) is kept while the display
+/// name is the same, and each address and number that is still there
+/// keeps its line as written, with its type and group.
 #[must_use]
 pub fn write(card: &ContactCard, original: Option<&str>) -> String {
+    let unfolded = original.map(unfold).unwrap_or_default();
+    let old_lines = card_lines(&unfolded);
+    // Each original line is reused once at most.
+    let mut used: Vec<usize> = Vec::new();
+    let mut reuse = |name: &str, same: &dyn Fn(&str) -> bool| {
+        let (i, found) = old_lines
+            .iter()
+            .enumerate()
+            .find(|(i, (line, _))| line.name == name && !used.contains(i) && same(line.value))?;
+        used.push(i);
+        Some(found)
+    };
+
     let mut out = String::new();
     fold("BEGIN:VCARD", &mut out);
     fold("VERSION:3.0", &mut out);
@@ -256,15 +347,25 @@ pub fn write(card: &ContactCard, original: Option<&str>) -> String {
         name
     };
     fold(&format!("FN:{}", escape(&name)), &mut out);
-    // N: split the display name into given and family, best effort.
-    let (given, family) = match name.rsplit_once(' ') {
-        Some((given, family)) if !name.contains('@') => (given.to_owned(), family.to_owned()),
-        _ => (name.clone(), String::new()),
-    };
-    fold(
-        &format!("N:{};{};;;", escape(&family), escape(&given)),
-        &mut out,
-    );
+    // The parts of a name ("de la Cruz;Maria;;Dr.;Jr.") can't be worked
+    // out again from the display name, so they stay unless it was edited.
+    let kept_name = original
+        .and_then(parse)
+        .filter(|old| old.name == name)
+        .and_then(|_| old_lines.iter().find(|(line, _)| line.name == "N"));
+    if let Some((_, raw)) = kept_name {
+        fold(raw, &mut out);
+    } else {
+        // N: split the display name into given and family, best effort.
+        let (given, family) = match name.rsplit_once(' ') {
+            Some((given, family)) if !name.contains('@') => (given.to_owned(), family.to_owned()),
+            _ => (name.clone(), String::new()),
+        };
+        fold(
+            &format!("N:{};{};;;", escape(&family), escape(&given)),
+            &mut out,
+        );
+    }
     for (i, email) in card
         .emails
         .iter()
@@ -272,12 +373,24 @@ pub fn write(card: &ContactCard, original: Option<&str>) -> String {
         .filter(|e| e.contains('@'))
         .enumerate()
     {
-        let pref = if i == 0 {
-            ";TYPE=INTERNET,PREF"
-        } else {
-            ";TYPE=INTERNET"
-        };
-        fold(&format!("EMAIL{pref}:{}", escape(email)), &mut out);
+        // Reading puts a preferred address first, so only the first may
+        // keep that mark, or the order chosen here would not survive.
+        let kept = reuse("EMAIL", &|value| email_of(value) == email).and_then(|(line, raw)| {
+            if i > 0 && is_preferred(line.params) {
+                without_preference(line, raw)
+            } else {
+                Some((*raw).to_owned())
+            }
+        });
+        let line = kept.unwrap_or_else(|| {
+            let pref = if i == 0 {
+                ";TYPE=INTERNET,PREF"
+            } else {
+                ";TYPE=INTERNET"
+            };
+            format!("EMAIL{pref}:{}", escape(email))
+        });
+        fold(&line, &mut out);
     }
     for phone in card
         .phones
@@ -285,7 +398,10 @@ pub fn write(card: &ContactCard, original: Option<&str>) -> String {
         .map(|p| clean(p))
         .filter(|p| !p.is_empty())
     {
-        fold(&format!("TEL:{}", escape(&phone)), &mut out);
+        match reuse("TEL", &|value| phone_of(value) == phone) {
+            Some((_, raw)) => fold(raw, &mut out),
+            None => fold(&format!("TEL:{}", escape(&phone)), &mut out),
+        }
     }
     if !card.organization.trim().is_empty() {
         fold(
@@ -300,21 +416,9 @@ pub fn write(card: &ContactCard, original: Option<&str>) -> String {
         fold(&format!("NOTE:{}", escape(card.notes.trim())), &mut out);
     }
     // Everything else the original had (photos, addresses, birthdays…).
-    if let Some(original) = original {
-        let unfolded = unfold(original);
-        let mut inside = false;
-        for raw in unfolded.lines() {
-            let Some(line) = split_line(raw) else {
-                continue;
-            };
-            match line.name.as_str() {
-                "BEGIN" if line.value.trim().eq_ignore_ascii_case("VCARD") => inside = true,
-                "END" if line.value.trim().eq_ignore_ascii_case("VCARD") => break,
-                name if inside && !MANAGED.contains(&name) && name != "BEGIN" && name != "END" => {
-                    fold(raw.trim_end_matches('\r'), &mut out);
-                }
-                _ => {}
-            }
+    for (line, raw) in &old_lines {
+        if !MANAGED.contains(&line.name.as_str()) {
+            fold(raw, &mut out);
         }
     }
     fold("END:VCARD", &mut out);
@@ -368,6 +472,52 @@ mod tests {
         assert_eq!(parse(&out).unwrap(), c);
         // Lines are folded to 75 octets.
         assert!(out.split("\r\n").all(|l| l.len() <= 75));
+    }
+
+    const APPLE: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:m-1\r\nN:de la Cruz;Maria;;Dr.;Jr.\r\nFN:Dr. Maria de la Cruz Jr.\r\nitem1.EMAIL;type=INTERNET;type=WORK:maria@clinic.example\r\nitem1.X-ABLabel:Clinic\r\nEMAIL;TYPE=HOME,PREF:maria@home.example\r\nTEL;TYPE=CELL:+254 700 000 009\r\nTEL;TYPE=WORK,VOICE:+254 20 000 0009\r\nEND:VCARD\r\n";
+
+    #[test]
+    fn editing_a_note_keeps_the_name_parts_types_and_groups() {
+        let mut c = parse(APPLE).unwrap();
+        c.notes = "Met at the expo".into();
+        let out = write(&c, Some(APPLE));
+        assert!(out.contains("N:de la Cruz;Maria;;Dr.;Jr.\r\n"));
+        assert!(out.contains("item1.EMAIL;type=INTERNET;type=WORK:maria@clinic.example\r\n"));
+        assert!(out.contains("item1.X-ABLabel:Clinic\r\n"));
+        assert!(out.contains("EMAIL;TYPE=HOME,PREF:maria@home.example\r\n"));
+        assert!(out.contains("TEL;TYPE=CELL:+254 700 000 009\r\n"));
+        assert!(out.contains("TEL;TYPE=WORK,VOICE:+254 20 000 0009\r\n"));
+        assert!(out.contains("NOTE:Met at the expo\r\n"));
+        assert_eq!(out.matches("EMAIL").count(), 2);
+        assert_eq!(out.matches("TEL").count(), 2);
+        assert_eq!(out.matches("\r\nN:").count(), 1);
+        assert_eq!(parse(&out).unwrap(), c);
+    }
+
+    #[test]
+    fn edited_fields_are_rewritten_and_the_rest_reused() {
+        let mut c = parse(APPLE).unwrap();
+        assert_eq!(c.emails, ["maria@home.example", "maria@clinic.example"]);
+        // A new name, the work address made the main one, one number
+        // changed and one address added.
+        c.name = "Maria Santos".into();
+        c.emails = vec![
+            "maria@clinic.example".into(),
+            "maria@home.example".into(),
+            "maria@new.example".into(),
+        ];
+        c.phones = vec!["+254 700 000 009".into(), "+254 20 111 1111".into()];
+        let out = write(&c, Some(APPLE));
+        assert!(out.contains("N:Santos;Maria;;;\r\n"));
+        assert!(!out.contains("de la Cruz"));
+        assert!(out.contains("item1.EMAIL;type=INTERNET;type=WORK:maria@clinic.example\r\n"));
+        // No longer first: its type stays, its preference goes.
+        assert!(out.contains("EMAIL;TYPE=HOME:maria@home.example\r\n"));
+        assert!(out.contains("EMAIL;TYPE=INTERNET:maria@new.example\r\n"));
+        assert!(out.contains("TEL;TYPE=CELL:+254 700 000 009\r\n"));
+        assert!(out.contains("TEL:+254 20 111 1111\r\n"));
+        assert!(!out.contains("000 0009"));
+        assert_eq!(parse(&out).unwrap(), c);
     }
 
     #[test]

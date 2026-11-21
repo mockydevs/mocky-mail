@@ -241,6 +241,18 @@ pub fn uid_set(uids: &[u32]) -> Option<String> {
     Some(parts.join(","))
 }
 
+/// The messages marked `\Deleted` that are not ours to remove: every UID in
+/// `marked` that is not in `ours`, in order.
+fn others_marked_deleted(marked: &HashSet<u32>, ours: &[u32]) -> Vec<u32> {
+    let mut others: Vec<u32> = marked
+        .iter()
+        .copied()
+        .filter(|uid| !ours.contains(uid))
+        .collect();
+    others.sort_unstable();
+    others
+}
+
 fn range(start: u32, end: u32) -> String {
     if start == end {
         start.to_string()
@@ -467,6 +479,10 @@ impl ImapConnection {
     /// Network or server errors, or a server that reports no UIDVALIDITY.
     pub async fn select(&mut self, path: &str) -> Result<FolderStatus, SyncError> {
         let host = self.host.clone();
+        // A SELECT that fails leaves no folder selected on the server (RFC
+        // 3501 section 6.3.1), so the old one is forgotten first. Otherwise
+        // the next command for it would skip SELECT and be refused.
+        self.selected = None;
         let mailbox = within(&host, self.session.select(path)).await??;
         self.selected = Some(path.to_owned());
         Ok(FolderStatus {
@@ -697,7 +713,28 @@ impl ImapConnection {
         Ok(())
     }
 
-    async fn expunge_uids(&mut self, set: &str) -> Result<(), SyncError> {
+    /// Add or remove `\Deleted` on messages in the selected folder.
+    async fn mark_deleted(&mut self, set: &str, deleted: bool) -> Result<(), SyncError> {
+        let host = self.host.clone();
+        let change = if deleted {
+            "+FLAGS.SILENT (\\Deleted)"
+        } else {
+            "-FLAGS.SILENT (\\Deleted)"
+        };
+        within(&host, async {
+            self.session
+                .uid_store(set, change)
+                .await?
+                .try_collect::<Vec<_>>()
+                .await
+        })
+        .await??;
+        Ok(())
+    }
+
+    /// Remove for good the messages in `uids`, which are already marked
+    /// `\Deleted`, from the selected folder.
+    async fn expunge_uids(&mut self, uids: &[u32], set: &str) -> Result<(), SyncError> {
         let host = self.host.clone();
         if self.has("UIDPLUS") {
             within(&host, async {
@@ -708,12 +745,27 @@ impl ImapConnection {
                     .await
             })
             .await??;
-        } else {
-            within(&host, async {
-                self.session.expunge().await?.try_collect::<Vec<_>>().await
-            })
-            .await??;
+            return Ok(());
         }
+        // Without UIDPLUS there is only a plain EXPUNGE, which removes every
+        // message marked \Deleted: also ones another mail app marked and
+        // its user may still want back. Their mark is lifted for the moment
+        // of the expunge and put back after.
+        let marked = within(&host, self.session.uid_search("DELETED")).await??;
+        let others = others_marked_deleted(&marked, uids);
+        let spared = uid_set(&others);
+        if let Some(spared) = &spared {
+            self.mark_deleted(spared, false).await?;
+        }
+        let expunged = within(&host, async {
+            self.session.expunge().await?.try_collect::<Vec<_>>().await
+        })
+        .await;
+        // Put the marks back even if the expunge failed.
+        if let Some(spared) = &spared {
+            self.mark_deleted(spared, true).await?;
+        }
+        expunged??;
         Ok(())
     }
 
@@ -737,15 +789,8 @@ impl ImapConnection {
             return Ok(());
         }
         within(&host, self.session.uid_copy(&set, to)).await??;
-        within(&host, async {
-            self.session
-                .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
-                .await?
-                .try_collect::<Vec<_>>()
-                .await
-        })
-        .await??;
-        self.expunge_uids(&set).await
+        self.mark_deleted(&set, true).await?;
+        self.expunge_uids(uids, &set).await
     }
 
     /// Permanently delete messages.
@@ -757,16 +802,8 @@ impl ImapConnection {
             return Ok(());
         };
         self.ensure_selected(path).await?;
-        let host = self.host.clone();
-        within(&host, async {
-            self.session
-                .uid_store(&set, "+FLAGS.SILENT (\\Deleted)")
-                .await?
-                .try_collect::<Vec<_>>()
-                .await
-        })
-        .await??;
-        self.expunge_uids(&set).await
+        self.mark_deleted(&set, true).await?;
+        self.expunge_uids(uids, &set).await
     }
 
     /// Create a folder (for example Archive or Sent when the account has none).
@@ -785,6 +822,9 @@ impl ImapConnection {
     /// Network or server errors, including a name already in use.
     pub async fn rename_folder(&mut self, from: &str, to: &str) -> Result<(), SyncError> {
         let host = self.host.clone();
+        // The selected folder may be this one or one inside it; its old
+        // name must not be taken as still selected.
+        self.selected = None;
         within(&host, self.session.rename(from, to)).await??;
         Ok(())
     }
@@ -795,6 +835,9 @@ impl ImapConnection {
     /// Network or server errors.
     pub async fn delete_folder(&mut self, path: &str) -> Result<(), SyncError> {
         let host = self.host.clone();
+        // A folder made later under the same name is a different folder,
+        // so a deleted one must not be taken as still selected.
+        self.selected = None;
         within(&host, self.session.delete(path)).await??;
         Ok(())
     }
@@ -925,6 +968,14 @@ mod tests {
             uid_set(&[u32::MAX, u32::MAX - 1]).as_deref(),
             Some("4294967294:4294967295")
         );
+    }
+
+    #[test]
+    fn a_plain_expunge_spares_what_other_apps_marked_deleted() {
+        let marked: HashSet<u32> = [4, 9, 2, 7].into_iter().collect();
+        assert_eq!(others_marked_deleted(&marked, &[7, 2]), [4, 9]);
+        assert!(others_marked_deleted(&marked, &[2, 4, 7, 9]).is_empty());
+        assert!(others_marked_deleted(&HashSet::new(), &[1]).is_empty());
     }
 
     #[test]

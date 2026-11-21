@@ -230,16 +230,18 @@ pub fn reply_recipients(
         take(&mut to, m);
     }
 
+    // Replying to your own sent message: send to its original recipients.
+    // This comes before Cc is filled, or a reply to all would have taken
+    // them there and left To empty.
+    if to.is_empty() {
+        for m in &source.to {
+            take(&mut to, m);
+        }
+    }
     let mut cc = Vec::new();
     if reply_all {
         for m in source.to.iter().chain(&source.cc) {
             take(&mut cc, m);
-        }
-    }
-    // Replying to your own sent message: send to its original recipients.
-    if to.is_empty() {
-        for m in &source.to {
-            take(&mut to, m);
         }
     }
     ReplyRecipients { to, cc }
@@ -416,6 +418,22 @@ mod tests {
         };
         let r = reply_recipients(&source, &["me@work.example".to_owned()], false);
         assert_eq!(r.to, vec![mb("peter@client.example")]);
+    }
+
+    #[test]
+    fn replying_to_all_on_my_own_message_keeps_to_and_cc_apart() {
+        let source = ReplySource {
+            from: Some(mb("me@work.example")),
+            to: vec![mb("peter@client.example"), mb("amina@studio.example")],
+            cc: vec![mb("wanjiru@fitout.example"), mb("me@work.example")],
+            ..ReplySource::default()
+        };
+        let r = reply_recipients(&source, &["me@work.example".to_owned()], true);
+        assert_eq!(
+            r.to,
+            vec![mb("peter@client.example"), mb("amina@studio.example")]
+        );
+        assert_eq!(r.cc, vec![mb("wanjiru@fitout.example")]);
     }
 
     #[test]

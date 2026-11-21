@@ -53,31 +53,76 @@ impl FolderRole {
 ///
 /// `attributes` are the LIST attributes such as `\Sent` (any case).
 /// `delimiter` is the server's hierarchy separator, if any.
+///
+/// A well-known name counts only at the top level (or directly under
+/// `INBOX`), so `Clients/Deleted` is an ordinary folder. To also keep a
+/// name from taking a role the server gave another folder, use
+/// [`detect_role_unclaimed`].
 #[must_use]
 pub fn detect_role(name: &str, attributes: &[&str], delimiter: Option<&str>) -> FolderRole {
+    detect_role_unclaimed(name, attributes, delimiter, &[])
+}
+
+/// The role the server gives a folder with a special-use flag (RFC 6154)
+/// among its LIST attributes, if it has one.
+#[must_use]
+pub fn special_use_role(attributes: &[&str]) -> Option<FolderRole> {
+    attributes
+        .iter()
+        .find_map(|attribute| match attribute.to_ascii_lowercase().as_str() {
+            "\\sent" => Some(FolderRole::Sent),
+            "\\drafts" => Some(FolderRole::Drafts),
+            "\\archive" => Some(FolderRole::Archive),
+            "\\junk" => Some(FolderRole::Junk),
+            "\\trash" => Some(FolderRole::Trash),
+            "\\all" => Some(FolderRole::All),
+            "\\flagged" => Some(FolderRole::Flagged),
+            _ => None,
+        })
+}
+
+/// Like [`detect_role`], for an account whose other folders are known:
+/// `claimed` are the roles the server's special-use flags give to any of
+/// its folders (collect them with [`special_use_role`]). A folder without
+/// a flag doesn't take one of those from its name: where the server marks
+/// its Trash, a folder called "Deleted Items" is the user's own.
+#[must_use]
+pub fn detect_role_unclaimed(
+    name: &str,
+    attributes: &[&str],
+    delimiter: Option<&str>,
+    claimed: &[FolderRole],
+) -> FolderRole {
     if name.eq_ignore_ascii_case("INBOX") {
         return FolderRole::Inbox;
     }
-    for attribute in attributes {
-        let role = match attribute.to_ascii_lowercase().as_str() {
-            "\\sent" => FolderRole::Sent,
-            "\\drafts" => FolderRole::Drafts,
-            "\\archive" => FolderRole::Archive,
-            "\\junk" => FolderRole::Junk,
-            "\\trash" => FolderRole::Trash,
-            "\\all" => FolderRole::All,
-            "\\flagged" => FolderRole::Flagged,
-            _ => continue,
-        };
+    if let Some(role) = special_use_role(attributes) {
         return role;
     }
-    let leaf = delimiter
+    let role = role_from_name(name, delimiter);
+    if claimed.contains(&role) {
+        FolderRole::Other
+    } else {
+        role
+    }
+}
+
+/// The role a well-known name stands for. Only where servers put such
+/// folders: at the top level, or one level under `INBOX` or Gmail's own
+/// prefix. Deeper down ("2023/Sent", "Lists/Spam") the name is the user's.
+fn role_from_name(name: &str, delimiter: Option<&str>) -> FolderRole {
+    let (parent, leaf) = delimiter
         .filter(|d| !d.is_empty())
-        .and_then(|d| name.rsplit(d).next())
-        .unwrap_or(name)
-        .trim()
-        .to_ascii_lowercase();
-    match leaf.as_str() {
+        .and_then(|d| name.rsplit_once(d))
+        .map_or((None, name), |(parent, leaf)| (Some(parent), leaf));
+    if parent.is_some_and(|p| {
+        !["INBOX", "[Gmail]", "[Google Mail]"]
+            .iter()
+            .any(|prefix| p.eq_ignore_ascii_case(prefix))
+    }) {
+        return FolderRole::Other;
+    }
+    match leaf.trim().to_ascii_lowercase().as_str() {
         "sent" | "sent items" | "sent messages" | "sent mail" => FolderRole::Sent,
         "drafts" | "draft" => FolderRole::Drafts,
         "archive" | "archives" => FolderRole::Archive,
@@ -266,6 +311,57 @@ mod tests {
         );
         assert_eq!(detect_role("Junk E-mail", &[], None), FolderRole::Junk);
         assert_eq!(detect_role("Clients", &[], Some("/")), FolderRole::Other);
+    }
+
+    #[test]
+    fn names_count_only_at_the_top_level() {
+        for (name, delimiter) in [
+            ("Clients/Deleted", "/"),
+            ("Lists/Spam", "/"),
+            ("2023/Sent", "/"),
+            ("INBOX.Projects.Trash", "."),
+        ] {
+            assert_eq!(
+                detect_role(name, &[], Some(delimiter)),
+                FolderRole::Other,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            detect_role("INBOX/Trash", &[], Some("/")),
+            FolderRole::Trash
+        );
+        assert_eq!(
+            detect_role("[Gmail]/Spam", &[], Some("/")),
+            FolderRole::Junk
+        );
+        // A flag still wins at any depth.
+        assert_eq!(
+            detect_role("Clients/Deleted", &["\\Trash"], Some("/")),
+            FolderRole::Trash
+        );
+    }
+
+    #[test]
+    fn names_do_not_take_a_role_the_server_gave_another_folder() {
+        let listed: [(&str, &[&str]); 3] = [
+            ("Papierkorb", &["\\HasNoChildren", "\\Trash"]),
+            ("Deleted Items", &["\\HasNoChildren"]),
+            ("Sent", &[]),
+        ];
+        let claimed: Vec<FolderRole> = listed
+            .iter()
+            .filter_map(|(_, attributes)| special_use_role(attributes))
+            .collect();
+        assert_eq!(claimed, [FolderRole::Trash]);
+        let roles: Vec<FolderRole> = listed
+            .iter()
+            .map(|(name, attributes)| detect_role_unclaimed(name, attributes, Some("/"), &claimed))
+            .collect();
+        assert_eq!(
+            roles,
+            [FolderRole::Trash, FolderRole::Other, FolderRole::Sent]
+        );
     }
 
     #[test]
