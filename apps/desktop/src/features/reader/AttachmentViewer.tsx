@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { usePhoneBack } from '../../app/usePhone';
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
 import type { AppError, AttachmentMeta } from '../../api/types';
@@ -112,6 +113,9 @@ export function AttachmentViewer({ messageId, file, onClose, onSave, onOpen, not
     if (isViewerEntry()) window.history.back();
     else onClose();
   };
+  // In the app, Android's Back doesn't reach the history above while the
+  // open message holds the button: take it over until the preview closes.
+  usePhoneBack(1, close);
 
   const failPdf = () => {
     setView({ state: 'failed', message: `${file.fileName} couldn't be shown here. Open it in another app or save it.` });

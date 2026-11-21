@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 
 import { at } from '../../api/mock/mockData';
 import { renderApp, rows } from '../../test/renderApp';
+import { dayText } from './calendarTime';
 
 // "Today" for the calendar: Fri 13 Nov 2026, like the sample mail.
 beforeEach(() => {
@@ -28,10 +29,19 @@ interface Region {
 }
 const day = (region: Region, name: RegExp) => within(region.getByRole('gridcell', { name }));
 
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** A November 2026 grid cell's name, worded by the app's own formatter (so in
+ * this machine's locale): with `events` ("no events", "2 events") the whole
+ * name, without it that date with any count. */
+const nov = (date: number, events?: string) => {
+  const text = escape(dayText(new Date(2026, 10, date)));
+  return new RegExp(events === undefined ? `^${text}, ` : `^${text}, ${escape(events)}$`);
+};
+
 describe('calendar', () => {
   it('shows the month and an event with its people', async () => {
     const { user, region } = await openCalendar();
-    const friday = day(region, /^Fri, Nov 13, 2 events$/);
+    const friday = day(region, nov(13, '2 events'));
     await user.click(friday.getByRole('button', { name: /Design review with Acme/ }));
 
     const card = within(region.getByRole('article', { name: 'Design review with Acme' }));
@@ -41,9 +51,9 @@ describe('calendar', () => {
     expect(card.getByText('No answer yet')).toBeInTheDocument();
 
     // A day with nothing on it, and the all-day launch across two days.
-    expect(region.getByRole('gridcell', { name: /^Tue, Nov 3, no events$/ })).toBeInTheDocument();
-    expect(region.getByRole('gridcell', { name: /^Wed, Nov 18, 2 events$/ })).toBeInTheDocument();
-    expect(region.getByRole('gridcell', { name: /^Thu, Nov 19, 2 events$/ })).toBeInTheDocument();
+    expect(region.getByRole('gridcell', { name: nov(3, 'no events') })).toBeInTheDocument();
+    expect(region.getByRole('gridcell', { name: nov(18, '2 events') })).toBeInTheDocument();
+    expect(region.getByRole('gridcell', { name: nov(19, '2 events') })).toBeInTheDocument();
 
     await user.click(card.getByRole('button', { name: 'Email everyone' }));
     const compose = await screen.findByRole('form', { name: 'New message' });
@@ -54,7 +64,7 @@ describe('calendar', () => {
 
   it('adds an event and moves between months', async () => {
     const { user, api, region } = await openCalendar();
-    await user.click(region.getByRole('gridcell', { name: /^Thu, Nov 26/ }));
+    await user.click(region.getByRole('gridcell', { name: nov(26) }));
     await user.click(region.getByRole('button', { name: 'New event' }));
     const form = within(region.getByRole('form', { name: 'New event' }));
     expect(form.getByLabelText('Starts')).toHaveValue('2026-11-26');
@@ -110,7 +120,7 @@ describe('calendar', () => {
   it('deletes one date of a series, or the whole series', async () => {
     const { user, region } = await openCalendar();
     await user.click(
-      day(region, /^Tue, Nov 10/).getByRole('button', {
+      day(region, nov(10)).getByRole('button', {
         name: /Team stand-up/,
       }),
     );
@@ -118,12 +128,12 @@ describe('calendar', () => {
     const dialog = within(screen.getByRole('dialog', { name: 'Delete a repeating event' }));
     await user.click(dialog.getByRole('button', { name: 'Only this date' }));
     await waitFor(() => {
-      expect(region.getByRole('gridcell', { name: /^Tue, Nov 10, no events$/ })).toBeInTheDocument();
+      expect(region.getByRole('gridcell', { name: nov(10, 'no events') })).toBeInTheDocument();
     });
-    expect(region.getByRole('gridcell', { name: /^Wed, Nov 11, 1 event$/ })).toBeInTheDocument();
+    expect(region.getByRole('gridcell', { name: nov(11, '1 event') })).toBeInTheDocument();
 
     await user.click(
-      day(region, /^Wed, Nov 11/).getByRole('button', {
+      day(region, nov(11)).getByRole('button', {
         name: /Team stand-up/,
       }),
     );
@@ -141,7 +151,7 @@ describe('calendar', () => {
   it('edits a series from its first date, and Escape closes the editor', async () => {
     const { user, region } = await openCalendar();
     await user.click(
-      day(region, /^Thu, Nov 12/).getByRole('button', {
+      day(region, nov(12)).getByRole('button', {
         name: /Team stand-up/,
       }),
     );

@@ -1,8 +1,27 @@
 import { vi } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { act, screen, within } from '@testing-library/react';
+import type * as TauriCore from '@tauri-apps/api/core';
 
 import { MOCK_MESSAGES } from '../../api/mock/mockData';
 import { reader, renderApp, rows } from '../../test/renderApp';
+
+/** The Android Back button, as the app sees it through Tauri. */
+const back = vi.hoisted(() => ({ press: null as (() => void) | null }));
+vi.mock('@tauri-apps/api/core', async (original) => ({
+  ...(await original<typeof TauriCore>()),
+  isTauri: () => true,
+}));
+vi.mock('@tauri-apps/api/app', () => ({
+  onBackButtonPress: (handler: () => void) => {
+    back.press = handler;
+    return Promise.resolve({
+      unregister: () => {
+        if (back.press === handler) back.press = null;
+        return Promise.resolve();
+      },
+    });
+  },
+}));
 
 // pdf.js needs a real canvas; jsdom has none. The PDF path is checked on devices.
 vi.mock('./PdfPages', () => ({
@@ -56,6 +75,47 @@ describe('attachment preview', () => {
       expect(screen.queryByRole('dialog', { name: /^Preview of/ })).not.toBeInTheDocument();
     });
     expect(within(reader()).getByRole('button', { name: 'Preview Floor-plan.png' })).toBeInTheDocument();
+  });
+
+  it("closes before the message on a phone's Back button, which the open message holds", async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query.startsWith('(max-width'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    try {
+      const { user } = renderApp({ messages });
+      await user.click((await rows()).getByRole('button', { name: /Wanjiru/ }));
+      const app = document.querySelector('.app');
+      expect(app).toHaveClass('app--reading');
+      await user.click(await within(reader()).findByRole('button', { name: 'Preview Floor-plan.png' }));
+      await within(viewer()).findByRole('img', { name: 'Floor-plan.png' });
+      await vi.waitFor(() => {
+        expect(back.press).not.toBeNull();
+      });
+
+      // First Back: only the preview closes.
+      act(() => {
+        back.press?.();
+      });
+      await vi.waitFor(() => {
+        expect(screen.queryByRole('dialog', { name: /^Preview of/ })).not.toBeInTheDocument();
+      });
+      expect(app).toHaveClass('app--reading');
+      expect(within(reader()).getByRole('button', { name: 'Preview Floor-plan.png' })).toBeInTheDocument();
+
+      // Second Back: now the message.
+      act(() => {
+        back.press?.();
+      });
+      expect(app).not.toHaveClass('app--reading');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('shows PDFs and text inside the app', async () => {
