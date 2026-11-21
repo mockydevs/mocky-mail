@@ -18,6 +18,62 @@
 
 use std::fmt;
 
+/// Files that are not programs but still act when opened: web pages and
+/// pictures that carry script, shortcuts, and Office files with macros.
+/// They may be sent and saved, but are never opened straight from a
+/// message: a sender could use them to run code or to show a convincing
+/// sign-in page outside the app's protection.
+pub const OPEN_WITH_CARE_EXTENSIONS: &[&str] = &[
+    "htm",
+    "html",
+    "xhtml",
+    "shtml",
+    "mht",
+    "mhtml",
+    "svg",
+    "svgz",
+    "url",
+    "website",
+    "webloc",
+    "desktop",
+    "scf",
+    "settingcontent-ms",
+    "library-ms",
+    "search-ms",
+    "searchconnector-ms",
+    "appref-ms",
+    "application",
+    "xll",
+    "xlam",
+    "ppam",
+    "docm",
+    "dotm",
+    "xlsm",
+    "xltm",
+    "xlsb",
+    "pptm",
+    "potm",
+    "ppsm",
+    "sldm",
+    "one",
+    "onepkg",
+    "wsf",
+    "wsc",
+    "xbap",
+];
+
+/// Whether a file is one to save first rather than open from the message
+/// (see [`OPEN_WITH_CARE_EXTENSIONS`]).
+#[must_use]
+pub fn opens_with_care(file_name: &str) -> bool {
+    let name = file_name
+        .trim()
+        .trim_end_matches(['.', ' '])
+        .to_ascii_lowercase();
+    name.rsplit_once('.')
+        .is_some_and(|(_, extension)| OPEN_WITH_CARE_EXTENSIONS.contains(&extension))
+}
+
 /// Gmail's published blocked file types, plus Linux and macOS executables
 /// and packages.
 pub const BLOCKED_EXTENSIONS: &[&str] = &[
@@ -262,6 +318,32 @@ fn zip_entries(content: &[u8]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_that_act_when_opened_are_saved_not_opened() {
+        for name in [
+            "invoice.html",
+            "Scan.SVG",
+            "login.url",
+            "budget.xlsm",
+            "report.docm. ",
+            "notes.one",
+        ] {
+            assert!(opens_with_care(name), "{name}");
+        }
+        for name in [
+            "invoice.pdf",
+            "photo.jpg",
+            "report.docx",
+            "budget.xlsx",
+            "html",
+            "readme.txt",
+        ] {
+            assert!(!opens_with_care(name), "{name}");
+        }
+        // Sending and saving them is still allowed.
+        assert!(check_outgoing("invoice.html", b"<p>hi</p>").is_ok());
+    }
 
     /// A minimal stored zip with the given entry names (no file data needed:
     /// only the central directory is read).

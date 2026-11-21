@@ -106,6 +106,24 @@ fn create_window(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Say so in a window when the app can't start. Started from the Start
+/// menu or a launcher there is no console, so the reason printed above
+/// would otherwise go nowhere and the app would just never appear.
+#[cfg(desktop)]
+fn startup_failed(reason: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Mocky Mail could not start")
+        .set_description(format!(
+            "{reason}\n\nIf this keeps happening, restart the computer, then reinstall Mocky Mail from mailer.co.ke. Your mail on the server is not affected."
+        ))
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+#[cfg(not(desktop))]
+fn startup_failed(_reason: &str) {}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Android: certificate checks use the phone's trust store. Must run
     // before any connection.
@@ -249,6 +267,7 @@ pub fn run() {
 
     if let Err(error) = result {
         eprintln!("Mocky Mail could not start: {error}");
+        startup_failed(&error.to_string());
         std::process::exit(1);
     }
 }

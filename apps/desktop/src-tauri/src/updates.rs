@@ -357,13 +357,25 @@ pub async fn install_update(app: AppHandle) -> AppResult<()> {
     tokio::fs::create_dir_all(&dir).await?;
     let path = dir.join(file_name(&installer.url));
     tokio::fs::write(&path, &data).await?;
-    run_installer(&app, kind, &path).await
+    run_installer(&app, kind, &path, &installer.sha256).await
 }
+
+/// Run as root by `pkexec` on Linux: copy the downloaded package into a
+/// fresh directory only root can write, check its SHA-256 there, install
+/// that copy, and clean up. `$1` is the download, `$2` its checksum.
+const ROOT_INSTALL_SCRIPT: &str = r#"set -eu
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+cp -- "$1" "$dir/update.deb"
+printf '%s  %s
+' "$2" "$dir/update.deb" | sha256sum -c --status
+apt-get install -y --allow-downgrades "$dir/update.deb""#;
 
 async fn run_installer(
     app: &AppHandle,
     kind: InstallKind,
     path: &std::path::Path,
+    expected_hash: &str,
 ) -> AppResult<()> {
     match kind {
         InstallKind::WindowsInstaller => {
@@ -375,9 +387,20 @@ async fn run_installer(
             Ok(())
         }
         InstallKind::LinuxDeb => {
+            // The file sits in the user's own cache, where any program the
+            // user runs could swap it between the check above and apt
+            // reading it as root. So, as root, copy it somewhere only root
+            // can write, check it again there, and install that copy.
+            let sha256 = expected_hash.trim().to_ascii_lowercase();
+            if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(AppError::invalid(
+                    "The update notice had no usable checksum, so it wasn't installed.",
+                ));
+            }
             let status = tokio::process::Command::new("pkexec")
-                .args(["apt-get", "install", "-y", "--allow-downgrades"])
+                .args(["/bin/sh", "-c", ROOT_INSTALL_SCRIPT, "mocky-mail-update"])
                 .arg(path)
+                .arg(&sha256)
                 .status()
                 .await
                 .map_err(|_| {

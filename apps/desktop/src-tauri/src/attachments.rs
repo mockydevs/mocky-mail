@@ -92,7 +92,14 @@ fn check_openable(info: &AttachmentInfo, bytes: &[u8]) -> AppResult<()> {
             "{} is a program or script, so Mocky Mail won't open it. Save it only if you trust the sender.",
             info.file_name
         ))
-    })
+    })?;
+    if attachment_policy::opens_with_care(&info.file_name) {
+        return Err(AppError::invalid(format!(
+            "{} can run code or show a web page when opened, so Mocky Mail won't open it from the message. Save it, and open it yourself only if you trust the sender.",
+            info.file_name
+        )));
+    }
+    Ok(())
 }
 
 /// `open_attachment`: open the file in the app the device uses for its

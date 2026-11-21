@@ -2927,6 +2927,7 @@ dependencies = [
  "mail-store",
  "mail-sync",
  "reqwest",
+ "rfd",
  "ring",
  "serde",
  "serde_json",
