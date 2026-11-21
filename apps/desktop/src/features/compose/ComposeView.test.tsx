@@ -190,6 +190,25 @@ describe('compose', () => {
     expect(await unified().findByRole('button', { name: 'Drafts' })).toBeInTheDocument();
   });
 
+  it('keeps the Bcc of a saved draft when it is opened again', async () => {
+    const { user } = renderApp();
+    await rows();
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    await user.type(composeForm().getByLabelText('To'), 'peter@client.example');
+    await user.click(composeForm().getByRole('button', { name: 'Add Bcc' }));
+    await user.type(composeForm().getByLabelText('Bcc'), 'boss@work.example');
+    await user.type(composeForm().getByLabelText('Subject'), 'Quietly copied');
+    await user.click(composeForm().getByRole('button', { name: 'Save draft' }));
+    await composeForm().findByText('Draft saved.');
+    await user.click(composeForm().getByRole('button', { name: 'Close' }));
+
+    await user.click(await unified().findByRole('button', { name: 'Drafts 2' }));
+    await within(reader()).findByRole('heading', { name: 'Quietly copied' });
+    await user.click(within(reader()).getByRole('button', { name: 'Continue editing' }));
+    const bcc = within(composeForm('Edit draft').getByRole('list', { name: 'Bcc recipients' }));
+    expect(bcc.getByRole('button', { name: 'Remove boss@work.example' })).toBeInTheDocument();
+  });
+
   it('forwards with the original attachments as removable chips', async () => {
     const { user, api } = renderApp();
     await rows();

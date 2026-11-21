@@ -4,6 +4,7 @@ import { vi } from 'vitest';
 import type { MessageDetail } from '../../api/types';
 import { printableHtml } from '../../lib/print';
 import { reader, renderApp, rows } from '../../test/renderApp';
+import { EMAIL_CSP, EMAIL_CSP_REMOTE_IMAGES } from './SandboxedHtml';
 
 async function more() {
   const ctx = renderApp();
@@ -37,6 +38,24 @@ describe('message tools', () => {
       expect(api.printed).toHaveLength(1);
     });
     expect(api.printed[0]).toContain('<h1>');
+  });
+
+  it('prints under the reader’s image policy, so blocked remote images stay blocked', () => {
+    const message = {
+      subject: 'Offer',
+      from: null,
+      to: [],
+      cc: [],
+      date: null,
+      html: '<p>Hi</p><img src="https://tracker.example/pixel.gif">',
+      text: null,
+      attachments: [],
+    } as unknown as MessageDetail;
+    const policy = (html: string) => /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(html)?.[1];
+    expect(policy(printableHtml(message))).toBe(EMAIL_CSP);
+    expect(policy(printableHtml(message))).not.toContain('https:');
+    // Only when the user chose to show this message's images.
+    expect(policy(printableHtml(message, true))).toBe(EMAIL_CSP_REMOTE_IMAGES);
   });
 
   it('builds a print page that escapes what senders wrote', () => {

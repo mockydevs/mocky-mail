@@ -96,6 +96,8 @@ export interface AttachmentMeta {
 
 export type MessageDetail = MessageListItem & {
   cc: Mailbox[];
+  /** Only a draft still has its Bcc. */
+  bcc?: Mailbox[];
   replyTo: Mailbox[];
   /** Already sanitized. Render only in <iframe sandbox="allow-popups">; the backend routes link popups to the system browser. */
   html: string | null;
@@ -491,6 +493,8 @@ export interface MailApi {
   addAccount(input: NewAccountInput): Promise<Account>;
   addOAuthAccount(input: OAuthAccountInput): Promise<Account>;
   updateAccount(id: string, patch: AccountPatch): Promise<Account>;
+  /** Google and Microsoft accounts: sign in again after the sign-in expired; it must be the same address. */
+  reconnectAccount(id: string): Promise<Account>;
   removeAccount(id: string): Promise<void>;
   listAccounts(): Promise<Account[]>;
   listFolders(accountId: string): Promise<Folder[]>;

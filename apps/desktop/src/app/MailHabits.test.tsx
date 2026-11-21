@@ -22,6 +22,31 @@ describe('undo', () => {
     });
   });
 
+  it('shows the archive toast alongside a send that can still be undone', async () => {
+    const { user } = renderApp();
+    await rows();
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    await user.type(composeForm().getByLabelText('To'), 'peter@client.example');
+    await user.click(composeForm().getByRole('button', { name: 'Send' }));
+    const sending = (await screen.findByText('You have 5 seconds to undo.')).closest('.toast');
+
+    await user.click(await within(reader()).findByRole('button', { name: 'Archive' }));
+    const archived = screen.getByText('Archived').closest('.toast');
+    if (!(sending instanceof HTMLElement) || !(archived instanceof HTMLElement)) throw new Error('no toast');
+    // Both are up, each with its own Undo.
+    expect(sending).toBeInTheDocument();
+    expect(archived).not.toBe(sending);
+    expect(within(sending).getByRole('button', { name: 'Undo' })).toBeInTheDocument();
+
+    await user.click(within(archived).getByRole('button', { name: 'Undo' }));
+    await vi.waitFor(async () => {
+      expect((await rows()).getAllByRole('button')).toHaveLength(6);
+    });
+    // Answering one leaves the other.
+    expect(screen.queryByText('Archived')).not.toBeInTheDocument();
+    expect(screen.getByText('You have 5 seconds to undo.')).toBeInTheDocument();
+  });
+
   it('holds a sent message for the undo window and brings it back to compose on Undo', async () => {
     const { user, api } = renderApp();
     await rows();

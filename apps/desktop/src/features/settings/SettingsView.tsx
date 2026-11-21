@@ -331,6 +331,8 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
   const [error, setError] = useState<AppError | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** The provider's sign-in page is open in the browser. */
+  const [reconnecting, setReconnecting] = useState(false);
 
   const run = (work: Promise<unknown>, success: string) => {
     setBusy(true);
@@ -364,6 +366,16 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
     if (!password) return;
     setChangingPassword(false);
     run(api.updateAccount(account.id, { password }), 'Password updated.');
+  };
+
+  const reconnect = () => {
+    setReconnecting(true);
+    run(
+      api.reconnectAccount(account.id).finally(() => {
+        setReconnecting(false);
+      }),
+      'Signed in again.',
+    );
   };
 
   const copy = error ? accountErrorCopy(error, account.email) : null;
@@ -444,6 +456,20 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
             Change password
           </button>
         ))}
+
+      {account.auth !== 'password' && (
+        // A Google or Microsoft sign-in can expire or be withdrawn; this opens
+        // the provider's sign-in again and keeps the account and its mail.
+        <button
+          type="button"
+          className="btn btn--link"
+          disabled={busy}
+          aria-busy={reconnecting}
+          onClick={reconnect}
+        >
+          {reconnecting ? 'Waiting for sign-in' : 'Sign in again'}
+        </button>
+      )}
 
       {copy && (
         <div className="notice notice--error" role="alert">

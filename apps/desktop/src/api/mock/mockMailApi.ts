@@ -80,6 +80,8 @@ export interface MockMailApi extends MailApi {
   readonly printed: string[];
   /** Make takeMailto return this link once, as if the app were opened with it. */
   launchWith(url: string): void;
+  /** A new message arrives, as a sync would bring it in. */
+  receive(message: MockMessage): void;
 }
 
 /** 1x1 PNG, a one-line PDF and some text: what the dev preview shows. */
@@ -355,6 +357,10 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     launchWith: (url) => {
       launchLink = url;
     },
+    receive: (message) => {
+      messages = [...messages, clone(message)];
+      changed(message.accountId, [message.folderId]);
+    },
     emit,
     failNext(method, error) {
       failures.set(method, error);
@@ -441,6 +447,14 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         accounts = accounts.map((a) => (a.id === id ? next : a));
         accountsChanged();
         return next;
+      }),
+
+    reconnectAccount: (id) =>
+      run('reconnectAccount', () => {
+        const acc = account(id);
+        if (acc.auth === 'password') throw appError('invalid', 'This account signs in with a password.');
+        accountsChanged();
+        return acc;
       }),
 
     removeAccount: (id) =>
@@ -736,6 +750,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
             answered: false,
             hasAttachments: draft.attachments.length > 0,
             cc: parseRecipients(draft.cc).valid.map((address) => ({ name: null, address })),
+            bcc: parseRecipients(draft.bcc).valid.map((address) => ({ name: null, address })),
             replyTo: [],
             html: null,
             text: draft.bodyText,

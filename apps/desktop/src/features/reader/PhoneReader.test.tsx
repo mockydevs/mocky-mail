@@ -2,6 +2,7 @@ import { act, screen, waitFor, within } from '@testing-library/react';
 import type * as TauriCore from '@tauri-apps/api/core';
 import { afterEach, beforeEach, vi } from 'vitest';
 
+import { MOCK_MESSAGES, MOCK_NOW } from '../../api/mock/mockData';
 import { reader, renderApp, rows } from '../../test/renderApp';
 
 /** The Android Back button, as the app sees it through Tauri. */
@@ -88,6 +89,30 @@ describe('phone message view', () => {
       back.press?.();
     });
     expect(app()).not.toHaveClass('app--reading');
+  });
+
+  it('stays on the message, and the reply being typed, when a reply joins its conversation', async () => {
+    const { user, api } = renderApp();
+    await user.click((await rows()).getByRole('button', { name: /Wanjiru/ }));
+    const pane = within(reader());
+    await user.click(await pane.findByRole('button', { name: 'Reply' }));
+    await user.type(pane.getByLabelText('Quick reply to Wanjiru'), 'On my way');
+
+    const opened = MOCK_MESSAGES.find((m) => m.id === 'm1');
+    if (!opened) throw new Error('mock m1 missing');
+    const list = vi.spyOn(api, 'listMessages');
+    api.receive({ ...opened, id: 'm1b', preview: 'Sorry, one correction.', text: 'Sorry, one correction.', date: MOCK_NOW });
+    // The list has reloaded, and its row for the conversation is now m1b.
+    await waitFor(() => {
+      expect(list).toHaveBeenCalled();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    // Still reading, not thrown back to the list, and nothing typed is lost.
+    expect(app()).toHaveClass('app--reading');
+    expect(within(reader()).getByLabelText('Quick reply to Wanjiru')).toHaveValue('On my way');
   });
 
   it('replies in a panel at the bottom, with a way to the full editor', async () => {

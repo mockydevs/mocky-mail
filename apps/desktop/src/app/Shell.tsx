@@ -6,13 +6,15 @@ import type { AppError, Draft, Focus, Folder, Mailto, MessageDetail, MessageList
 import { AddAccountForm } from '../features/accounts/AddAccountForm';
 import { Welcome } from '../features/accounts/Welcome';
 import { ComposeView, type LeaveCompose } from '../features/compose/ComposeView';
-import { blankDraft, draftFromMessage, forwardDraft, replyDraft } from '../features/compose/seed';
+import { blankDraft, draftFromMessage, forwardDraft, replyDraft, type ComposeKind } from '../features/compose/seed';
 import { MessageList } from '../features/mailbox/MessageList';
 import {
   applyOverrides,
   INBOX_VIEW,
   neighbourAfterRemoval,
+  nextOverride,
   resolveSelection,
+  rowHolds,
   viewInfo,
   viewQuery,
   withPinned,
@@ -50,7 +52,7 @@ export const SEARCH_DEBOUNCE_MS = 300;
 
 type Screen =
   | { kind: 'mail' }
-  | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null; signature: boolean; unsaved: boolean }
+  | { kind: 'compose'; draft: Draft; title: string; compose: ComposeKind; attachmentsFrom: string | null; unsaved: boolean }
   | { kind: 'settings' }
   | { kind: 'contacts' }
   | { kind: 'calendar' }
@@ -106,6 +108,25 @@ interface Notice {
 
 function errorNotice(error: AppError, what: string): Notice {
   return { tone: 'error', title: `${what}: ${errorTitle(error.kind)}`, text: error.message };
+}
+
+function Toast({ notice, onDismiss }: { notice: Notice; onDismiss: () => void }) {
+  return (
+    <div className={`toast toast--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>
+      <div>
+        <p className="toast__title">{notice.title}</p>
+        <p className="toast__text">{notice.text}</p>
+      </div>
+      {notice.action && (
+        <button type="button" className="btn btn--secondary btn--small toast__action" onClick={notice.action.run}>
+          {notice.action.label}
+        </button>
+      )}
+      <button type="button" className="icon-btn" aria-label="Dismiss" onClick={onDismiss}>
+        <Icon name="close" />
+      </button>
+    </div>
+  );
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -181,7 +202,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     api.outboxEdit(id).then(
       (draft) => {
         // It has left the Outbox, so compose holds the only copy.
-        compose(draft, 'New message', null, false, true);
+        compose(draft, 'New message', 'draft', { unsaved: true });
       },
       (e: unknown) => {
         report(toAppError(e), 'Too late to undo; it is already sending');
@@ -191,8 +212,6 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const sendNotice = sendNoticeOf(sending.status, undoSend);
   const clearSending = sending.clear;
   const sendPhase = sending.status?.phase;
-  /** A send in progress or just finished takes the toast slot. */
-  const shownNotice = sendNotice ?? notice;
   useEffect(() => {
     if (sendPhase !== 'sent' && sendPhase !== 'waiting') return;
     const timer = window.setTimeout(clearSending, NOTICE_MS);
@@ -280,6 +299,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   /** Phones: the folder menu slid in over the list. */
   const [drawer, setDrawer] = useState(false);
   const [confirmForever, setConfirmForever] = useState<MessageListItem | null>(null);
+  // An account removed in Settings takes its folders with it. Staying on one
+  // of them would show an empty "Folder" and start new messages from an
+  // account that no longer exists, so go back to the inbox.
+  if (view.type === 'folder' && accountsLoad.status === 'ready' && !accounts.some((a) => a.id === view.accountId)) {
+    setView(INBOX_VIEW);
+    setFilter('all');
+    setSelectedId(null);
+    setPinned(null);
+  }
   const searchRef = useRef<HTMLInputElement>(null);
   const readerRef = useRef<HTMLElement>(null);
   const versionRef = useRef(page.version);
@@ -297,9 +325,20 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const outboxActive = (outbox ?? []).filter(isActive).length;
   const summary = syncSummary(Object.values(sync), accounts);
   const offline = summary.tone === 'warn' || summary.tone === 'error';
-  const message = loaded?.id === activeId ? loaded : null;
+  /**
+   * The message the reader shows: the one the user opened. A conversation
+   * row takes the id of a reply that arrives later; the reader stays on the
+   * opened message (and any reply being typed) until the user picks again.
+   */
+  const readerId = active && selectedId !== null && rowHolds(active, selectedId) ? selectedId : activeId;
+  const message = loaded?.id === readerId ? loaded : null;
   /** Phones show one pane: the list, or the message the user opened. */
-  const reading = selectedId !== null && activeId === selectedId;
+  const reading = selectedId !== null && activeId !== null;
+  /** The account a new message starts from: the open folder's, else the first. */
+  const composeFrom = () => {
+    const here = view.type === 'folder' ? accounts.find((a) => a.id === view.accountId) : undefined;
+    return (here ?? accounts[0])?.id ?? '';
+  };
 
   const closeMessage = () => {
     setSelectedId(null);
@@ -327,7 +366,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     onRollback?: () => void,
   ) => {
     const version = versionRef.current;
-    setOverrides((o) => ({ ...o, ...Object.fromEntries(ids.map((id) => [id, { ...o[id], ...patch, version, settled: false }])) }));
+    setOverrides((o) => ({ ...o, ...Object.fromEntries(ids.map((id) => [id, nextOverride(o[id], patch, version)])) }));
     call().then(
       () => {
         setOverrides((o) => {
@@ -377,14 +416,14 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     markReadRef.current = markRead;
   });
   useEffect(() => {
-    if (readPending === null || readPending !== activeId) return;
+    if (readPending === null || readPending !== readerId) return;
     const timer = window.setTimeout(() => {
       markReadRef.current(readPending);
     }, readDelayMs);
     return () => {
       window.clearTimeout(timer);
     };
-  }, [readPending, activeId, readDelayMs]);
+  }, [readPending, readerId, readDelayMs]);
 
   // Leaving compose for anywhere else goes through compose itself, which
   // asks to save or discard a message that has unsaved text.
@@ -479,35 +518,39 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     );
   };
 
-  /** Open compose; `attachmentsFrom` loads copies of that message's attachments into the draft. */
-  /** `signature`: add the account's signature (new, reply, forward; not a draft or message being edited again). */
-  /** `unsaved`: the draft exists nowhere else (taken back out of the Outbox). */
+  /**
+   * Open compose. `kind` says what is being written, which decides the
+   * signature (see ComposeView). `attachmentsFrom` loads copies of that
+   * message's attachments into the draft. `unsaved`: the draft exists nowhere
+   * else (taken back out of the Outbox).
+   */
   const compose = (
     draft: Draft,
     title: string,
-    attachmentsFrom: string | null = null,
-    signature = false,
-    unsaved = false,
+    kind: ComposeKind,
+    { attachmentsFrom = null, unsaved = false }: { attachmentsFrom?: string | null; unsaved?: boolean } = {},
   ) => {
-    show({ kind: 'compose', draft, title, attachmentsFrom, signature, unsaved });
+    show({ kind: 'compose', draft, title, compose: kind, attachmentsFrom, unsaved });
   };
 
+  /** Copies of a message's attachments are only worth loading when it has some. */
+  const filesOf = (m: MessageDetail) => ({ attachmentsFrom: m.attachments.length > 0 ? m.id : null });
+
   const forward = (m: MessageDetail) => {
-    compose(forwardDraft(m), 'Forward', m.attachments.length > 0 ? m.id : null, true);
+    compose(forwardDraft(m), 'Forward', 'forward', filesOf(m));
   };
 
   const continueDraft = (m: MessageDetail) => {
-    compose(draftFromMessage(m), 'Edit draft', m.attachments.length > 0 ? m.id : null);
+    compose(draftFromMessage(m), 'Edit draft', 'draft', filesOf(m));
   };
 
   const reply = (m: MessageDetail, all: boolean) => {
     const account = accounts.find((a) => a.id === m.accountId);
-    if (account) compose(replyDraft(m, account, all), all ? 'Reply all' : 'Reply', null, true);
+    if (account) compose(replyDraft(m, account, all), all ? 'Reply all' : 'Reply', 'reply');
   };
 
   const newMessage = () => {
-    const accountId = view.type === 'folder' ? view.accountId : (accounts[0]?.id ?? '');
-    compose(blankDraft(accountId), 'New message', null, true);
+    compose(blankDraft(composeFrom()), 'New message', 'new');
   };
 
   // mailto: links from other apps and web pages start a new message,
@@ -529,15 +572,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   useEffect(() => {
     openMailtoRef.current = () => {
       const link = pendingMailto.current;
-      const first = accounts[0];
-      if (!link || !first) return;
+      if (!link || accounts.length === 0) return;
       pendingMailto.current = null;
-      const accountId = view.type === 'folder' ? view.accountId : first.id;
       compose(
-        { ...blankDraft(accountId), to: link.to, cc: link.cc, bcc: link.bcc, subject: link.subject, bodyText: link.body },
+        { ...blankDraft(composeFrom()), to: link.to, cc: link.cc, bcc: link.bcc, subject: link.subject, bodyText: link.body },
         'New message',
-        null,
-        true,
+        'new',
       );
     };
   });
@@ -575,7 +615,6 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const handlerRef = useRef<(action: ShortcutAction, event: KeyboardEvent) => void>(() => undefined);
   useEffect(() => {
     handlerRef.current = (action, event) => {
-      if (help || confirmForever) return;
       if (action === 'close') {
         if (
           screen.kind === 'settings' ||
@@ -643,6 +682,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     const onKey = (event: KeyboardEvent) => {
       const action = shortcutFor(event);
       if (!action) return;
+      // A dialog is open (help, view source, manage folders, a confirmation…):
+      // keys belong to it, not to the mail underneath.
+      if (document.querySelector('[aria-modal="true"]')) return;
       // Stop the key from also being typed into a field the shortcut focuses
       // (for example the body of the reply that "r" opens).
       if (action !== 'close') event.preventDefault();
@@ -691,7 +733,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           key={JSON.stringify(screen.draft)}
           initial={screen.draft}
           attachmentsFrom={screen.attachmentsFrom}
-          addSignature={screen.signature}
+          kind={screen.compose}
           unsaved={screen.unsaved}
           onLeaveGuard={guardCompose}
           title={screen.title}
@@ -733,10 +775,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             setScreen({ kind: 'mail' });
           }}
           onWrite={(name, address) => {
-            const accountId = view.type === 'folder' ? view.accountId : (accounts[0]?.id ?? '');
             const clean = name.replace(/["\\<>]/g, '').trim();
             const to = clean ? `"${clean}" <${address}>` : address;
-            compose({ ...blankDraft(accountId), to }, 'New message', null, true);
+            compose({ ...blankDraft(composeFrom()), to }, 'New message', 'new');
           }}
           onFindMail={(address) => {
             setScreen({ kind: 'mail' });
@@ -758,8 +799,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             setScreen({ kind: 'mail' });
           }}
           onWrite={(to) => {
-            const accountId = view.type === 'folder' ? view.accountId : (accounts[0]?.id ?? '');
-            compose({ ...blankDraft(accountId), to }, 'New message', null, true);
+            compose({ ...blankDraft(composeFrom()), to }, 'New message', 'new');
           }}
         />
       );
@@ -787,7 +827,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             accounts={accounts}
             now={now()}
             onEdit={(draft) => {
-              compose(draft, 'Edit message', null, false, true);
+              compose(draft, 'Edit message', 'draft', { unsaved: true });
             }}
           />
         ) : (
@@ -826,6 +866,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             <ReadingPane
               ref={readerRef}
               item={active}
+              messageId={readerId}
               account={accounts.find((a) => a.id === active?.accountId)}
               role={roleOf(active)}
               alwaysLoadImages={settings?.remoteImages === 'allow'}
@@ -963,28 +1004,19 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       </div>
       <StatusBar sync={summary} outbox={outboxActive} accountCount={accounts.length} />
 
-      {shownNotice && (
-        <div className={`toast toast--${shownNotice.tone}`} role={shownNotice.tone === 'error' ? 'alert' : 'status'}>
-          <div>
-            <p className="toast__title">{shownNotice.title}</p>
-            <p className="toast__text">{shownNotice.text}</p>
-          </div>
-          {shownNotice.action && (
-            <button type="button" className="btn btn--secondary btn--small toast__action" onClick={shownNotice.action.run}>
-              {shownNotice.action.label}
-            </button>
+      {(notice ?? sendNotice) && (
+        // A send being followed and another message (Archived, an error) are
+        // both shown, stacked, so neither hides the other.
+        <div className="toasts">
+          {notice && (
+            <Toast
+              notice={notice}
+              onDismiss={() => {
+                setNotice(null);
+              }}
+            />
           )}
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="Dismiss"
-            onClick={() => {
-              setNotice(null);
-              sending.clear();
-            }}
-          >
-            <Icon name="close" />
-          </button>
+          {sendNotice && <Toast notice={sendNotice} onDismiss={sending.clear} />}
         </div>
       )}
       {managedAccount && (

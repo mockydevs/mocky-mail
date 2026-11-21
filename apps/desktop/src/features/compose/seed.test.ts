@@ -9,6 +9,7 @@ import {
   quote,
   replyDraft,
   replySubject,
+  signatureFor,
   toolbarActions,
 } from './seed';
 
@@ -75,6 +76,20 @@ describe('forward and edit', () => {
     expect(draft.bodyText).toContain('From: Wanjiru Kamau <wanjiru@fitout.example>');
     expect(draft.bodyText).toContain('Cc: Amina Hassan <amina@studio.example>, you@work.example');
     expect(draft.replyToMessageId).toBeNull();
+  });
+
+  it('reopens a draft with its Bcc, which only a draft still has', () => {
+    const hidden = [{ name: 'Amina Hassan', address: 'amina@studio.example' }, { name: null, address: 'boss@work.example' }];
+    expect(draftFromMessage({ ...byId('d1'), bcc: hidden }).bcc).toBe('Amina Hassan <amina@studio.example>, boss@work.example');
+    // A backend that does not send the field yet: no Bcc, not a crash.
+    expect(draftFromMessage(byId('d1')).bcc).toBe('');
+  });
+
+  it('picks the signature from what is being written, not from the draft', () => {
+    expect(signatureFor('new')).toBe('new');
+    expect(signatureFor('reply')).toBe('reply');
+    expect(signatureFor('forward')).toBe('reply');
+    expect(signatureFor('draft')).toBeNull();
   });
 
   it('reopens a draft, replacing the saved copy and keeping its threading', () => {

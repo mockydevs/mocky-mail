@@ -157,6 +157,51 @@ describe('calendar', () => {
     expect(screen.getByRole('region', { name: 'November 2026' })).toBeInTheDocument();
   });
 
+  it('closes the editor, not the calendar, on Escape with focus elsewhere', async () => {
+    const { user, region } = await openCalendar();
+    await user.click(region.getByRole('button', { name: 'New event' }));
+    const form = within(region.getByRole('form', { name: 'New event' }));
+    await user.type(form.getByRole('textbox', { name: 'Title' }), 'Half-written');
+    // Focus leaves the calendar: the page itself now has it.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    expect(document.body).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    expect(region.queryByRole('form', { name: 'New event' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'November 2026' })).toBeInTheDocument();
+    // With nothing open, Escape closes the calendar as before.
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('region', { name: 'November 2026' })).not.toBeInTheDocument();
+  });
+
+  it('says on a phone when the events could not be loaded', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query.startsWith('(max-width'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    try {
+      const { user, api } = renderApp();
+      await rows();
+      vi.spyOn(api, 'listEvents').mockRejectedValue({ kind: 'storage', message: 'The calendar file is locked.' });
+      await user.click(screen.getByRole('button', { name: 'Folders and accounts' }));
+      await user.click(screen.getByRole('button', { name: 'Calendar' }));
+      // The side pane, where errors used to go, is not on screen here.
+      const calendar = within(await screen.findByRole('region', { name: 'November 2026' }));
+      expect(await calendar.findByRole('alert')).toHaveTextContent(
+        'Your events could not be loaded. The calendar file is locked.',
+      );
+      expect(calendar.queryByText('Loading events…')).not.toBeInTheDocument();
+      expect(calendar.queryByRole('complementary', { name: 'Event details' })).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('says when an account has no calendar on its server', async () => {
     const { region } = await openCalendar({
       calendarStatus: [

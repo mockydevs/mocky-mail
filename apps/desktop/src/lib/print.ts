@@ -1,4 +1,5 @@
 import type { MailApi, Mailbox, MessageDetail } from '../api/types';
+import { EMAIL_CSP, EMAIL_CSP_REMOTE_IMAGES } from '../features/reader/SandboxedHtml';
 import { formatLongDate } from './format';
 
 function escape(text: string): string {
@@ -16,9 +17,12 @@ function people(list: readonly Mailbox[]): string {
 /**
  * A plain page for printing one message: subject, who and when, then the
  * body. The HTML body is already sanitized by the backend; plain text is
- * escaped. Nothing in it runs scripts.
+ * escaped. Nothing in it runs scripts. The page carries the reader's own
+ * policy, so printing never fetches remote images the reader is blocking;
+ * `allowRemoteImages` is the choice made for this message there.
  */
-export function printableHtml(message: MessageDetail): string {
+export function printableHtml(message: MessageDetail, allowRemoteImages = false): string {
+  const csp = allowRemoteImages ? EMAIL_CSP_REMOTE_IMAGES : EMAIL_CSP;
   const rows: [string, string][] = [
     ['From', message.from ? people([message.from]) : ''],
     ['To', people(message.to)],
@@ -32,7 +36,10 @@ export function printableHtml(message: MessageDetail): string {
   const files = message.attachments.map((a) => escape(a.fileName)).join(', ');
   const body =
     message.html ?? `<div style="white-space:pre-wrap;font:14px/1.5 Arial,sans-serif">${escape(message.text ?? '')}</div>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escape(message.subject)}</title>
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<meta name="referrer" content="no-referrer">
+<title>${escape(message.subject)}</title>
 <style>
 body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:24px}
 h1{font-size:20px;margin:0 0 12px}
@@ -59,8 +66,8 @@ function isAndroid(): boolean {
  * Print a message. Desktop: the system print dialog, for a page holding
  * only the message. Android: the system print screen (also "Save as PDF").
  */
-export async function printMessage(api: MailApi, message: MessageDetail): Promise<void> {
-  const html = printableHtml(message);
+export async function printMessage(api: MailApi, message: MessageDetail, allowRemoteImages = false): Promise<void> {
+  const html = printableHtml(message, allowRemoteImages);
   if (isAndroid()) {
     await api.printHtml(html, message.subject || 'Email');
     return;

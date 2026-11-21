@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
@@ -32,6 +32,11 @@ export interface ReaderActions {
 interface Props extends ReaderActions {
   /** The selected list item, with optimistic changes applied. */
   item: MessageListItem | null;
+  /**
+   * The message to show when it is not the row's own: the one the user opened
+   * in a conversation whose row has since been renamed by a newer reply.
+   */
+  messageId?: string | null;
   account: Account | undefined;
   role: FolderRole | null;
   alwaysLoadImages: boolean;
@@ -60,22 +65,30 @@ export const ReadingPane = forwardRef<HTMLElement, Props>(function ReadingPane(p
       </article>
     );
   }
-  return <MessageView key={item.id} {...props} item={item} ref={ref} />;
+  // Keyed by the message shown, not the row: a reply arriving in the open
+  // conversation must not start the reader (and a reply being typed) over.
+  const id = props.messageId ?? item.id;
+  return <MessageView key={id} {...props} item={item} id={id} ref={ref} />;
 });
 
-const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(function MessageView(props, ref) {
+const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id: string }>(function MessageView(props, ref) {
   const api = useMailApi();
-  const { item, account, role, alwaysLoadImages, theme, onLoaded } = props;
+  const { item, id, account, role, alwaysLoadImages, theme, onLoaded } = props;
   const [showImages, setShowImages] = useState(false);
   // Per message: dark mode can be switched off for one email that reads badly inverted.
   const [originalColours, setOriginalColours] = useState(false);
   const allowRemote = alwaysLoadImages || showImages;
-  const loaded = useLoad(`message:${item.id}:${String(allowRemote)}`, 0, () =>
-    api.getMessage(item.id, allowRemote).then((m) => {
-      onLoaded(m);
-      return m;
-    }),
-  );
+  // With or without remote images it is the same message: the image variant
+  // loads as a new revision, so the message stays on screen meanwhile and a
+  // quick reply being typed (or an opened earlier message) is not thrown away.
+  const loaded = useLoad(`message:${id}`, Number(allowRemote), () => api.getMessage(id, allowRemote));
+  // Tell the shell what is on screen once it has settled. From an effect, so
+  // a slow answer for a message the user has already left is never reported;
+  // a layout effect, so the shell knows before a key (r, a, f) can be pressed.
+  const settled = loaded.status === 'ready' ? loaded.value : null;
+  useLayoutEffect(() => {
+    onLoaded(settled);
+  }, [settled, onLoaded]);
   const [notice, setNotice] = useState<{ error: AppError | null; text: string | null }>({ error: null, text: null });
   // The attachment shown full screen, if any.
   const [viewing, setViewing] = useState<AttachmentMeta | null>(null);
@@ -227,7 +240,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem }>(f
       label: 'Print',
       icon: 'print',
       run: () => {
-        printMessage(api, message).catch(failed);
+        printMessage(api, message, allowRemote).catch(failed);
       },
     },
     {

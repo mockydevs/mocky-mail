@@ -21,6 +21,7 @@ export function createTauriMailApi(): MailApi {
     addAccount: (input) => call('add_account', { input }),
     addOAuthAccount: (input) => call('add_oauth_account', { input }),
     updateAccount: (id, patch) => call('update_account', { id, patch }),
+    reconnectAccount: (id) => call('reconnect_account', { id }),
     removeAccount: (id) => call('remove_account', { id }),
     listAccounts: () => call('list_accounts'),
     listFolders: (accountId) => call('list_folders', { accountId }),

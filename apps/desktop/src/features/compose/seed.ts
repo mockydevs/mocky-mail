@@ -146,6 +146,8 @@ export function draftFromMessage(message: MessageDetail, attachments: DraftAttac
     ...blankDraft(message.accountId),
     to: formatMailboxes(message.to),
     cc: formatMailboxes(message.cc),
+    // Only a draft still has its Bcc; received mail never carries one.
+    bcc: formatMailboxes(message.bcc ?? []),
     subject: message.subject,
     bodyText: bodyTextOf(message),
     inReplyTo: message.inReplyTo,
@@ -153,6 +155,22 @@ export function draftFromMessage(message: MessageDetail, attachments: DraftAttac
     attachments,
     draftMessageId: message.messageIdHeader,
   };
+}
+
+/**
+ * What compose was opened for. It is said outright, not guessed from the
+ * draft: a forward of a message without attachments looks like a new message.
+ */
+export type ComposeKind = 'new' | 'reply' | 'forward' | 'draft';
+
+/**
+ * Which of the account's default signatures a message starts with. A draft
+ * (or a message taken back from the Outbox) already has whatever it was
+ * written with, so it gets none.
+ */
+export function signatureFor(kind: ComposeKind): 'new' | 'reply' | null {
+  if (kind === 'draft') return null;
+  return kind === 'new' ? 'new' : 'reply';
 }
 
 export type ToolbarAction = 'reply' | 'replyAll' | 'forward' | 'edit' | 'archive' | 'delete' | 'deleteForever' | 'flag' | 'read';

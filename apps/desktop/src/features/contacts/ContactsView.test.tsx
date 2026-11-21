@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react';
+import { vi } from 'vitest';
 
 import type { Contact } from '../../api/types';
 import { renderApp, rows } from '../../test/renderApp';
@@ -61,6 +62,44 @@ describe('contacts', () => {
     await user.type(edit.getByRole('textbox', { name: 'Company' }), 'Kamau & Sons');
     await user.click(edit.getByRole('button', { name: 'Save contact' }));
     expect(await region.findByText('Kamau & Sons')).toBeInTheDocument();
+  });
+
+  it('keeps a saved contact on screen when the search does not match it', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query.startsWith('(max-width'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    try {
+      const { user, api } = renderApp({ contacts: [PETER] });
+      await rows();
+      await user.click(screen.getByRole('button', { name: 'Folders and accounts' }));
+      await user.click(screen.getByRole('button', { name: 'Contacts' }));
+      const region = within(screen.getByRole('region', { name: 'Contacts' }));
+      await user.type(region.getByRole('searchbox', { name: 'Search contacts' }), 'peter');
+      await region.findByRole('button', { name: /Peter Mwangi/ });
+
+      await user.click(region.getByRole('button', { name: 'New contact' }));
+      const form = within(region.getByRole('form', { name: 'New contact' }));
+      await user.type(form.getByRole('textbox', { name: 'Name' }), 'Zawadi Achieng');
+      await user.click(form.getByRole('button', { name: 'Save contact' }));
+
+      // The search still says "peter": the new contact is not in the list,
+      // but its card is shown, with the way back.
+      const card = within(await region.findByRole('article', { name: 'Zawadi Achieng' }));
+      await waitFor(async () => {
+        expect(await api.listContacts('zawadi')).toHaveLength(1);
+      });
+      expect(region.getByRole('article', { name: 'Zawadi Achieng' })).toBeInTheDocument();
+      await user.click(card.getByRole('button', { name: 'Back to contacts' }));
+      expect(region.getByRole('searchbox', { name: 'Search contacts' })).toHaveValue('peter');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('deletes after asking', async () => {

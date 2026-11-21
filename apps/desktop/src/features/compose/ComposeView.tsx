@@ -9,7 +9,7 @@ import { Modal } from '../../ui/Modal';
 import { RecipientField } from './RecipientField';
 import { parseRecipients } from './recipients';
 import { link, prefixLines, wrap, type Edit } from './formatting';
-import { signatureBlock, swapSignature } from './seed';
+import { signatureBlock, signatureFor, swapSignature, type ComposeKind } from './seed';
 import { SandboxedHtml } from '../reader/SandboxedHtml';
 
 interface Props {
@@ -21,8 +21,11 @@ interface Props {
   offlineNote: boolean;
   onClose: () => void;
   onSent: (entry: OutboxEntry) => void;
-  /** Add the From account's signature (new messages, replies, forwards), and swap it with the account. */
-  addSignature?: boolean;
+  /**
+   * What is being written. New messages, replies and forwards get the From
+   * account's signature (swapped with the account); a draft is left as it is.
+   */
+  kind?: ComposeKind;
   /**
    * The message exists nowhere else (it was taken back out of the Outbox),
    * so closing asks first even when nothing was typed.
@@ -61,7 +64,7 @@ export function ComposeView({
   offlineNote,
   onClose,
   onSent,
-  addSignature = false,
+  kind = 'draft',
   unsaved: startsUnsaved = false,
   onLeaveGuard,
 }: Props) {
@@ -118,8 +121,8 @@ export function ComposeView({
   const [signatureId, setSignatureId] = useState<string | null>(null);
   // Its picture, previewed under the body; it is added when the message is sent.
   const [signatureImage, setSignatureImage] = useState<{ text: string; image: SignatureImage } | null>(null);
-  // Replies and forwards start with the reply signature.
-  const isReply = initial.inReplyTo !== null || attachmentsFrom !== null;
+  // New messages start with one default signature, replies and forwards with the other.
+  const signatureKind = signatureFor(kind);
 
   /** Put signature `id` (null: none) in the body in place of the current one. */
   const applySignature = (set: SignatureSet, id: string | null, atStart: boolean) => {
@@ -135,13 +138,13 @@ export function ComposeView({
   };
 
   useEffect(() => {
-    if (!addSignature) return;
+    if (signatureKind === null) return;
     let active = true;
     api.listSignatures(draft.accountId).then(
       (set) => {
         if (!active) return;
         setSignatures(set);
-        applySignature(set, isReply ? set.defaultReply : set.defaultNew, !signatureLoaded.current);
+        applySignature(set, signatureKind === 'reply' ? set.defaultReply : set.defaultNew, !signatureLoaded.current);
         signatureLoaded.current = true;
       },
       () => undefined,
@@ -150,7 +153,7 @@ export function ComposeView({
       active = false;
     };
     // applySignature only reads refs and setters; reloading on its identity would loop.
-  }, [api, addSignature, draft.accountId, isReply]);
+  }, [api, signatureKind, draft.accountId]);
 
   const dirty = unsaved || JSON.stringify(draft) !== JSON.stringify(baseline);
   const account = accounts.find((a) => a.id === draft.accountId);

@@ -82,6 +82,37 @@ describe('conversations', () => {
     });
   });
 
+  it('stays on the open message, with the reply being typed, when a new reply arrives', async () => {
+    const { user, api } = renderApp({ messages });
+    const list = await rows();
+    await user.click(list.getByRole('button', { name: /Re: Kitchen quote/ }));
+    await within(reader()).findByText('Monday is fine.');
+    const box = within(reader()).getByRole('textbox', { name: /^Quick reply/ });
+    await user.type(box, 'Half a thought');
+
+    // The conversation row is now named after this newer message.
+    api.receive({
+      ...ANSWER,
+      id: 't4',
+      preview: 'One more thing.',
+      text: 'One more thing.',
+      date: 1764000100,
+      messageIdHeader: '<kq-4@client.example>',
+      inReplyTo: '<kq-3@client.example>',
+    });
+    const row = await (await rows()).findByRole('button', { name: /One more thing/ });
+    expect(within(row).getByLabelText('3 messages in this conversation')).toBeInTheDocument();
+
+    expect(row).toHaveAttribute('aria-current', 'true');
+    expect(within(reader()).getByText('Monday is fine.')).toBeInTheDocument();
+    expect(within(reader()).getByRole('textbox', { name: /^Quick reply/ })).toBe(box);
+    expect(box).toHaveValue('Half a thought');
+
+    // Picking the row again shows the new message.
+    await user.click(row);
+    expect(await within(reader()).findByText('One more thing.', { selector: '.reader__text *' })).toBeInTheDocument();
+  });
+
   it('can be switched off in Settings', async () => {
     renderApp({ messages, settings: { theme: 'system', remoteImages: 'block', notifications: false, sound: false, undoSendSecs: 5, markRead: 'open', threads: false, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15, closeToTray: true, startAtLogin: false, device: { tray: true, startAtLogin: true } } });
     const list = await rows();

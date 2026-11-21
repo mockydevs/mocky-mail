@@ -14,13 +14,15 @@ describe('shortcutFor', () => {
     expect(SHORTCUTS).toHaveLength(14);
   });
 
-  it('ignores keys while typing, except Esc', () => {
+  it('ignores keys while typing, Esc included, so it cannot discard what was typed', () => {
     const input = document.createElement('input');
     const textarea = document.createElement('textarea');
-    for (const target of [input, textarea]) {
+    const select = document.createElement('select');
+    for (const target of [input, textarea, select]) {
       expect(press('r', target)).toBeNull();
-      expect(press('Escape', target)).toBe('close');
+      expect(press('Escape', target)).toBeNull();
     }
+    expect(press('Escape', document.createElement('button'))).toBe('close');
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     expect(press('j', checkbox)).toBe('next');

@@ -161,28 +161,34 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
   const [revision, setRevision] = useState(0);
   const [pane, setPane] = useState<Pane>({ kind: 'day' });
   const [error, setError] = useState<AppError | null>(null);
+  // Why the events could not be loaded; shown where the events would be,
+  // which every layout has on screen (a phone hides the side pane).
+  const [loadError, setLoadError] = useState<AppError | null>(null);
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(true);
   const [deleting, setDeleting] = useState<CalendarEvent | null>(null);
 
   // Escape (and the phone's Back) closes an event or the editor first.
-  const root = useRef<HTMLElement>(null);
   const open = useRef(false);
   useEffect(() => {
     open.current = pane.kind !== 'day' && deleting === null;
   });
   useEffect(() => {
-    const section = root.current;
+    // Heard on the way down from the document, wherever focus is (the
+    // sidebar, the page itself), and before the app's own Esc, which would
+    // close the whole calendar and with it the event being edited.
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key !== 'Escape' || !open.current) return;
+      // Another dialog on top answers Esc itself.
+      if (document.querySelector('[aria-modal="true"]')) return;
       ev.preventDefault();
       ev.stopPropagation();
       setError(null);
       setPane({ kind: 'day' });
     };
-    section?.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     return () => {
-      section?.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
     };
   }, []);
 
@@ -196,10 +202,12 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     const to = seconds(mode === 'month' ? addDays(last, 1) : addMonths(month, 1));
     api.listEvents(from, to).then(
       (list) => {
-        if (live) setEvents(list);
+        if (!live) return;
+        setEvents(list);
+        setLoadError(null);
       },
       (e: unknown) => {
-        if (live) setError(toAppError(e));
+        if (live) setLoadError(toAppError(e));
       },
     );
     api.listCalendars().then(
@@ -340,7 +348,7 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
   );
 
   return (
-    <section ref={root} className="calendar" aria-labelledby={`${id}-title`}>
+    <section className="calendar" aria-labelledby={`${id}-title`}>
       <header className="calendar__head">
         <h1 id={`${id}-title`} className="calendar__title">
           {MONTH.format(month)}
@@ -446,10 +454,17 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
       <div className="calendar__body">
         {showMain && (
           <div className="calendar__main">
-            {events === null ? (
-              <p className="muted calendar__empty" role="status">
-                Loading events…
+            {loadError && (
+              <p className="form-error" role="alert">
+                Your events could not be loaded. {loadError.message}
               </p>
+            )}
+            {events === null ? (
+              loadError === null && (
+                <p className="muted calendar__empty" role="status">
+                  Loading events…
+                </p>
+              )
             ) : mode === 'month' ? (
               <div className="month" role="grid" aria-label={MONTH.format(month)}>
                 <div className="month__row month__row--head" role="row">

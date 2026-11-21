@@ -122,6 +122,22 @@ describe('signature in the app', () => {
     });
     expect(form.getByRole('combobox', { name: 'Signature' })).toHaveDisplayValue('Short');
   });
+
+  it('starts a forward with the reply signature, even when nothing is attached', async () => {
+    const SHORT = { id: 'short', name: 'Short', html: 'Don', text: 'Don' };
+    const FULL = { id: 'full', name: 'Full', html: WORK.html, text: WORK.text };
+    const set = { items: [FULL, SHORT], defaultNew: 'full', defaultReply: 'short' };
+    const { user } = renderApp({ signatureSets: { work: set, personal: set } });
+    // Lunch on Friday? has no attachments, so nothing but the kind says it is a forward.
+    await user.click((await rows()).getByRole('button', { name: /Brian Otieno/ }));
+    await within(reader()).findByRole('heading', { name: 'Lunch on Friday?' });
+    await user.click(within(reader()).getByRole('button', { name: 'Forward' }));
+    const form = within(await screen.findByRole('form', { name: 'Forward' }));
+    await waitFor(() => {
+      expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain(signatureBlock(SHORT.text));
+    });
+    expect(form.getByRole('combobox', { name: 'Signature' })).toHaveDisplayValue('Short');
+  });
 });
 
 describe('signature picture', () => {

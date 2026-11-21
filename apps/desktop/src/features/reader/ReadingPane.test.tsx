@@ -2,7 +2,7 @@ import { vi } from 'vitest';
 import { screen, within } from '@testing-library/react';
 
 import { MOCK_MESSAGES } from '../../api/mock/mockData';
-import { reader, renderApp, rows } from '../../test/renderApp';
+import { deferred, reader, renderApp, rows } from '../../test/renderApp';
 
 describe('reading pane', () => {
   it('blocks remote images until asked, then reloads with them', async () => {
@@ -17,6 +17,31 @@ describe('reading pane', () => {
       expect(shown.getAttribute('srcdoc')).toContain('https://ci.example/badge.svg');
     });
     expect(within(reader()).queryByRole('button', { name: /Show images/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the message, and a reply being typed, on screen while the images load', async () => {
+    const { user, api } = renderApp();
+    await user.click((await rows()).getByRole('button', { name: /Build server/ }));
+    await within(reader()).findByTitle('Message: Nightly build passed on main');
+    const box = within(reader()).getByRole('textbox', { name: /^Quick reply/ });
+    await user.type(box, 'Thanks for the build');
+
+    // Hold the version with images back, to look at the pane meanwhile.
+    const held = deferred();
+    const getMessage = api.getMessage.bind(api);
+    vi.spyOn(api, 'getMessage').mockImplementation(async (id, allowRemote) => {
+      if (allowRemote) await held.promise;
+      return getMessage(id, allowRemote);
+    });
+    await user.click(within(reader()).getByRole('button', { name: 'Show images (1 blocked)' }));
+    expect(reader()).not.toHaveAttribute('aria-busy');
+    expect(within(reader()).getByRole('textbox', { name: /^Quick reply/ })).toBe(box);
+
+    held.resolve();
+    await vi.waitFor(() => {
+      expect(within(reader()).getByTitle('Message: Nightly build passed on main').getAttribute('srcdoc')).toContain('badge.svg');
+    });
+    expect(box).toHaveValue('Thanks for the build');
   });
 
   it('shows HTML mail dark in dark mode, with a per-email switch back to original colours', async () => {

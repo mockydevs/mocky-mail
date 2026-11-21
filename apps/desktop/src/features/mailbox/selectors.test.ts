@@ -5,6 +5,7 @@ import {
   emptyCopy,
   initials,
   neighbourAfterRemoval,
+  nextOverride,
   resolveSelection,
   withPinned,
   sortFolders,
@@ -66,10 +67,21 @@ describe('views', () => {
 
 describe('selection', () => {
   const items = [item('a'), item('b'), item('c')];
-  it('keeps a visible selection and falls back to the first', () => {
+  it('starts on the first message and keeps a visible selection', () => {
+    expect(resolveSelection(items, null)).toBe('a');
     expect(resolveSelection(items, 'b')).toBe('b');
-    expect(resolveSelection(items, 'x')).toBe('a');
+    expect(resolveSelection([], null)).toBeNull();
+  });
+
+  it('does not jump to the first message when the chosen one is gone', () => {
+    expect(resolveSelection(items, 'x')).toBeNull();
     expect(resolveSelection([], 'a')).toBeNull();
+  });
+
+  it('follows a conversation whose row was renamed by a newer reply', () => {
+    const grown = [item('a'), item('b2', { threadCount: 2, threadIds: ['b2', 'b'] }), item('c')];
+    expect(resolveSelection(grown, 'b')).toBe('b2');
+    expect(resolveSelection(grown, 'b2')).toBe('b2');
   });
 
   it('moves to the next message after a removal, else the previous', () => {
@@ -101,6 +113,27 @@ describe('applyOverrides', () => {
     const overrides = { a: { unread: false, version: 1, settled: true } };
     expect(applyOverrides(items, overrides, 1)[0]?.unread).toBe(false);
     expect(applyOverrides(items, overrides, 2)[0]?.unread).toBe(true);
+  });
+});
+
+describe('nextOverride', () => {
+  it('builds on a change that is still pending', () => {
+    const pending = { unread: false, version: 3, settled: false };
+    expect(nextOverride(pending, { flagged: true }, 3)).toEqual({ unread: false, flagged: true, version: 3, settled: false });
+    // Settled, but the list has not been reloaded since: it still applies.
+    expect(nextOverride({ ...pending, settled: true }, { flagged: true }, 3).unread).toBe(false);
+  });
+
+  it('does not bring back an archive the list has already caught up with', () => {
+    const archived = { removed: true, version: 3, settled: true };
+    const flagged = nextOverride(archived, { flagged: true }, 5);
+    expect(flagged).toEqual({ flagged: true, version: 5, settled: false });
+    // The message, listed again, stays visible while the flag is saved.
+    expect(applyOverrides([item('a')], { a: flagged }, 5)).toEqual([item('a', { flagged: true })]);
+  });
+
+  it('starts fresh for a message with no change', () => {
+    expect(nextOverride(undefined, { removed: true }, 1)).toEqual({ removed: true, version: 1, settled: false });
   });
 });
 

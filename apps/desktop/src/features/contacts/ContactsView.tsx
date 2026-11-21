@@ -19,7 +19,16 @@ interface Props {
   onFindMail: (address: string) => void;
 }
 
-type Pane = { kind: 'none' } | { kind: 'view'; id: string } | { kind: 'edit'; input: ContactInput };
+/**
+ * The right-hand pane. A contact being viewed is remembered as it was when
+ * opened (`shown`): after a save, or when the search no longer matches it, it
+ * is not in the list to look up, and the pane must not go blank (on a phone
+ * that is a screen with no way back).
+ */
+type Pane =
+  | { kind: 'none' }
+  | { kind: 'view'; id: string; shown: Contact }
+  | { kind: 'edit'; input: ContactInput; from: Contact | null };
 
 const EMPTY: Omit<ContactInput, 'accountId'> = {
   name: '',
@@ -104,10 +113,12 @@ export function ContactsView({ accounts, phone, onClose, onWrite, onFindMail }: 
     setPane({
       kind: 'edit',
       input: { ...EMPTY, accountId: syncedBooks[0]?.id ?? null, ...prefill },
+      from: null,
     });
   };
 
-  const selected = pane.kind === 'view' ? (contacts ?? []).find((c) => c.id === pane.id) : undefined;
+  // The list's copy is the fresh one; fall back to the copy the pane opened with.
+  const selected = pane.kind === 'view' ? ((contacts ?? []).find((c) => c.id === pane.id) ?? pane.shown) : undefined;
   const showList = !phone || pane.kind === 'none';
   const showPane = !phone || pane.kind !== 'none';
 
@@ -193,7 +204,7 @@ export function ContactsView({ accounts, phone, onClose, onWrite, onFindMail }: 
                           aria-current={pane.kind === 'view' && pane.id === c.id ? 'true' : undefined}
                           onClick={() => {
                             setError(null);
-                            setPane({ kind: 'view', id: c.id });
+                            setPane({ kind: 'view', id: c.id, shown: c });
                           }}
                         >
                           <Avatar name={c.name} address={c.emails[0] ?? c.name} />
@@ -271,6 +282,7 @@ export function ContactsView({ accounts, phone, onClose, onWrite, onFindMail }: 
                       emails: [...selected.emails, ''],
                       phones: [...selected.phones, ''],
                     },
+                    from: selected,
                   });
                 }}
                 onDeleted={() => {
@@ -288,11 +300,11 @@ export function ContactsView({ accounts, phone, onClose, onWrite, onFindMail }: 
                 initial={pane.input}
                 choices={syncedBooks}
                 onCancel={() => {
-                  setPane(pane.input.id ? { kind: 'view', id: pane.input.id } : { kind: 'none' });
+                  setPane(pane.from ? { kind: 'view', id: pane.from.id, shown: pane.from } : { kind: 'none' });
                 }}
                 onSaved={(contact) => {
                   setRevision((r) => r + 1);
-                  setPane({ kind: 'view', id: contact.id });
+                  setPane({ kind: 'view', id: contact.id, shown: contact });
                 }}
               />
             )}

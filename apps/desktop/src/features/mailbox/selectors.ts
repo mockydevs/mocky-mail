@@ -94,10 +94,21 @@ export function unifiedCounts(folders: readonly Folder[]): UnifiedCounts {
   return { inboxUnread, drafts };
 }
 
-/** Keep the chosen message if it is still visible, otherwise the first one. */
+/** Whether a list row is, or (as a conversation) contains, message `id`. */
+export function rowHolds(row: MessageListItem, id: string): boolean {
+  return row.id === id || (row.threadIds?.includes(id) ?? false);
+}
+
+/**
+ * The row to show as selected. With nothing chosen yet it is the first row.
+ * A chosen message keeps its row even when the row's id changes: a
+ * conversation row is named after its newest message, so a reply arriving
+ * renames it. A chosen message that is no longer listed selects nothing;
+ * jumping to the first row would swap the message under the reader.
+ */
 export function resolveSelection(items: readonly MessageListItem[], selectedId: string | null): string | null {
-  if (selectedId !== null && items.some((m) => m.id === selectedId)) return selectedId;
-  return items[0]?.id ?? null;
+  if (selectedId === null) return items[0]?.id ?? null;
+  return items.find((m) => rowHolds(m, selectedId))?.id ?? null;
 }
 
 /**
@@ -128,6 +139,26 @@ export interface Override {
   settled: boolean;
 }
 
+/** A settled change only counts until the next page version, which already contains it. */
+function inForce(o: Override, version: number): boolean {
+  return !(o.settled && version > o.version);
+}
+
+/**
+ * A new optimistic change on top of what is still pending for the message.
+ * An override the list has already caught up with is not carried over:
+ * otherwise flagging a message that was archived earlier (and is listed
+ * again) would bring back `removed` and hide it.
+ */
+export function nextOverride(
+  previous: Override | undefined,
+  patch: Pick<Override, 'unread' | 'flagged' | 'removed'>,
+  version: number,
+): Override {
+  const pending = previous && inForce(previous, version) ? previous : {};
+  return { ...pending, ...patch, version, settled: false };
+}
+
 /**
  * Apply optimistic changes. A settled change only applies until the next
  * page version, which already contains it.
@@ -140,7 +171,7 @@ export function applyOverrides(
   const out: MessageListItem[] = [];
   for (const item of items) {
     const o = overrides[item.id];
-    if (!o || (o.settled && version > o.version)) {
+    if (!o || !inForce(o, version)) {
       out.push(item);
       continue;
     }

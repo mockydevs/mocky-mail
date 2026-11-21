@@ -80,14 +80,14 @@ function isActivatable(target: EventTarget | null): boolean {
 
 /**
  * The action for a key press, or null. Typing in a field never triggers a
- * shortcut (except Esc), modifier combinations are left to the system, and
- * Enter on a focused button keeps its normal meaning.
+ * shortcut, modifier combinations are left to the system, and Enter on a
+ * focused button keeps its normal meaning. Esc counts as typing too: in a
+ * field it must not close the screen and throw away what was typed there.
  */
 export function shortcutFor(input: KeyInput): ShortcutAction | null {
   if (input.ctrlKey || input.metaKey || input.altKey) return null;
   const action = BY_KEY.get(input.key) ?? null;
   if (action === null) return null;
-  if (action === 'close') return action;
   if (isTyping(input.target)) return null;
   if (action === 'open' && isActivatable(input.target)) return null;
   return action;
