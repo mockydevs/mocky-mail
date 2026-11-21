@@ -19,7 +19,7 @@ export const EMAIL_CSP_REMOTE_IMAGES = "default-src 'none'; img-src cid: data: h
 
 /** Base styles. Emails are designed for a light page, so they always start from one. */
 const LIGHT_STYLE =
-  ':root{color-scheme:light}html,body{margin:0;background:#fff;color:#2b2b28}body{padding:16px 24px;font:15px/1.6 Inter,system-ui,sans-serif;overflow-wrap:anywhere}img{max-width:100%;height:auto}';
+  ':root{color-scheme:light}html,body{margin:0;background:#fff;color:#2b2b28}body{padding:16px 24px;font:15px/1.6 Inter,system-ui,sans-serif;overflow-wrap:break-word}img{max-width:100%;height:auto}';
 
 /**
  * Dark theme: render the light email, then invert the whole page and turn the

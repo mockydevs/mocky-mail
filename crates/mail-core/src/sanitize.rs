@@ -21,6 +21,8 @@ use serde::Serialize;
 
 use crate::message::InlineImage;
 
+mod stylesheet;
+
 /// Whether images and other content from the internet may load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RemoteContent {
@@ -86,6 +88,44 @@ const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
     "border-spacing",
     "list-style-type",
     "display",
+    // Table and text layout email relies on.
+    "table-layout",
+    "word-break",
+    "word-wrap",
+    "overflow-wrap",
+    "word-spacing",
+    "text-indent",
+    "text-overflow",
+    "direction",
+    "float",
+    "clear",
+    "min-height",
+    "box-sizing",
+    "font-variant",
+    "list-style",
+    "list-style-position",
+    "border-top-color",
+    "border-right-color",
+    "border-bottom-color",
+    "border-left-color",
+    "border-top-style",
+    "border-right-style",
+    "border-bottom-style",
+    "border-left-style",
+    "border-top-width",
+    "border-right-width",
+    "border-bottom-width",
+    "border-left-width",
+    "border-top-left-radius",
+    "border-top-right-radius",
+    "border-bottom-left-radius",
+    "border-bottom-right-radius",
+    // Rounded cards clip their corners with this; preheaders hide with it.
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "opacity",
+    "visibility",
 ];
 
 fn is_remote(url: &str) -> bool {
@@ -228,14 +268,33 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
         // Links open as popups, which the app hands to the system browser;
         // the viewer itself never navigates.
         .set_tag_attribute_value("a", "target", "_blank")
-        .add_generic_attributes(["style"])
+        // `class` lets the email's own stylesheet (cleaned separately)
+        // reach its elements; the rest is how email has always been laid out.
+        .add_generic_attributes(["style", "class", "align", "valign", "dir", "role"])
         .filter_style_properties(ALLOWED_STYLE_PROPERTIES.iter().copied().collect())
         .rm_tag_attributes("img", ["srcset"])
-        // Old-style cell colours, still common in email buttons and banners.
-        .add_tag_attributes("table", ["bgcolor"])
-        .add_tag_attributes("tr", ["bgcolor"])
-        .add_tag_attributes("td", ["bgcolor"])
-        .add_tag_attributes("th", ["bgcolor"])
+        .add_tag_attributes("img", ["border"])
+        // Table layout: without these a full-width email shrinks to its
+        // content and sits against the left edge, as in no other client.
+        .add_tag_attributes(
+            "table",
+            [
+                "width",
+                "height",
+                "border",
+                "cellpadding",
+                "cellspacing",
+                "bgcolor",
+            ],
+        )
+        .add_tag_attributes("tr", ["height", "bgcolor"])
+        .add_tag_attributes("td", ["width", "height", "nowrap", "bgcolor"])
+        .add_tag_attributes("th", ["width", "height", "nowrap", "bgcolor"])
+        .add_tag_attributes("col", ["width"])
+        .add_tag_attributes("colgroup", ["width"])
+        // Old email still sets its text with <font>.
+        .add_tags(["font", "big"])
+        .add_tag_attributes("font", ["color", "size", "face"])
         .attribute_filter(move |element, attribute, value| {
             if remote == RemoteContent::Block
                 && element == "img"
@@ -246,7 +305,13 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
                 return None;
             }
             match attribute {
-                "bgcolor" => is_plain_colour_value(value).then_some(Cow::Borrowed(value)),
+                "bgcolor" | "color" => is_plain_colour_value(value).then_some(Cow::Borrowed(value)),
+                // Sizes are numbers or percentages, nothing else.
+                "width" | "height" | "border" | "cellpadding" | "cellspacing" | "size" => value
+                    .trim()
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '%' | '.' | '+' | '-'))
+                    .then_some(Cow::Borrowed(value)),
                 // Runs before the CSS property allow-list, which then
                 // removes whatever is left of `background`.
                 "style" => Some(keep_background_colour(value)),
@@ -254,7 +319,19 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
             }
         });
 
-    let html = builder.clean(html).to_string();
+    // The email's stylesheets, cleaned on their own and put back in front
+    // of the body: the HTML sanitizer drops <style> blocks entirely.
+    let sheet: Vec<String> = stylesheet::style_blocks(html)
+        .into_iter()
+        .map(stylesheet::clean_stylesheet)
+        .filter(|css| !css.is_empty())
+        .collect();
+    let body = builder.clean(html).to_string();
+    let html = if sheet.is_empty() {
+        body
+    } else {
+        format!("<style>{}</style>{body}", sheet.join(""))
+    };
     SanitizedHtml {
         html,
         blocked_remote_images: blocked.load(Ordering::Relaxed),
@@ -326,21 +403,51 @@ mod tests {
     }
 
     #[test]
-    fn removes_forms_iframes_svg_and_style_blocks() {
+    fn removes_forms_iframes_svg_and_unsafe_styles() {
         let out = clean(
-            r#"<form action="https://evil.example"><input name="password"></form><iframe src="https://evil.example"></iframe><svg><script>x</script></svg><style>body{display:none}</style><p>ok</p>"#,
+            r#"<form action="https://evil.example"><input name="password"></form><iframe src="https://evil.example"></iframe><svg><script>x</script></svg><style>@import url(https://evil.example/a.css); p{color:red;background:url(https://evil.example/t.gif)}</style><p>ok</p>"#,
         );
         for banned in [
             "<form",
             "<input",
             "<iframe",
             "<svg",
-            "<style",
+            "<script",
             "evil.example",
+            "@import",
         ] {
             assert!(!out.contains(banned), "{banned} survived: {out}");
         }
         assert!(out.contains("<p>ok</p>"));
+        // What is safe in the stylesheet stays, so the email keeps its look.
+        assert!(out.starts_with("<style>p{color:red}</style>"), "{out}");
+    }
+
+    #[test]
+    fn keeps_the_table_layout_email_is_built_with() {
+        // The shape of a typical receipt: a full-width wrapper centring a card.
+        let out = clean(
+            r##"<table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr><td align="center" valign="top" class="outer"><table width="100%" style="max-width:640px" bgcolor="#ffffff"><tr><td width="60%" nowrap>Amount</td></tr></table></td></tr></table>"##,
+        );
+        for kept in [
+            r#"width="100%""#,
+            r#"cellpadding="0""#,
+            r#"cellspacing="0""#,
+            r#"align="center""#,
+            r#"valign="top""#,
+            r#"class="outer""#,
+            r#"role="presentation""#,
+            r#"width="60%""#,
+            "nowrap",
+            "max-width:640px",
+        ] {
+            assert!(out.contains(kept), "{kept} was dropped: {out}");
+        }
+        // Only numbers go in a size.
+        assert!(
+            !clean(r#"<table width="expression(1)"><tr><td>x</td></tr></table>"#)
+                .contains("expression")
+        );
     }
 
     #[test]
