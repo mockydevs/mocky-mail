@@ -1,6 +1,7 @@
 import { screen, within } from '@testing-library/react';
 import { vi } from 'vitest';
 
+import type { ServerSuggestion } from '../../api/types';
 import { renderApp, rows } from '../../test/renderApp';
 
 const form = () => screen.getByRole('form', { name: 'Add an email account' });
@@ -17,16 +18,16 @@ describe('adding an account', () => {
     expect(within(form()).getByRole('button', { name: 'Continue with Google' })).toHaveClass('btn--primary');
     expect(within(form()).queryByRole('button', { name: 'Continue with Microsoft' })).not.toBeInTheDocument();
     expect(within(form()).getByText(/Gmail needs an app password here/)).toBeInTheDocument();
-    await user.click(within(form()).getByRole('button', { name: 'Advanced: server settings' }));
+    await user.click(within(form()).getByRole('button', { name: 'Edit' }));
     const imap = within(form()).getByRole('group', { name: 'Incoming mail (IMAP)' });
-    expect(within(imap).getByLabelText('Server')).toHaveValue('imap.gmail.com');
+    expect(within(imap).getByLabelText('Server name')).toHaveValue('imap.gmail.com');
     expect(within(imap).getByLabelText('Port')).toHaveValue('993');
   });
 
   it('shows and hides the password without losing it', async () => {
     const { user } = renderApp({ accounts: [] });
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
-    const password = field('Password or app password');
+    const password = field('Password');
     await user.type(password, 'abcd efgh ijkl');
     expect(password).toHaveAttribute('type', 'password');
     const toggle = within(form()).getByRole('button', { name: 'Show password' });
@@ -44,9 +45,9 @@ describe('adding an account', () => {
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
     await user.type(field('Email address'), 'don@fitout.example');
     await user.tab();
-    expect(await within(form()).findByText(/could not find settings for fitout.example/)).toBeInTheDocument();
+    expect(await within(form()).findByText(/couldn’t find settings for fitout.example/)).toBeInTheDocument();
     const smtp = within(form()).getByRole('group', { name: 'Outgoing mail (SMTP)' });
-    expect(within(smtp).getByLabelText('Server')).toHaveValue('smtp.fitout.example');
+    expect(within(smtp).getByLabelText('Server name')).toHaveValue('smtp.fitout.example');
     await user.selectOptions(within(smtp).getByLabelText('Security'), 'starttls');
     expect(within(smtp).getByLabelText('Security')).toHaveValue('starttls');
   });
@@ -56,14 +57,13 @@ describe('adding an account', () => {
     await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
     const spy = vi.spyOn(api, 'addAccount');
     await user.type(field('Email address'), 'don@yahoo.com');
-    await user.type(field('Password or app password'), 'wrong');
+    await user.type(field('Password'), 'wrong');
     await user.click(within(form()).getByRole('button', { name: 'Add account' }));
     const alert = await within(form()).findByRole('alert');
-    expect(alert).toHaveTextContent('Sign-in was not accepted');
-    expect(alert).toHaveTextContent('The server rejected the username or password.');
+    expect(alert).toHaveTextContent('That password wasn’t accepted');
     expect(alert).toHaveTextContent('Yahoo needs an app password');
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ email: 'don@yahoo.com', password: 'wrong' }));
-    expect(field('Password or app password')).toHaveValue('');
+    expect(field('Password')).toHaveValue('');
     expect(document.body.innerHTML).not.toContain('wrong"');
   });
 
@@ -73,12 +73,92 @@ describe('adding an account', () => {
     await user.type(field('Email address'), 'don@nowhere.invalid');
     await user.tab();
     const imap = await within(form()).findByRole('group', { name: 'Incoming mail (IMAP)' });
-    expect(within(imap).getByLabelText('Server')).toHaveValue('imap.nowhere.invalid');
-    await user.type(field('Password or app password'), 'secret');
+    expect(within(imap).getByLabelText('Server name')).toHaveValue('imap.nowhere.invalid');
+    await user.type(field('Password'), 'secret');
     await user.click(within(form()).getByRole('button', { name: 'Add account' }));
     const alert = await within(form()).findByRole('alert');
-    expect(alert).toHaveTextContent('Could not reach the mail server');
+    expect(alert).toHaveTextContent('We couldn’t reach the mail server');
     expect(alert).toHaveTextContent('Check your internet connection');
+  });
+
+  it('waits for the server lookup instead of adding the account with a guess', async () => {
+    const { user, api } = renderApp({ accounts: [] });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    // The lookup is still under way when Add account is pressed.
+    let answer: (found: ServerSuggestion | null) => void = () => undefined;
+    vi.spyOn(api, 'suggestServers').mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const add = vi.spyOn(api, 'addAccount');
+    await user.type(field('Email address'), 'info@clinic.example');
+    await user.type(field('Password'), 'secret');
+    expect(within(form()).getByRole('status')).toHaveTextContent('Finding your mail settings');
+    await user.click(within(form()).getByRole('button', { name: 'Add account' }));
+    expect(add).not.toHaveBeenCalled();
+    answer({
+      imap: { host: 'mail.host.example', port: 993, security: 'tls' },
+      smtp: { host: 'mail.host.example', port: 587, security: 'starttls' },
+      auth: 'password',
+    });
+    await vi.waitFor(() => {
+      expect(add).toHaveBeenCalledWith(
+        expect.objectContaining({
+          imap: { host: 'mail.host.example', port: 993, security: 'tls' },
+          smtp: { host: 'mail.host.example', port: 587, security: 'starttls' },
+        }),
+      );
+    });
+  });
+
+  it('replaces the servers when the address moves to another domain, unless they were edited', async () => {
+    const { user } = renderApp({ accounts: [] });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    await user.type(field('Email address'), 'don@yahoo.com');
+    await user.tab();
+    expect(await within(form()).findByText(/Incoming imap.mail.yahoo.com:993/)).toBeInTheDocument();
+    await user.clear(field('Email address'));
+    await user.type(field('Email address'), 'don@mocky.co.ke');
+    await user.tab();
+    expect(await within(form()).findByText(/Incoming mail.mailer.co.ke/)).toBeInTheDocument();
+
+    // Settings typed by hand stay put when the address changes again.
+    await user.click(within(form()).getByRole('button', { name: 'Edit' }));
+    const imap = within(form()).getByRole('group', { name: 'Incoming mail (IMAP)' });
+    await user.clear(within(imap).getByLabelText('Server name'));
+    await user.type(within(imap).getByLabelText('Server name'), 'imap.mine.example');
+    await user.clear(field('Email address'));
+    await user.type(field('Email address'), 'don@yahoo.com');
+    await user.tab();
+    expect(within(imap).getByLabelText('Server name')).toHaveValue('imap.mine.example');
+  });
+
+  it('keeps the suggested sign-in while the name part of the address is edited', async () => {
+    const { user } = renderApp({ accounts: [] });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    await user.type(field('Email address'), 'don@gmail.com');
+    await user.tab();
+    expect(await within(form()).findByText(/This is a Google account/)).toBeInTheDocument();
+    await user.type(field('Email address'), '{Home}x');
+    expect(field('Email address')).toHaveValue('xdon@gmail.com');
+    expect(within(form()).getByText(/This is a Google account/)).toBeInTheDocument();
+  });
+
+  it('says the server name is wrong when its certificate is for another name', async () => {
+    const { user, api } = renderApp({ accounts: [] });
+    await screen.findByRole('heading', { name: 'Welcome to Mocky Mail' });
+    vi.spyOn(api, 'addAccount').mockRejectedValue({
+      kind: 'tls',
+      message: "couldn't make a secure connection to mail.clinic.example: invalid peer certificate: NotValidForName",
+    });
+    await user.type(field('Email address'), 'don@mocky.co.ke');
+    await user.type(field('Password'), 'secret');
+    await user.click(within(form()).getByRole('button', { name: 'Add account' }));
+    const alert = await within(form()).findByRole('alert');
+    expect(alert).toHaveTextContent('The server name looks wrong for this address');
+    // The server fields open so the name can be corrected.
+    expect(within(form()).getByRole('group', { name: 'Incoming mail (IMAP)' })).toBeInTheDocument();
   });
 
   it('requires an email and a password before calling the backend', async () => {
@@ -149,7 +229,7 @@ describe('adding an account', () => {
     await user.type(field('Email address'), 'don@mocky.co.ke');
     await user.type(field('Your name (optional)'), 'Don');
     await user.tab();
-    await user.type(field('Password or app password'), 'correct horse');
+    await user.type(field('Password'), 'correct horse');
     await user.click(within(form()).getByRole('button', { name: 'Add account' }));
     expect(await screen.findByRole('list', { name: 'Don' })).toBeInTheDocument();
     expect(await screen.findByText('All caught up')).toBeInTheDocument();

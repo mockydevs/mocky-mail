@@ -162,8 +162,8 @@ button:disabled {
 }
 
 .brand__name {
-  font-family: 'Space Grotesk', sans-serif;
-  font-weight: 700;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
   font-size: 18px;
   letter-spacing: -0.01em;
 }
@@ -447,9 +447,9 @@ button:disabled {
 }
 
 .list__title {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: Fraunces, Georgia, serif;
   font-size: 22px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
@@ -744,7 +744,7 @@ button:disabled {
 
 .reader__subject {
   margin-bottom: 20px;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: Fraunces, Georgia, serif;
   font-size: 26px;
   line-height: 1.2;
   font-weight: 600;
@@ -1055,7 +1055,7 @@ button:disabled {
 }
 
 .compose__title {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: Fraunces, Georgia, serif;
   font-size: 16px;
   font-weight: 600;
 }
@@ -1951,38 +1951,167 @@ kbd {
 }
 
 .welcome {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 48px;
-  align-items: flex-start;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: minmax(340px, 5fr) 7fr;
   height: 100vh;
   height: 100dvh;
   min-height: 0;
   overflow-y: auto;
-  padding: 64px 24px;
   background: var(--chrome);
 }
 
-
+/* The brand panel: solid blue in light mode, deep navy in dark. */
 .welcome__intro {
-  flex: 1 1 280px;
-  max-width: 380px;
+  --brand-mark: #fff;
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  justify-content: space-between;
+  gap: 40px;
+  padding: 48px clamp(32px, 4vw, 72px);
+  background: var(--pane-bg);
+  color: var(--pane-text);
+}
+
+.welcome__intro .brand {
+  width: auto;
+}
+
+/* The sign-in screen sets its headings and the name in Fraunces. */
+.welcome__intro .brand__name {
+  display: inline;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
+  font-size: 19px;
+}
+
+.welcome__body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 440px;
 }
 
 .welcome__title {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 32px;
-  line-height: 1.15;
-  letter-spacing: -0.01em;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
+  font-size: clamp(30px, 3.2vw, 44px);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
 }
 
 .welcome__text {
-  color: var(--text-2);
-  font-size: 15px;
+  color: var(--pane-muted);
+  font-size: 16px;
+}
+
+.welcome__points {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.welcome__points li {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.welcome__points .icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.welcome__points strong {
+  display: block;
+  font-weight: 600;
+}
+
+.welcome__points span {
+  font-size: 13.5px;
+  color: var(--pane-muted);
+}
+
+.welcome__foot {
+  font-size: 13px;
+  color: var(--pane-muted);
+}
+
+/* Large, faint copy of the mark in the corner. */
+.welcome__mark {
+  position: absolute;
+  right: -90px;
+  bottom: -70px;
+  opacity: 0.06;
+  pointer-events: none;
+}
+
+.welcome__mark .logo-mark {
+  width: 420px;
+  height: 372px;
+}
+
+.welcome__main {
+  display: flex;
+  min-width: 0;
+  padding: 48px 24px;
+}
+
+.welcome__main > .account-form {
+  flex: none;
+  width: 100%;
+  margin: auto;
+}
+
+@media (max-width: 760px) {
+  /* Stacked: the panel keeps its own height and the form follows it. */
+  .welcome {
+    display: block;
+    background: var(--surface);
+  }
+
+  .welcome__intro {
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 20px;
+  }
+
+  .welcome__body {
+    gap: 6px;
+  }
+
+  .welcome__title {
+    font-size: 22px;
+  }
+
+  .welcome__text {
+    font-size: 14px;
+  }
+
+  .welcome__points,
+  .welcome__foot,
+  .welcome__mark {
+    display: none;
+  }
+
+  .welcome__main {
+    padding: 0;
+    background: var(--surface);
+  }
+
+  /* On a phone the card becomes the page. */
+  .welcome__main > .account-form {
+    max-width: none;
+    margin: 0;
+    padding: 22px 18px 28px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
 }
 
 .panel {
@@ -2009,13 +2138,23 @@ kbd {
 
 .account-form {
   flex: 1 1 420px;
-  max-width: 560px;
+  max-width: 480px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  /* Sits straight on the page background: no card around the fields. */
-  padding: 8px 0;
+  gap: 18px;
+  /* One card holds the whole form, on first run and in Settings alike. */
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+}
+
+@media (max-width: 560px) {
+  .account-form {
+    padding: 22px 18px;
+  }
 }
 
 /* Shown while Google or Microsoft sign-in is under way. */
@@ -2049,7 +2188,8 @@ kbd {
 }
 
 .account-form__title {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
   font-size: 22px;
 }
 
@@ -2139,6 +2279,258 @@ kbd {
   }
 }
 
+/* Add account: sign-in buttons, one per row, each with its provider's mark */
+.oauth {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 10px;
+}
+
+.oauth .btn {
+  flex: none;
+}
+
+.provider-logo {
+  flex: none;
+}
+
+.btn--primary .provider-logo {
+  box-sizing: content-box;
+  padding: 4px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.btn--primary .spinner,
+.btn[aria-busy='true'] .spinner {
+  border-color: color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+}
+
+.btn--primary[aria-busy='true']:disabled {
+  opacity: 1;
+}
+
+.btn--quiet {
+  color: var(--focus);
+}
+
+.btn--quiet:hover:not(:disabled) {
+  background: var(--row-hover);
+}
+
+.btn--text {
+  padding: 2px 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--focus);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.oauth-suggest {
+  border-color: var(--info-border);
+  border-radius: 12px;
+  background: var(--info-bg);
+}
+
+.oauth-suggest p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--info-text);
+}
+
+.account-form .field:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 30%, transparent);
+}
+
+.account-form .field[aria-invalid='true'] {
+  box-shadow: 0 0 0 1px var(--error-text);
+}
+
+.account-form .form-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+}
+
+.account-form .form-error .icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+/* Add account: mail settings slot */
+.slot {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--list);
+  font-size: 13px;
+}
+
+.slot p {
+  margin: 0;
+}
+
+.slot__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.slot__row > .icon,
+.slot__row > .spinner,
+.slot__ok {
+  flex: none;
+  margin-top: 1px;
+}
+
+.slot__ok {
+  display: inline-flex;
+  color: var(--hue-green);
+}
+
+.slot__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.slot__title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.slot__text {
+  color: var(--muted);
+}
+
+.slot__row > .btn {
+  flex: none;
+  margin: -6px -4px -6px 0;
+}
+
+.slot__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.slot .advanced {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.slot--error {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+}
+
+.slot--error .slot__title,
+.slot--error .slot__row > .icon {
+  color: var(--error-text);
+}
+
+.slot--warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+.slot--warn .slot__title,
+.slot--warn .slot__row > .icon {
+  color: var(--warn-text);
+}
+
+.slot--error .slot__text,
+.slot--warn .slot__text {
+  color: var(--text-2);
+}
+
+.slot--error .advanced {
+  border-color: var(--error-border);
+}
+
+.slot--warn .advanced {
+  border-color: var(--warn-border);
+}
+
+.server-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 16px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.slot--error .server-line {
+  margin-top: 6px;
+}
+
+.slot__details {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.slot__details summary {
+  width: fit-content;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.slot__details code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.slot .server__legend {
+  font-weight: 600;
+}
+
+.account-form__foot {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.account-form__foot .icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.account-form .signin-progress {
+  font-size: 13px;
+}
+
+@media (max-width: 560px) {
+  .slot .server__grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  }
+
+  .slot .server__grid > :first-child {
+    grid-column: 1 / -1;
+  }
+
+  .account-form__actions {
+    flex-direction: column-reverse;
+  }
+}
+
 /* Settings */
 .settings {
   flex: 1 1 auto;
@@ -2159,7 +2551,8 @@ kbd {
 }
 
 .settings__title {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
   font-size: 22px;
 }
 
@@ -2398,7 +2791,8 @@ kbd {
 }
 
 .modal__title {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
   font-size: 20px;
 }
 
@@ -3513,7 +3907,8 @@ button.contact-row:hover,
 .calendar__title {
   flex: 1 1 auto;
   margin: 0;
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
   font-size: 22px;
 }
 

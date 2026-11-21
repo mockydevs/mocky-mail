@@ -53,7 +53,11 @@ export function accountErrorCopy(error: AppError, email: string): ErrorCopy {
       hint = 'Check your internet connection and the server names and ports under Advanced. If other apps can get online, your antivirus or firewall may be blocking Mocky Mail.';
       break;
     case 'tls':
-      hint = 'Check the security setting: port 993 (IMAP) and 465 (SMTP) use TLS; 143 and 587 use STARTTLS.';
+      // The certificate belongs to another name: the server name is wrong
+      // for this mailbox, which no security setting can fix.
+      hint = /NotValidForName/i.test(error.message)
+        ? 'That server answers under a different name, so it is probably not the mail server for this address. Enter the incoming and outgoing server names from your email provider under Advanced: server settings.'
+        : 'Check the security setting: port 993 (IMAP) and 465 (SMTP) use TLS; 143 and 587 use STARTTLS.';
       break;
     case 'config':
       hint = 'Use your email and an app password instead for now.';
@@ -69,4 +73,34 @@ export function accountErrorCopy(error: AppError, email: string): ErrorCopy {
       break;
   }
   return { title: errorTitle(error.kind), message: error.message, hint };
+}
+
+/** The certificate is for another name: the server name is wrong for this mailbox. */
+export function isNameMismatch(error: AppError): boolean {
+  return error.kind === 'tls' && /NotValidForName/i.test(error.message);
+}
+
+/**
+ * Add-account wording for a server that could not be reached or trusted. It is
+ * shown on the server settings themselves, with the fields open below it.
+ */
+export function serverErrorCopy(error: AppError): { title: string; message: string } {
+  if (error.kind === 'connect') {
+    return {
+      title: 'We couldn’t reach the mail server',
+      message:
+        'Check your internet connection and the server names below. If other apps are online, a firewall or antivirus may be blocking Mocky Mail.',
+    };
+  }
+  if (isNameMismatch(error)) {
+    return {
+      title: 'The server name looks wrong for this address',
+      message:
+        'The server answered, but its security certificate is for a different name, so we stopped before sending your password. Enter the server names your email provider gives, below.',
+    };
+  }
+  return {
+    title: 'Secure connection failed',
+    message: 'Check the security setting below: ports 993 and 465 use TLS; 143 and 587 use STARTTLS.',
+  };
 }

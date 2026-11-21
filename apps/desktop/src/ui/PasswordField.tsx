@@ -7,6 +7,7 @@ interface Props {
   inputRef: Ref<HTMLInputElement>;
   autoComplete: 'current-password' | 'new-password';
   describedBy?: string;
+  invalid?: boolean;
 }
 
 /**
@@ -14,7 +15,7 @@ interface Props {
  * password before saving it. The value stays in the uncontrolled input; the
  * button only switches the input type.
  */
-export function PasswordField({ id, inputRef, autoComplete, describedBy }: Props) {
+export function PasswordField({ id, inputRef, autoComplete, describedBy, invalid }: Props) {
   const [visible, setVisible] = useState(false);
   return (
     <div className="password-field">
@@ -28,6 +29,7 @@ export function PasswordField({ id, inputRef, autoComplete, describedBy }: Props
         autoCorrect="off"
         spellCheck={false}
         aria-describedby={describedBy}
+        aria-invalid={invalid ? true : undefined}
       />
       <button
         type="button"
