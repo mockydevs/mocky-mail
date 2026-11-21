@@ -82,7 +82,7 @@ footer a { color: inherit; }
       <li><strong>Your email.</strong> The app downloads your messages, folders and attachments from the mail servers of the accounts you add (for example Gmail, Outlook or your company's mail server) and keeps a copy on your device so you can read it offline. Messages you write are sent through those same servers.</li>
       <li><strong>Your email address and server settings.</strong> Stored on your device so the app can connect to your accounts.</li>
       <li><strong>Passwords and sign-in tokens.</strong> Stored in your device's secure storage (Android Keystore, Windows Credential Manager or the Linux keyring), never in plain files. They are sent only to your own email provider, to sign you in.</li>
-      <li><strong>Server lookup.</strong> When you add an account, the app looks up your domain's mail servers through your device's normal DNS service.</li>
+      <li><strong>Server lookup.</strong> When you add an account, the app looks up your domain's mail servers through your device's normal DNS service. If that gives no answer, it asks Cloudflare's public DNS service over an encrypted connection instead. Only the domain name (the part after the @) is sent, never your address or password.</li>
     </ul>
     <p>All of this stays on your device or goes directly to your email provider. None of it is sent to Mocky Digital or to anyone else. The app has no ads, no analytics, no tracking and no crash reporting.</p>
 
