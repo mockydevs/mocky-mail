@@ -33,6 +33,10 @@ interface Data {
  * drops late results from the old one. A new `revision` (after mail://changed
  * or an action) reloads as many messages as are already loaded, so the list
  * does not jump back to the top. `loadMore` fetches the next page once.
+ *
+ * The backend returns at most `MAX_LIMIT` rows per call, so a long list is
+ * reloaded in several calls. Reloading only the first one would cut the list
+ * short and lose the message the user has open further down.
  */
 export function useMessagePage(api: MailApi, query: PageQuery | null, revision: number): MessagePageState {
   const key = query ? JSON.stringify(query) : '';
@@ -55,8 +59,26 @@ export function useMessagePage(api: MailApi, query: PageQuery | null, revision: 
     const current = queryRef.current;
     if (!current) return;
     const request = ++requestRef.current;
-    const limit = Math.min(MAX_LIMIT, Math.max(PAGE_SIZE, loadedRef.current));
-    api.listMessages({ ...current, offset: 0, limit }).then(
+    const wanted = Math.max(PAGE_SIZE, loadedRef.current);
+    const reload = async () => {
+      const items: MessageListItem[] = [];
+      const known = new Set<string>();
+      let total = 0;
+      while (items.length < wanted) {
+        const limit = Math.min(MAX_LIMIT, wanted - items.length);
+        const page = await api.listMessages({ ...current, offset: items.length, limit });
+        total = page.total;
+        const fresh = page.items.filter((m) => !known.has(m.id));
+        for (const m of fresh) known.add(m.id);
+        items.push(...fresh);
+        // The end of the folder, or a page that brought nothing new.
+        if (fresh.length === 0 || page.items.length < limit || items.length >= total) break;
+        // A newer reload has started; its result is the one that counts.
+        if (request !== requestRef.current) break;
+      }
+      return { items, total };
+    };
+    reload().then(
       (page) => {
         if (request !== requestRef.current) return;
         setData((prev) => ({

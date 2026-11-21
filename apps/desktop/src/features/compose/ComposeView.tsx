@@ -23,7 +23,21 @@ interface Props {
   onSent: (entry: OutboxEntry) => void;
   /** Add the From account's signature (new messages, replies, forwards), and swap it with the account. */
   addSignature?: boolean;
+  /**
+   * The message exists nowhere else (it was taken back out of the Outbox),
+   * so closing asks first even when nothing was typed.
+   */
+  unsaved?: boolean;
+  /**
+   * Lets the shell leave compose safely. While the message has unsaved text
+   * this hands the shell a function to call with what it wants to do next;
+   * that runs after the user's answer (save or discard). Null: nothing to ask.
+   */
+  onLeaveGuard?: (ask: LeaveCompose | null) => void;
 }
+
+/** Ask compose to close, then carry on with `then`. */
+export type LeaveCompose = (then: () => void) => void;
 
 type FieldName = 'to' | 'cc' | 'bcc';
 
@@ -48,6 +62,8 @@ export function ComposeView({
   onClose,
   onSent,
   addSignature = false,
+  unsaved: startsUnsaved = false,
+  onLeaveGuard,
 }: Props) {
   const api = useMailApi();
   const id = useId();
@@ -63,6 +79,9 @@ export function ComposeView({
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | 'send' | 'save' | 'attach'>(null);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [unsaved, setUnsaved] = useState(startsUnsaved);
+  /** Where the shell wants to go once this message is saved or discarded. */
+  const [afterClose, setAfterClose] = useState<(() => void) | null>(null);
 
   useEffect(() => {
     if (attachmentsFrom === null) return;
@@ -133,7 +152,7 @@ export function ComposeView({
     // applySignature only reads refs and setters; reloading on its identity would loop.
   }, [api, addSignature, draft.accountId, isReply]);
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
+  const dirty = unsaved || JSON.stringify(draft) !== JSON.stringify(baseline);
   const account = accounts.find((a) => a.id === draft.accountId);
   const attachmentBytes = draft.attachments.reduce((sum, a) => sum + a.size, 0);
   const overLimit =
@@ -176,6 +195,7 @@ export function ComposeView({
     return api.saveDraft(snapshot).then(({ draftMessageId }) => {
       setDraft((d) => ({ ...d, draftMessageId }));
       setBaseline({ ...snapshot, draftMessageId });
+      setUnsaved(false);
     });
   };
 
@@ -215,6 +235,24 @@ export function ComposeView({
   const requestClose = () => {
     if (dirty) setConfirmClose(true);
     else onClose();
+  };
+
+  // Going elsewhere in the app (a folder, Settings, another message) asks
+  // the same question as closing, instead of dropping what was written.
+  useEffect(() => {
+    if (!onLeaveGuard || !dirty) return;
+    onLeaveGuard((then) => {
+      setAfterClose(() => then);
+      setConfirmClose(true);
+    });
+    return () => {
+      onLeaveGuard(null);
+    };
+  }, [onLeaveGuard, dirty]);
+  const leave = afterClose ?? onClose;
+  const keepEditing = () => {
+    setConfirmClose(false);
+    setAfterClose(null);
   };
 
   // Formatting: marks typed or added by the toolbar; Preview shows the result.
@@ -266,6 +304,10 @@ export function ComposeView({
     } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && busy === null && !loadingAttachments) {
       event.preventDefault();
       (event.currentTarget as HTMLFormElement).requestSubmit();
+    } else if (event.key === 'Enter' && event.target instanceof HTMLInputElement) {
+      // Plain Enter in To, Cc, Bcc or Subject must not send the message
+      // (browsers submit a form on Enter in a text field).
+      event.preventDefault();
     }
   };
 
@@ -553,20 +595,16 @@ export function ComposeView({
       {confirmClose && (
         <Modal
           title="Discard this message?"
-          description="You have changes that are not saved."
+          description={
+            unsaved
+              ? 'It is no longer in the Outbox and is not saved anywhere else.'
+              : 'You have changes that are not saved.'
+          }
           size="small"
-          onClose={() => {
-            setConfirmClose(false);
-          }}
+          onClose={keepEditing}
         >
           <div className="modal__actions">
-            <button
-              type="button"
-              className="btn btn--secondary"
-              onClick={() => {
-                setConfirmClose(false);
-              }}
-            >
+            <button type="button" className="btn btn--secondary" onClick={keepEditing}>
               Keep editing
             </button>
             <button
@@ -574,14 +612,22 @@ export function ComposeView({
               className="btn btn--secondary"
               onClick={() => {
                 setConfirmClose(false);
-                saveNow().then(onClose, (e: unknown) => {
+                saveNow().then(leave, (e: unknown) => {
+                  setAfterClose(null);
                   setError(toAppError(e));
                 });
               }}
             >
               Save draft
             </button>
-            <button type="button" className="btn btn--danger" onClick={onClose}>
+            <button
+              type="button"
+              className="btn btn--danger"
+              onClick={() => {
+                keepEditing();
+                leave();
+              }}
+            >
               Discard
             </button>
           </div>

@@ -289,6 +289,13 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
   const remove = (e: CalendarEvent, onlyThisDate: boolean) => {
     setDeleting(null);
     setBusy(true);
+    // Without a date to remove, "only this date" must never reach the
+    // backend as null, which means the whole series.
+    if (onlyThisDate && e.recurrenceId === null) {
+      setBusy(false);
+      setError({ kind: 'invalid', message: 'Open the date you want to remove from the calendar, then delete it there.' });
+      return;
+    }
     api.deleteEvent(e.id, onlyThisDate ? e.recurrenceId : null).then(
       () => {
         setBusy(false);
@@ -579,7 +586,11 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
       {deleting && (
         <Modal
           title="Delete a repeating event"
-          description={`“${deleting.title || '(No title)'}” repeats. Delete only ${dayText(eventDays(deleting)[0])}, or every date?`}
+          description={
+            deleting.recurrenceId === null
+              ? `“${deleting.title || '(No title)'}” repeats. This deletes every date. To remove one date, open that date in the calendar first.`
+              : `“${deleting.title || '(No title)'}” repeats. Delete only ${dayText(eventDays(deleting)[0])}, or every date?`
+          }
           size="small"
           onClose={() => {
             setDeleting(null);
@@ -595,15 +606,17 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
             >
               Cancel
             </button>
-            <button
-              type="button"
-              className="btn btn--secondary"
-              onClick={() => {
-                remove(deleting, true);
-              }}
-            >
-              Only this date
-            </button>
+            {deleting.recurrenceId !== null && (
+              <button
+                type="button"
+                className="btn btn--secondary"
+                onClick={() => {
+                  remove(deleting, true);
+                }}
+              >
+                Only this date
+              </button>
+            )}
             <button
               type="button"
               className="btn btn--danger"

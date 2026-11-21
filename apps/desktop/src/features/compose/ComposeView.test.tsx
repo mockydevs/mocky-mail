@@ -270,6 +270,68 @@ describe('compose', () => {
     expect(screen.queryByRole('form', { name: 'New message' })).not.toBeInTheDocument();
   });
 
+  it('asks before leaving a half-written message for another part of the app', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    await user.type(composeForm().getByLabelText('Subject'), 'Half written');
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    const dialog = screen.getByRole('dialog', { name: 'Discard this message?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+    expect(composeForm().getByLabelText('Subject')).toHaveValue('Half written');
+
+    // Saving it first, then going where the user asked.
+    const save = vi.spyOn(api, 'saveDraft');
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument();
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ subject: 'Half written' }));
+    expect(screen.queryByRole('form', { name: 'New message' })).not.toBeInTheDocument();
+  });
+
+  it('leaves an untouched message without asking', async () => {
+    const { user } = renderApp();
+    await rows();
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument();
+  });
+
+  it('does not send on Enter in the recipient or subject fields', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    const check = vi.spyOn(api, 'checkDraft');
+    const send = vi.spyOn(api, 'sendMessage');
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    const form = composeForm();
+    await user.type(form.getByLabelText('To'), 'peter@client.example{Enter}{Enter}');
+    await user.type(form.getByLabelText('Subject'), 'Hello{Enter}');
+    expect(check).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(form.getByLabelText('Subject')).toHaveValue('Hello');
+  });
+
+  it('asks before closing a message taken back out of the Outbox, even untouched', async () => {
+    const { user, api } = renderApp();
+    await rows();
+    await user.click(screen.getByRole('button', { name: 'New message' }));
+    const form = composeForm();
+    await user.type(form.getByLabelText('To'), 'peter@client.example');
+    await user.type(form.getByLabelText('Subject'), 'Hello');
+    await user.click(form.getByRole('button', { name: 'Send' }));
+    await user.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(await screen.findByRole('form', { name: 'New message' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    const dialog = screen.getByRole('dialog', { name: 'Discard this message?' });
+    expect(dialog).toHaveTextContent('no longer in the Outbox');
+    const save = vi.spyOn(api, 'saveDraft');
+    await user.click(within(dialog).getByRole('button', { name: 'Save draft' }));
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalled();
+    });
+  });
+
   it('replies to all with threading headers and a quote, leaving me out', async () => {
     const { user, api } = renderApp();
     await rows();

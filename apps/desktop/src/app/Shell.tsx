@@ -5,7 +5,7 @@ import { errorTitle, toAppError } from '../api/errors';
 import type { AppError, Draft, Focus, Folder, Mailto, MessageDetail, MessageListItem, OutboxEntry, ReadFilter, Settings, SyncStatus } from '../api/types';
 import { AddAccountForm } from '../features/accounts/AddAccountForm';
 import { Welcome } from '../features/accounts/Welcome';
-import { ComposeView } from '../features/compose/ComposeView';
+import { ComposeView, type LeaveCompose } from '../features/compose/ComposeView';
 import { blankDraft, draftFromMessage, forwardDraft, replyDraft } from '../features/compose/seed';
 import { MessageList } from '../features/mailbox/MessageList';
 import {
@@ -50,7 +50,7 @@ export const SEARCH_DEBOUNCE_MS = 300;
 
 type Screen =
   | { kind: 'mail' }
-  | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null; signature: boolean }
+  | { kind: 'compose'; draft: Draft; title: string; attachmentsFrom: string | null; signature: boolean; unsaved: boolean }
   | { kind: 'settings' }
   | { kind: 'contacts' }
   | { kind: 'calendar' }
@@ -180,7 +180,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     sending.clear();
     api.outboxEdit(id).then(
       (draft) => {
-        compose(draft, 'New message');
+        // It has left the Outbox, so compose holds the only copy.
+        compose(draft, 'New message', null, false, true);
       },
       (e: unknown) => {
         report(toAppError(e), 'Too late to undo; it is already sending');
@@ -385,13 +386,32 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     };
   }, [readPending, activeId, readDelayMs]);
 
+  // Leaving compose for anywhere else goes through compose itself, which
+  // asks to save or discard a message that has unsaved text.
+  const [leaveCompose, setLeaveCompose] = useState<LeaveCompose | null>(null);
+  const guardCompose = useCallback((ask: LeaveCompose | null) => {
+    setLeaveCompose(() => ask);
+  }, []);
+  const leaving = (then: () => void) => {
+    const ask = screen.kind === 'compose' ? leaveCompose : null;
+    if (ask) ask(then);
+    else then();
+  };
+  const show = (next: Screen) => {
+    leaving(() => {
+      setScreen(next);
+    });
+  };
+
   const goTo = (next: MailView) => {
-    setView(next);
-    setFocusTab('focused');
-    setFilter('all');
-    setSelectedId(null);
-    setPinned(null);
-    setScreen({ kind: 'mail' });
+    leaving(() => {
+      setView(next);
+      setFocusTab('focused');
+      setFilter('all');
+      setSelectedId(null);
+      setPinned(null);
+      setScreen({ kind: 'mail' });
+    });
   };
 
   /** Show the neighbour now; go back to the message if the backend refuses. */
@@ -461,8 +481,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
 
   /** Open compose; `attachmentsFrom` loads copies of that message's attachments into the draft. */
   /** `signature`: add the account's signature (new, reply, forward; not a draft or message being edited again). */
-  const compose = (draft: Draft, title: string, attachmentsFrom: string | null = null, signature = false) => {
-    setScreen({ kind: 'compose', draft, title, attachmentsFrom, signature });
+  /** `unsaved`: the draft exists nowhere else (taken back out of the Outbox). */
+  const compose = (
+    draft: Draft,
+    title: string,
+    attachmentsFrom: string | null = null,
+    signature = false,
+    unsaved = false,
+  ) => {
+    show({ kind: 'compose', draft, title, attachmentsFrom, signature, unsaved });
   };
 
   const forward = (m: MessageDetail) => {
@@ -665,6 +692,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           initial={screen.draft}
           attachmentsFrom={screen.attachmentsFrom}
           addSignature={screen.signature}
+          unsaved={screen.unsaved}
+          onLeaveGuard={guardCompose}
           title={screen.title}
           accounts={accounts}
           offlineNote={offline}
@@ -758,7 +787,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             accounts={accounts}
             now={now()}
             onEdit={(draft) => {
-              compose(draft, 'Edit message');
+              compose(draft, 'Edit message', null, false, true);
             }}
           />
         ) : (
@@ -892,15 +921,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               }}
               onSettings={() => {
                 setDrawer(false);
-                setScreen({ kind: 'settings' });
+                show({ kind: 'settings' });
               }}
               onContacts={() => {
                 setDrawer(false);
-                setScreen({ kind: 'contacts' });
+                show({ kind: 'contacts' });
               }}
               onCalendar={() => {
                 setDrawer(false);
-                setScreen({ kind: 'calendar' });
+                show({ kind: 'calendar' });
               }}
               onManageFolders={(accountId) => {
                 setDrawer(false);
@@ -908,7 +937,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               }}
               onAddAccount={() => {
                 setDrawer(false);
-                setScreen({ kind: 'addAccount' });
+                show({ kind: 'addAccount' });
               }}
             />
             {phone && (
