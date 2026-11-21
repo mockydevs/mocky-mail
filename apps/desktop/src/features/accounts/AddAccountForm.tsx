@@ -262,7 +262,7 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
 
   const notice = (from: 'password' | 'oauth') => {
     if (!otherError || errorFrom !== from) return null;
-    const copy = accountErrorCopy(otherError, email);
+    const copy = accountErrorCopy(otherError, email, from);
     return (
       <div className="notice notice--error" role="alert">
         <p className="notice__title">{copy.title}</p>

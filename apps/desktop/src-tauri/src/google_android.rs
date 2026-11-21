@@ -55,6 +55,8 @@ fn plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> AppError {
     };
     match code.as_str() {
         "cancelled" | "denied" | "needs_consent" => AppError::new("auth", message),
+        // The app's Google registration is wrong: nothing the user can fix.
+        "not_set_up" => AppError::new("config", message),
         _ => AppError::new("connect", format!("Google sign-in failed: {message}")),
     }
 }

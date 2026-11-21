@@ -15,6 +15,8 @@ import app.tauri.plugin.Plugin
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.CommonStatusCodes
 import com.google.android.gms.common.api.Scope
 
 @InvokeArg
@@ -83,9 +85,28 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
           }
         }
       }
-      .addOnFailureListener { error ->
-        invoke.reject(error.message ?: "Google sign-in failed.", FAILED)
+      .addOnFailureListener { error -> rejectFor(invoke, error) }
+  }
+
+  /**
+   * Turn a Play services failure into something the user can act on. The
+   * status code is the only clue to set-up problems, which otherwise look
+   * exactly like the user saying no.
+   */
+  private fun rejectFor(invoke: Invoke, error: Exception) {
+    val status = (error as? ApiException)?.statusCode
+    when (status) {
+      CommonStatusCodes.CANCELED -> invoke.reject("Sign-in was cancelled.", CANCELLED)
+      CommonStatusCodes.DEVELOPER_ERROR -> invoke.reject(
+        "Google refused this copy of Mocky Mail (code 10). Its Android sign-in registration doesn't match this app's package name and signing certificate.",
+        NOT_SET_UP,
+      )
+      CommonStatusCodes.NETWORK_ERROR -> invoke.reject("Google couldn't be reached. Check the connection and try again.", FAILED)
+      else -> {
+        val code = status?.let { " (code $it)" } ?: ""
+        invoke.reject("${error.message ?: "Google sign-in failed."}$code", FAILED)
       }
+    }
   }
 
   /** The account waiting on the consent screen. */
@@ -95,15 +116,22 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
   fun consentGiven(invoke: Invoke, result: ActivityResult) {
     val email = pending
     pending = null
-    if (result.resultCode != Activity.RESULT_OK || email == null) {
-      invoke.reject("Sign-in was declined.", DENIED)
+    if (email == null) {
+      invoke.reject("Sign-in was cancelled.", CANCELLED)
       return
     }
+    // Read the result even when the screen closed without "OK": it carries
+    // the reason (a set-up error closes it at once, before the user sees a
+    // thing), which a bare "declined" would hide.
     try {
       val granted = Identity.getAuthorizationClient(activity).getAuthorizationResultFromIntent(result.data)
       resolve(invoke, email, granted)
     } catch (error: Exception) {
-      invoke.reject(error.message ?: "Google sign-in failed.", FAILED)
+      if (error is ApiException || result.resultCode == Activity.RESULT_OK) {
+        rejectFor(invoke, error)
+      } else {
+        invoke.reject("Mail access wasn't allowed on Google's screen, so Mocky Mail can't read this mailbox.", DENIED)
+      }
     }
   }
 
@@ -125,6 +153,7 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
     const val CANCELLED = "cancelled"
     const val DENIED = "denied"
     const val NEEDS_CONSENT = "needs_consent"
+    const val NOT_SET_UP = "not_set_up"
     const val FAILED = "failed"
   }
 }

@@ -40,12 +40,14 @@ export interface ErrorCopy {
 }
 
 /** What to tell the user when adding or updating an account fails. */
-export function accountErrorCopy(error: AppError, email: string): ErrorCopy {
+export function accountErrorCopy(error: AppError, email: string, via: 'password' | 'oauth' = 'password'): ErrorCopy {
   const provider = appPasswordProvider(email);
   let hint: string | null = null;
   switch (error.kind) {
     case 'auth':
-      hint = provider
+      hint = via === 'oauth'
+        ? 'Try again, and on Google’s or Microsoft’s screen choose the account and allow access to your mail. Or add the account with an app password below.'
+        : provider
         ? `${provider} needs an app password for mail apps, not your normal password. Create one in your ${provider} account security settings and paste it here.`
         : 'Check the password. Some providers need an app password for mail apps.';
       break;
