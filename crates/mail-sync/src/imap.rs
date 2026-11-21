@@ -121,6 +121,30 @@ async fn within_for<T>(
         })
 }
 
+/// Why a wait in IDLE ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleEnd {
+    /// The server reported a change in the folder.
+    Changed,
+    /// Nothing happened within `IDLE_TIMEOUT`.
+    Quiet,
+    /// The caller's stop future completed.
+    Stopped,
+}
+
+/// How an IDLE wait ended: a stop the caller asked for wins over whatever
+/// the server said meanwhile, since the caller then syncs anyway.
+fn idle_end(stopped: bool, response: &async_imap::extensions::idle::IdleResponse) -> IdleEnd {
+    use async_imap::extensions::idle::IdleResponse;
+    if stopped {
+        return IdleEnd::Stopped;
+    }
+    match response {
+        IdleResponse::NewData(_) => IdleEnd::Changed,
+        IdleResponse::Timeout | IdleResponse::ManualInterrupt => IdleEnd::Quiet,
+    }
+}
+
 /// A folder as the server lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFolder {
@@ -860,12 +884,39 @@ impl ImapConnection {
         Ok(())
     }
 
+    /// Check that the connection still works (NOOP), for one that sat quiet
+    /// for a while before being used again.
+    ///
+    /// # Errors
+    /// Network or server errors; the connection should then be dropped.
+    pub async fn noop(&mut self) -> Result<(), SyncError> {
+        let host = self.host.clone();
+        within(&host, self.session.noop()).await??;
+        Ok(())
+    }
+
     /// Wait for the server to report a change in `path` (IDLE), up to
     /// `IDLE_TIMEOUT`. Returns the connection and whether anything changed.
     ///
     /// # Errors
     /// Network or server errors; the connection should then be dropped.
-    pub async fn idle(mut self, path: &str) -> Result<(Self, bool), SyncError> {
+    pub async fn idle(self, path: &str) -> Result<(Self, bool), SyncError> {
+        let (conn, end) = self.idle_until(path, std::future::pending()).await?;
+        Ok((conn, end == IdleEnd::Changed))
+    }
+
+    /// Like [`Self::idle`], but also ends IDLE as soon as `stop` completes
+    /// (the app has changes to send, say). IDLE is then ended cleanly with
+    /// DONE and the same logged-in connection comes back, ready for more
+    /// commands. `stop` is only polled while idling.
+    ///
+    /// # Errors
+    /// Network or server errors; the connection should then be dropped.
+    pub async fn idle_until(
+        mut self,
+        path: &str,
+        stop: impl Future<Output = ()>,
+    ) -> Result<(Self, IdleEnd), SyncError> {
         self.ensure_selected(path).await?;
         let Self {
             session,
@@ -875,11 +926,25 @@ impl ImapConnection {
         } = self;
         let mut handle = session.idle();
         within(&host, handle.init()).await??;
-        let (wait, _stop) = handle.wait_with_timeout(IDLE_TIMEOUT);
-        let changed = matches!(
-            wait.await?,
-            async_imap::extensions::idle::IdleResponse::NewData(_)
-        );
+        let end = {
+            let (wait, interrupt) = handle.wait_with_timeout(IDLE_TIMEOUT);
+            let mut interrupt = Some(interrupt);
+            let mut stopped = false;
+            tokio::pin!(wait);
+            tokio::pin!(stop);
+            loop {
+                tokio::select! {
+                    response = &mut wait => break idle_end(stopped, &response?),
+                    () = &mut stop, if !stopped => {
+                        // Dropping the stop source makes the wait return at
+                        // once (it checks the stop before reading), so this
+                        // loop never waits on the network after a stop.
+                        stopped = true;
+                        drop(interrupt.take());
+                    }
+                }
+            }
+        };
         let session = within(&host, handle.done()).await??;
         Ok((
             Self {
@@ -888,7 +953,7 @@ impl ImapConnection {
                 capabilities,
                 selected,
             },
-            changed,
+            end,
         ))
     }
 
@@ -901,7 +966,20 @@ impl ImapConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{IDLE_TIMEOUT, listed_date, unreadable_summary};
+    use super::{IDLE_TIMEOUT, IdleEnd, idle_end, listed_date, unreadable_summary};
+    use async_imap::extensions::idle::IdleResponse;
+
+    #[test]
+    fn a_stopped_idle_says_so_whatever_the_server_sent() {
+        // A quiet IDLE that ran its course.
+        assert_eq!(idle_end(false, &IdleResponse::Timeout), IdleEnd::Quiet);
+        // The app asked to stop: it syncs next, so this is not "nothing new".
+        assert_eq!(
+            idle_end(true, &IdleResponse::ManualInterrupt),
+            IdleEnd::Stopped
+        );
+        assert_eq!(idle_end(true, &IdleResponse::Timeout), IdleEnd::Stopped);
+    }
 
     #[test]
     fn a_message_is_listed_by_its_date_unless_the_sender_clock_is_wrong() {

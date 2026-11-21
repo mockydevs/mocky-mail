@@ -15,7 +15,7 @@ use futures::FutureExt as _;
 use mail_core::folders::{FolderRole, decode_folder_name, detect_role_unclaimed, special_use_role};
 use mail_core::message::{parse_body, parse_summary};
 use mail_store::{Account, Folder, MessageFlags, NewFolder, OpKind};
-use mail_sync::imap::{FlagChange, ImapConnection, MAX_BACKGROUND_BODY_BYTES, uid_set};
+use mail_sync::imap::{FlagChange, IdleEnd, ImapConnection, MAX_BACKGROUND_BODY_BYTES, uid_set};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::Notify;
@@ -209,7 +209,87 @@ async fn run(app: AppHandle, state: Arc<AppState>, account_id: String, wake: Arc
     }
 }
 
-/// One connected session. Returns `Ok` to reconnect (woken, or periodic).
+/// What started a sync pass within one connected session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// Just logged in.
+    Connected,
+    /// IDLE or the poll timer ended on its own (new mail, or time to look).
+    Waited,
+    /// The engine was woken: changes queued in the app, or "check now".
+    Woken,
+}
+
+/// Which folders a pass syncs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Re-list the folders and sync every one.
+    All,
+    /// The inbox, plus folders the replayed changes touched.
+    Inbox,
+    /// The inbox, Sent and Drafts (sending and saving drafts wake the
+    /// engine), plus folders the replayed changes touched.
+    Changes,
+}
+
+/// A wake with changes to send syncs only what they touched. A wake with
+/// none is "check now" (or new sign-in details): everything is checked, as
+/// a fresh login would, but on the same connection.
+const fn scope_of(trigger: Trigger, replayed_any: bool) -> Scope {
+    match trigger {
+        Trigger::Waited => Scope::Inbox,
+        Trigger::Woken if replayed_any => Scope::Changes,
+        Trigger::Connected | Trigger::Woken => Scope::All,
+    }
+}
+
+/// Whether a pass with this scope syncs a folder with this role; `touched`
+/// says whether a change replayed in this pass was in it.
+const fn folder_due(scope: Scope, role: FolderRole, touched: bool) -> bool {
+    // Virtual views of other folders (Gmail's All Mail, Starred).
+    if matches!(role, FolderRole::All | FolderRole::Flagged) {
+        return false;
+    }
+    match scope {
+        Scope::All => true,
+        Scope::Inbox => touched || matches!(role, FolderRole::Inbox),
+        Scope::Changes => {
+            touched
+                || matches!(
+                    role,
+                    FolderRole::Inbox | FolderRole::Sent | FolderRole::Drafts
+                )
+        }
+    }
+}
+
+/// Folders a queued change reads or writes on the server.
+fn op_folders(op: &Op) -> [Option<&str>; 2] {
+    match op {
+        Op::SetFlags { folder, .. }
+        | Op::SetFlagsByMessageId { folder, .. }
+        | Op::Delete { folder, .. }
+        | Op::DeleteByMessageId { folder, .. } => [Some(folder), None],
+        Op::Move { from, to, .. } | Op::MoveByMessageId { from, to, .. } => [Some(from), Some(to)],
+    }
+}
+
+/// How a wait between passes ended.
+enum Waited {
+    /// Time for the next pass on the same connection.
+    Pass(Box<ImapConnection>, Trigger),
+    /// Log in again: the periodic full sync is due, or the connection
+    /// broke while being taken back for a wake.
+    Reconnect,
+}
+
+/// One connected session. Returns `Ok` to reconnect (periodic full sync, or
+/// a connection found broken when woken).
+///
+/// A wake (changes queued in the app) during IDLE ends IDLE with DONE and
+/// keeps the same logged-in connection: the changes are sent and only the
+/// folders they touched are synced, then IDLE resumes. Logging in again for
+/// every change would trip servers' login limits.
 async fn session(
     app: &AppHandle,
     state: &AppState,
@@ -219,16 +299,20 @@ async fn session(
     let credentials = credentials::for_account(state, account).await?;
     let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
     let started = Instant::now();
-    let mut full_done = false;
+    let mut trigger = Trigger::Connected;
     loop {
         // Anything that goes wrong here is reported after the pass, not
         // instead of it: new mail must still arrive. Only a lost connection
         // ends the pass early.
         let mut problem: Option<AppError> = None;
-        if let Err(error) = replay_ops(state, account, &mut conn).await {
+        let mut touched = HashSet::new();
+        if let Err(error) = replay_ops(state, account, &mut conn, &mut touched).await {
             stop_if_disconnected(error, &mut problem)?;
         }
-        if !full_done && let Err(error) = refresh_folders(state, account, &mut conn).await {
+        let scope = scope_of(trigger, !touched.is_empty());
+        if scope == Scope::All
+            && let Err(error) = refresh_folders(state, account, &mut conn).await
+        {
             stop_if_disconnected(error, &mut problem)?;
         }
         let folders = state.store.list_folders(&account.id)?;
@@ -238,7 +322,7 @@ async fn session(
         // inbox shouldn't stay empty while Sent and Trash download.
         let mut due: Vec<_> = folders
             .iter()
-            .filter(|f| should_sync(f) && (!full_done || f.role == FolderRole::Inbox))
+            .filter(|f| folder_due(scope, f.role, touched.contains(&f.path)))
             .collect();
         due.sort_by_key(|f| f.role != FolderRole::Inbox);
         for folder in due {
@@ -256,7 +340,7 @@ async fn session(
             }
             new_unseen = new_unseen.saturating_add(report.new_unseen);
         }
-        if !full_done {
+        if scope == Scope::All {
             // Once per inbox: mark old mail that is newsletters or
             // notifications, for the Focused Inbox. Never holds up mail.
             for inbox in folders.iter().filter(|f| f.role == FolderRole::Inbox) {
@@ -265,7 +349,6 @@ async fn session(
                 }
             }
         }
-        full_done = true;
         if new_unseen > 0 {
             events::new_mail(app, state, account, new_unseen);
         }
@@ -276,31 +359,91 @@ async fn session(
         }
         events::sync_status(app, &account.id, "idle", None);
 
-        // Settings > Check for new mail every (servers without IDLE).
-        let poll = Duration::from_secs(
-            u64::from(crate::settings::load(state).map_or(2, |s| s.check_every_mins))
-                .saturating_mul(60),
-        );
-        let remaining = FULL_SYNC_EVERY.max(poll).saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Ok(());
-        }
         let inbox = folders
             .iter()
             .find(|f| f.role == FolderRole::Inbox)
             .map(|f| f.path.clone());
-        match inbox {
-            Some(path) if conn.supports_idle() => {
-                tokio::select! {
-                    result = conn.idle(&path) => conn = result?.0,
-                    () = wake.notified() => return Ok(()),
-                    () = tokio::time::sleep(remaining) => return Ok(()),
+        match wait_for_change(state, conn, inbox.as_deref(), started, wake).await? {
+            Waited::Pass(same, next) => {
+                conn = *same;
+                trigger = next;
+                if trigger == Trigger::Woken {
+                    events::sync_status(app, &account.id, "syncing", None);
                 }
             }
-            _ => {
-                tokio::select! {
-                    () = tokio::time::sleep(poll.min(remaining)) => {}
-                    () = wake.notified() => return Ok(()),
+            Waited::Reconnect => return Ok(()),
+        }
+    }
+}
+
+/// Wait for new mail (IDLE on the inbox, or the poll timer on servers
+/// without IDLE), a wake, or the periodic full sync, whichever comes first.
+async fn wait_for_change(
+    state: &AppState,
+    mut conn: ImapConnection,
+    inbox: Option<&str>,
+    started: Instant,
+    wake: &Notify,
+) -> AppResult<Waited> {
+    // Settings > Check for new mail every (servers without IDLE).
+    let poll = Duration::from_secs(
+        u64::from(crate::settings::load(state).map_or(2, |s| s.check_every_mins))
+            .saturating_mul(60),
+    );
+    // A wake that came during the pass left its permit in the Notify: the
+    // changes behind it are sent now instead of after an IDLE round trip.
+    // Taken first, so a full sync that is due anyway also answers it.
+    let woken = wake.notified().now_or_never().is_some();
+    let remaining = FULL_SYNC_EVERY.max(poll).saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Ok(Waited::Reconnect);
+    }
+    if woken {
+        return Ok(Waited::Pass(Box::new(conn), Trigger::Woken));
+    }
+    match inbox {
+        Some(path) if conn.supports_idle() => {
+            let why = std::sync::OnceLock::new();
+            let stop = async {
+                let reason = tokio::select! {
+                    () = wake.notified() => Trigger::Woken,
+                    // The periodic full sync is due.
+                    () = tokio::time::sleep(remaining) => Trigger::Connected,
+                };
+                let _ = why.set(reason);
+            };
+            match conn.idle_until(path, stop).await {
+                Ok((conn, IdleEnd::Stopped)) if why.get() == Some(&Trigger::Woken) => {
+                    Ok(Waited::Pass(Box::new(conn), Trigger::Woken))
+                }
+                Ok((_, IdleEnd::Stopped)) => Ok(Waited::Reconnect),
+                Ok((conn, IdleEnd::Changed | IdleEnd::Quiet)) => {
+                    Ok(Waited::Pass(Box::new(conn), Trigger::Waited))
+                }
+                // Ending IDLE for a wake or the full sync found the
+                // connection broken: log in again at once, as before.
+                Err(error) if why.get().is_some() => {
+                    eprintln!("mail sync: reconnecting after IDLE ended badly: {error}");
+                    Ok(Waited::Reconnect)
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+        _ => {
+            tokio::select! {
+                () = tokio::time::sleep(poll.min(remaining)) => {
+                    Ok(Waited::Pass(Box::new(conn), Trigger::Waited))
+                }
+                () = wake.notified() => {
+                    // The connection sat quiet: make sure it still works
+                    // before sending changes on it, or log in again.
+                    match conn.noop().await {
+                        Ok(()) => Ok(Waited::Pass(Box::new(conn), Trigger::Woken)),
+                        Err(error) => {
+                            eprintln!("mail sync: reconnecting, connection went quiet: {error}");
+                            Ok(Waited::Reconnect)
+                        }
+                    }
                 }
             }
         }
@@ -321,10 +464,6 @@ fn stop_if_disconnected(error: AppError, problem: &mut Option<AppError>) -> AppR
 /// Errors after which the connection can't be used for anything else.
 fn ends_session(kind: &str) -> bool {
     matches!(kind, "connect" | "tls" | "auth" | "config" | "keyring")
-}
-
-const fn should_sync(folder: &Folder) -> bool {
-    !matches!(folder.role, FolderRole::All | FolderRole::Flagged)
 }
 
 async fn apply(conn: &mut ImapConnection, op: &Op) -> Result<(), mail_sync::SyncError> {
@@ -399,14 +538,20 @@ async fn apply(conn: &mut ImapConnection, op: &Op) -> Result<(), mail_sync::Sync
     }
 }
 
+/// Send the changes queued in the app, oldest first. The folders they touch
+/// are added to `touched`, so the pass after can check the result.
 async fn replay_ops(
     state: &AppState,
     account: &Account,
     conn: &mut ImapConnection,
+    touched: &mut HashSet<String>,
 ) -> AppResult<()> {
     for pending in state.store.list_ops(&account.id)? {
         let result = match serde_json::from_value::<Op>(pending.payload.clone()) {
-            Ok(op) => apply(conn, &op).await,
+            Ok(op) => {
+                touched.extend(op_folders(&op).into_iter().flatten().map(str::to_owned));
+                apply(conn, &op).await
+            }
             Err(_) => Ok(()),
         };
         match result {
@@ -819,6 +964,50 @@ mod tests {
         // Older mail that was never downloaded is not treated as a gap.
         let local: HashSet<u32> = (4001..=5000).collect();
         assert!(uids_to_fetch(&big, &local, 5000, true).is_empty());
+    }
+
+    #[test]
+    fn a_wake_with_changes_syncs_only_what_they_touched() {
+        assert_eq!(scope_of(Trigger::Connected, false), Scope::All);
+        assert_eq!(scope_of(Trigger::Connected, true), Scope::All);
+        assert_eq!(scope_of(Trigger::Waited, false), Scope::Inbox);
+        assert_eq!(scope_of(Trigger::Woken, true), Scope::Changes);
+        // "Check now": nothing queued, so everything is checked.
+        assert_eq!(scope_of(Trigger::Woken, false), Scope::All);
+
+        // Marking mail read in Archive checks Archive, not every folder.
+        assert!(folder_due(Scope::Changes, FolderRole::Archive, true));
+        assert!(!folder_due(Scope::Changes, FolderRole::Archive, false));
+        assert!(!folder_due(Scope::Changes, FolderRole::Trash, false));
+        for role in [FolderRole::Inbox, FolderRole::Sent, FolderRole::Drafts] {
+            assert!(folder_due(Scope::Changes, role, false), "{role:?}");
+        }
+        assert!(folder_due(Scope::Inbox, FolderRole::Inbox, false));
+        assert!(!folder_due(Scope::Inbox, FolderRole::Sent, false));
+        assert!(folder_due(Scope::Inbox, FolderRole::Sent, true));
+        assert!(folder_due(Scope::All, FolderRole::Trash, false));
+        // Virtual views are never synced on their own.
+        assert!(!folder_due(Scope::All, FolderRole::All, true));
+        assert!(!folder_due(Scope::Changes, FolderRole::Flagged, true));
+    }
+
+    #[test]
+    fn a_move_touches_both_folders() {
+        let moved = Op::MoveByMessageId {
+            from: "INBOX".into(),
+            message_id: "a@b.c".into(),
+            to: "Archive".into(),
+            create_target: false,
+        };
+        assert_eq!(op_folders(&moved), [Some("INBOX"), Some("Archive")]);
+        let flagged = Op::SetFlags {
+            folder: "Work".into(),
+            uids: vec![3],
+            seen: Some(true),
+            flagged: None,
+            answered: None,
+        };
+        assert_eq!(op_folders(&flagged), [Some("Work"), None]);
     }
 
     #[test]
