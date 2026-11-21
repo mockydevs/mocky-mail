@@ -163,15 +163,49 @@ pub fn display_safe(text: &str) -> String {
         .to_owned()
 }
 
-/// A file name that is safe to show and to save: no directories, no hidden
-/// direction tricks, not empty, and not "." or "..".
+/// Whether Windows treats this name as a device (`CON`, `NUL`, `COM1`...)
+/// whatever its extension, so a file can't be called that.
+fn is_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|rest| matches!(rest, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
+}
+
+/// A file name that is safe to show and to save on every system: no
+/// directories, no hidden direction tricks, not empty, not "." or "..",
+/// and nothing Windows refuses in a name (`: * ? " < > |`, a trailing dot
+/// or space, device names such as `CON`). A colon is the dangerous one: on
+/// Windows `Scan 12:30.pdf` would be written into a hidden stream of a
+/// file called `Scan 12`.
 #[must_use]
 pub fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
-    let cleaned = display_safe(base);
-    let cleaned = cleaned.trim_start_matches('.').trim();
+    let cleaned: String = display_safe(base)
+        .chars()
+        .map(|c| {
+            if matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .trim();
     if cleaned.is_empty() {
         FALLBACK_FILE_NAME.to_owned()
+    } else if is_device_name(cleaned) {
+        format!("_{cleaned}")
     } else {
         cleaned.to_owned()
     }
@@ -248,10 +282,22 @@ fn inline_image(part: &MessagePart<'_>) -> Option<InlineImage> {
     })
 }
 
+/// Whether the HTML body shows this part through a `cid:` reference.
+fn shown_inline(part: &MessagePart<'_>, html: &str) -> bool {
+    inline_image(part).is_some_and(|image| html.contains(&format!("cid:{}", image.content_id)))
+}
+
 fn attachment_parts<'a>(message: &'a Message<'a>) -> impl Iterator<Item = &'a MessagePart<'a>> {
+    // An image with a Content-ID is only "inline" when the body really
+    // shows it. In plain-text mail, or HTML that never refers to it, it
+    // would be neither displayed nor listed, so there it stays a download.
+    let html = message
+        .body_html(0)
+        .map(std::borrow::Cow::into_owned)
+        .unwrap_or_default();
     message
         .attachments()
-        .filter(|part| matches!(part.body, PartType::Message(_)) || inline_image(part).is_none())
+        .filter(move |part| matches!(part.body, PartType::Message(_)) || !shown_inline(part, &html))
 }
 
 fn attachment_info(part: &MessagePart<'_>) -> AttachmentInfo {
@@ -479,6 +525,14 @@ SGVsbG8=\r\n\
         assert_eq!(safe_file_name(".."), FALLBACK_FILE_NAME);
         assert_eq!(safe_file_name("C:\\Users\\x\\report.pdf"), "report.pdf");
         assert_eq!(safe_file_name(".bashrc"), "bashrc");
+        // Names Windows can't store, or stores somewhere unexpected.
+        assert_eq!(safe_file_name("Scan 12:30.pdf"), "Scan 12_30.pdf");
+        assert_eq!(safe_file_name("what?*.txt"), "what__.txt");
+        assert_eq!(safe_file_name("notes. "), "notes");
+        assert_eq!(safe_file_name("CON.txt"), "_CON.txt");
+        assert_eq!(safe_file_name("com1"), "_com1");
+        assert_eq!(safe_file_name("COM10.log"), "COM10.log");
+        assert_eq!(safe_file_name("console.log"), "console.log");
         assert_eq!(safe_file_name("a\u{0000}b.txt"), "ab.txt");
     }
 

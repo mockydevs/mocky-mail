@@ -48,6 +48,9 @@ fn keep_alive(tcp: &TcpStream) {
 /// Arrival dates further than this in the future of the server's arrival
 /// time come from a sender whose clock is wrong.
 const FUTURE_DATE_SLACK: i64 = 24 * 60 * 60;
+/// The shortest Message-ID looked up on the server (`a@b.c` is five
+/// characters). Shorter text would match unrelated messages.
+pub const MIN_MESSAGE_ID_LEN: usize = 5;
 
 /// The date a message is listed under: its Date header, unless that is
 /// missing or in the future of when the server received it (a sender with a
@@ -527,11 +530,13 @@ impl ImapConnection {
             .filter_map(|fetch| {
                 let uid = fetch.uid?;
                 let arrived = fetch.internal_date().map(|date| date.timestamp());
+                // A reply without the header is the server reporting a flag
+                // change on some other message while this command ran. It
+                // must not replace that message's details with a placeholder.
+                let header = fetch.header()?;
                 // Never drop a message: one we can't parse is still listed.
-                let mut summary = fetch
-                    .header()
-                    .and_then(|header| parse_summary(header).ok())
-                    .unwrap_or_else(|| unreadable_summary(arrived));
+                let mut summary =
+                    parse_summary(header).unwrap_or_else(|_| unreadable_summary(arrived));
                 summary.date = listed_date(summary.date, arrived);
                 Some(RemoteMessage {
                     uid,
@@ -601,10 +606,12 @@ impl ImapConnection {
                 transfer_timeout(size),
             )
             .await?;
+        // A flags-only reply for the same message may come first; the
+        // body is in whichever reply carries one.
         Ok(fetches
             .iter()
-            .find(|f| f.uid == Some(uid))
-            .and_then(|f| f.body().map(<[u8]>::to_vec)))
+            .filter(|f| f.uid == Some(uid))
+            .find_map(|f| f.body().map(<[u8]>::to_vec)))
     }
 
     /// Every UID in the folder (to notice messages deleted elsewhere).
@@ -620,6 +627,7 @@ impl ImapConnection {
     }
 
     /// UIDs of messages in the folder with this Message-ID (usually one).
+    /// See [`MIN_MESSAGE_ID_LEN`] for IDs that are refused.
     ///
     /// # Errors
     /// Invalid IDs, network or server errors.
@@ -628,6 +636,14 @@ impl ImapConnection {
         path: &str,
         message_id: &str,
     ) -> Result<Vec<u32>, SyncError> {
+        // The server matches any Message-ID that contains the text, and an
+        // empty text matches every message. Callers move and delete what
+        // this finds, so an ID too short to be one is refused.
+        if message_id.trim().len() < MIN_MESSAGE_ID_LEN {
+            return Err(SyncError::Invalid(
+                "this message has no usable Message-ID to look it up by.".to_owned(),
+            ));
+        }
         let query = format!("HEADER Message-ID {}", quote_search(message_id)?);
         self.ensure_selected(path).await?;
         let host = self.host.clone();

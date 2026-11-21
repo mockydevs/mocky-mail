@@ -299,8 +299,16 @@ impl DavClient {
                 url = next;
                 continue;
             }
-            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            if status == StatusCode::UNAUTHORIZED {
                 return Err(SyncError::Auth);
+            }
+            // Signed in, but not allowed here: a read-only or shared
+            // collection, or a web server with no address book or calendar.
+            // The password is not the problem.
+            if status == StatusCode::FORBIDDEN {
+                return Err(SyncError::Refused(
+                    "the server doesn't allow that here (403 Forbidden)".to_owned(),
+                ));
             }
             let headers = response.headers().clone();
             let bytes = response.bytes().await.map_err(|e| http_error(&url, &e))?;

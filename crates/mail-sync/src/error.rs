@@ -65,6 +65,13 @@ pub enum SyncError {
         /// Server host.
         host: String,
     },
+    /// The connection failed part-way through handing a message over, so
+    /// the server may or may not have accepted it.
+    #[error("the connection to {host} dropped while the message was being sent.")]
+    SendUnconfirmed {
+        /// Server host.
+        host: String,
+    },
     /// The encrypted connection could not be set up.
     #[error("couldn't make a secure connection to {host}: {detail}")]
     Tls {
@@ -141,7 +148,10 @@ impl SyncError {
     #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         match self {
-            Self::Connect { .. } | Self::Timeout { .. } | Self::Dropped => ErrorKind::Connect,
+            Self::Connect { .. }
+            | Self::Timeout { .. }
+            | Self::SendUnconfirmed { .. }
+            | Self::Dropped => ErrorKind::Connect,
             Self::Tls { .. } => ErrorKind::Tls,
             Self::Auth => ErrorKind::Auth,
             Self::Config(_) => ErrorKind::Config,
@@ -155,7 +165,11 @@ impl SyncError {
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         match self {
-            Self::Connect { .. } | Self::Timeout { .. } | Self::Dropped | Self::Protocol(_) => true,
+            Self::Connect { .. }
+            | Self::Timeout { .. }
+            | Self::SendUnconfirmed { .. }
+            | Self::Dropped
+            | Self::Protocol(_) => true,
             Self::Send { permanent, .. } => !*permanent,
             Self::Tls { .. }
             | Self::Refused(_)

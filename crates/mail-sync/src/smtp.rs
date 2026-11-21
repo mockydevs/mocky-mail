@@ -76,6 +76,19 @@ fn classify(host: &str, error: &lettre::transport::smtp::Error) -> SyncError {
     }
 }
 
+/// Whether the exchange broke off after the connection was up: a dropped
+/// link or a timeout between commands, with no reply from the server. The
+/// message may already have been accepted. Failing to connect, a TLS
+/// failure and any SMTP reply are all definite answers instead.
+fn mid_session(error: &lettre::transport::smtp::Error) -> bool {
+    if error.status().is_some() || error.is_tls() {
+        return false;
+    }
+    // lettre keeps the error kind private; its text starts with the kind.
+    let text = error.to_string();
+    text.starts_with("network error") || text.starts_with("response error")
+}
+
 /// Connect and log in, then disconnect. Used when adding an account.
 ///
 /// # Errors
@@ -97,7 +110,9 @@ pub async fn test_login(server: &ServerConfig, credentials: &Credentials) -> Res
 ///
 /// # Errors
 /// [`SyncError::Send`] with `permanent` set for 5xx replies, or connection
-/// errors (all of which are worth retrying).
+/// errors (all of which are worth retrying). [`SyncError::SendUnconfirmed`]
+/// when the exchange broke off after it began, so the message may have
+/// gone out.
 pub async fn send(
     server: &ServerConfig,
     credentials: &Credentials,
@@ -119,5 +134,13 @@ pub async fn send(
         .send_raw(&envelope, raw)
         .await
         .map(|_| ())
-        .map_err(|e| classify(&server.host, &e))
+        .map_err(|e| {
+            if mid_session(&e) {
+                SyncError::SendUnconfirmed {
+                    host: server.host.clone(),
+                }
+            } else {
+                classify(&server.host, &e)
+            }
+        })
 }

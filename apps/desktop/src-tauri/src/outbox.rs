@@ -264,8 +264,12 @@ pub async fn send_message(
             u64::from(crate::settings::load(&state)?.undo_send_secs),
         ),
     })?;
-    if let Some(old) = draft.draft_message_id.as_deref() {
-        remove_saved_draft(&app, &state, &account.id, old)?;
+    // The message is queued. A failure tidying up the saved draft must not
+    // be reported as a failed send, or the user sends it a second time.
+    if let Some(old) = draft.draft_message_id.as_deref()
+        && let Err(error) = remove_saved_draft(&app, &state, &account.id, old)
+    {
+        eprintln!("couldn't remove the saved draft of a queued message: {error}");
     }
     state.outbox_wake.notify_one();
     events::outbox_changed(&app, &state);
@@ -424,6 +428,21 @@ fn join(list: &[Mailbox]) -> String {
         .join(", ")
 }
 
+/// The envelope recipients that are in neither To nor Cc: the Bcc list,
+/// which the message itself never carries.
+fn hidden_recipients(recipients: &[String], to: &[Mailbox], cc: &[Mailbox]) -> String {
+    recipients
+        .iter()
+        .filter(|address| {
+            !to.iter()
+                .chain(cc)
+                .any(|shown| shown.address.eq_ignore_ascii_case(address))
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `outbox_edit`: take a queued or failed message back into compose.
 /// Attachments are restored as files in the app's cache folder.
 #[tauri::command]
@@ -447,7 +466,7 @@ pub async fn outbox_edit(
         account_id: message.entry.account_id,
         to: join(&summary.to),
         cc: join(&summary.cc),
-        bcc: String::new(),
+        bcc: hidden_recipients(&message.recipients, &summary.to, &summary.cc),
         subject: summary.subject,
         body_text: body.text.unwrap_or_default(),
         in_reply_to: summary.in_reply_to,
@@ -521,16 +540,25 @@ async fn process(app: &AppHandle, state: &AppState) -> AppResult<Duration> {
         let t = now();
         let result = match entry.item.state {
             OutboxState::Queued {
-                maybe_sent: true, ..
-            } => resolve_duplicate(app, state, &entry).await,
-            OutboxState::Queued {
                 next_attempt_at, ..
             } if next_attempt_at > t => {
                 wait = wait.min(Duration::from_secs(next_attempt_at.saturating_sub(t)));
                 Ok(())
             }
+            OutboxState::Queued {
+                maybe_sent: true, ..
+            } => resolve_duplicate(app, state, &entry).await,
             OutboxState::Queued { .. } => Box::pin(send_one(app, state, &entry)).await,
-            OutboxState::Sent { .. } | OutboxState::Cancelled => forget(app, state, &entry.id),
+            // Delivered, but its copy hasn't reached Sent yet.
+            OutboxState::Sent { at } => match finish_sent(app, state, &entry, at, t).await {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    wait = wait.min(SENT_COPY_RETRY);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
+            OutboxState::Cancelled => forget(app, state, &entry.id),
             OutboxState::Sending { .. } | OutboxState::Failed { .. } => Ok(()),
         };
         // One message that can't be handled (an unreadable entry, a
@@ -547,6 +575,42 @@ fn forget(app: &AppHandle, state: &AppState, id: &str) -> AppResult<()> {
     state.store.delete_outbox(id)?;
     events::outbox_changed(app, state);
     Ok(())
+}
+
+/// How long a delivered message waits for its copy to reach Sent before
+/// the app stops trying.
+const SENT_COPY_GIVE_UP_SECS: u64 = 24 * 60 * 60;
+/// How soon a failed save to Sent is tried again.
+const SENT_COPY_RETRY: Duration = Duration::from_mins(1);
+
+/// A delivered message still in the Outbox is waiting for its copy in Sent
+/// (the save failed, or the app closed first). Returns whether it is done
+/// and gone from the Outbox.
+async fn finish_sent(
+    app: &AppHandle,
+    state: &AppState,
+    entry: &OutboxEntry,
+    sent_at: u64,
+    t: u64,
+) -> AppResult<bool> {
+    let filed = if t.saturating_sub(sent_at) >= SENT_COPY_GIVE_UP_SECS {
+        true
+    } else {
+        match (
+            state.store.get_account(&entry.account_id),
+            state.store.get_outbox(&entry.id),
+        ) {
+            (Ok(account), Ok(message)) => {
+                file_sent_copy(state, &account, entry, &message.raw).await
+            }
+            // The account or the message is gone: nothing left to file.
+            _ => true,
+        }
+    };
+    if filed {
+        forget(app, state, &entry.id)?;
+    }
+    Ok(filed)
 }
 
 /// After a crash mid-send: look in Sent before sending again. If there is
@@ -678,6 +742,13 @@ async fn send_one(app: &AppHandle, state: &AppState, entry: &OutboxEntry) -> App
                     message,
                     permanent: true,
                 }) => SendOutcome::Permanent(message),
+                // The hand-over broke off part-way. Where the provider files
+                // sent mail itself, Sent can tell whether it went through.
+                Err(error @ mail_sync::SyncError::SendUnconfirmed { .. })
+                    if account.auth != AuthKind::Password =>
+                {
+                    SendOutcome::Uncertain(error.to_string())
+                }
                 Err(error) => SendOutcome::Transient(error.to_string()),
             }
         }
@@ -686,35 +757,71 @@ async fn send_one(app: &AppHandle, state: &AppState, entry: &OutboxEntry) -> App
     transition(item.finish(outcome, now(), &RetryPolicy::default()))?;
     update(app, state, &entry.id, &item)?;
     if delivered {
-        after_delivery(state, &account, entry, &message.raw).await;
-        state.store.delete_outbox(&entry.id)?;
+        mark_replied(state, &account, entry);
+        if file_sent_copy(state, &account, entry, &message.raw).await {
+            state.store.delete_outbox(&entry.id)?;
+        } else {
+            // It stays in the Outbox, marked sent, until its copy is saved.
+            state.outbox_wake.notify_one();
+        }
         events::outbox_changed(app, state);
     }
     Ok(())
 }
 
-async fn after_delivery(state: &AppState, account: &Account, entry: &OutboxEntry, raw: &[u8]) {
+/// Save a copy of a delivered message to Sent, for providers that don't do
+/// that themselves. Returns false when it should be tried again later: the
+/// message is on its way, but would otherwise exist nowhere in the mailbox.
+async fn file_sent_copy(
+    state: &AppState,
+    account: &Account,
+    entry: &OutboxEntry,
+    raw: &[u8],
+) -> bool {
     // Gmail and Microsoft 365 file sent mail themselves; others need a copy.
-    if account.auth == AuthKind::Password {
-        let sent = entry.sent_folder_hint.clone().or_else(|| {
-            folder_path(state, &account.id, FolderRole::Sent)
-                .ok()
-                .flatten()
-        });
-        if let (Some(path), Ok(credentials)) =
-            (sent, credentials::for_account(state, account).await)
-        {
-            match ImapConnection::connect(&to_sync(&account.imap), &credentials).await {
-                Ok(mut conn) => {
-                    if let Err(error) = conn.append(&path, raw, "(\\Seen)").await {
-                        eprintln!("couldn't save a copy to Sent: {error}");
-                    }
-                    conn.logout().await;
-                }
-                Err(error) => eprintln!("couldn't save a copy to Sent: {error}"),
-            }
-        }
+    if account.auth != AuthKind::Password {
+        return true;
     }
+    let sent = entry.sent_folder_hint.clone().or_else(|| {
+        folder_path(state, &account.id, FolderRole::Sent)
+            .ok()
+            .flatten()
+    });
+    let Some(path) = sent else {
+        return true;
+    };
+    let Ok(credentials) = credentials::for_account(state, account).await else {
+        return false;
+    };
+    let mut conn = match ImapConnection::connect(&to_sync(&account.imap), &credentials).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            eprintln!("couldn't save a copy to Sent yet: {error}");
+            return false;
+        }
+    };
+    // A copy saved just before the connection dropped or the app closed
+    // must not be saved a second time.
+    let already_there = match entry.message_id_header.as_deref() {
+        Some(id) => conn.contains_message_id(&path, id).await.unwrap_or(false),
+        None => false,
+    };
+    let filed = already_there
+        || match conn.append(&path, raw, "(\\Seen)").await {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("couldn't save a copy to Sent: {error}");
+                // A refusal (no such folder, over quota) won't change by
+                // asking again; a dropped connection will.
+                !error.is_transient()
+            }
+        };
+    conn.logout().await;
+    filed
+}
+
+/// Mark the message this one answers as replied to, here and on the server.
+fn mark_replied(state: &AppState, account: &Account, entry: &OutboxEntry) {
     if let Some(original) = &entry.reply_to_message_id
         && let Ok(stored) = state.store.get_message(original)
     {
@@ -740,6 +847,26 @@ async fn after_delivery(state: &AppState, account: &Account, entry: &OutboxEntry
 mod tests {
     use super::*;
     use mail_sync::SyncError;
+
+    #[test]
+    fn editing_a_queued_message_brings_back_its_bcc() {
+        let shown = |address: &str| Mailbox {
+            name: None,
+            address: address.to_owned(),
+        };
+        let envelope = [
+            "a@x.co".to_owned(),
+            "Boss@x.co".to_owned(),
+            "c@x.co".to_owned(),
+            "audit@x.co".to_owned(),
+        ];
+        assert_eq!(
+            hidden_recipients(&envelope, &[shown("A@x.co")], &[shown("c@x.co")]),
+            "Boss@x.co, audit@x.co"
+        );
+        let only_to = ["a@x.co".to_owned()];
+        assert_eq!(hidden_recipients(&only_to, &[shown("a@x.co")], &[]), "");
+    }
 
     #[test]
     fn a_missing_sent_folder_ends_the_check_instead_of_looping() {

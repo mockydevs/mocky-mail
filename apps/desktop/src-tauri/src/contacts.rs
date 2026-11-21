@@ -214,6 +214,31 @@ async fn sync_all(app: &AppHandle, state: &Arc<AppState>) -> Vec<AddressBookStat
     out
 }
 
+/// Delete a contact on the server. One the server refuses to delete is
+/// left there rather than failing the whole sync.
+async fn push_delete(
+    client: &DavClient,
+    book: &Url,
+    href: &str,
+    etag: Option<&str>,
+) -> Result<(), SyncError> {
+    let mut deleted = client.delete_card(book, href, etag).await;
+    // Changed elsewhere since: the delete, being newer, wins.
+    if matches!(deleted, Err(SyncError::Refused(_))) {
+        deleted = client.delete_card(book, href, None).await;
+    }
+    match deleted {
+        // The server won't delete it at all (a read-only book). Asking
+        // again on every sync would block everything after it; the next
+        // download brings the contact back instead.
+        Err(SyncError::Refused(reason)) => {
+            eprintln!("contacts: the server kept a deleted contact: {reason}");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
 /// Sync one account. `Ok(Some(reason))` when it has no address book here.
 async fn sync_account(
     state: &AppState,
@@ -248,9 +273,7 @@ async fn sync_account(
         match pending.contact.state {
             ContactState::Deleted => {
                 if let Some(href) = &pending.href {
-                    client
-                        .delete_card(&book, href, pending.etag.as_deref())
-                        .await?;
+                    push_delete(&client, &book, href, pending.etag.as_deref()).await?;
                 }
                 state.store.forget_contact(&id)?;
             }

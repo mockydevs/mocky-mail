@@ -248,6 +248,84 @@ fn vevents(text: &str) -> Vec<Component> {
         .collect()
 }
 
+/// The IANA zone for a Windows time zone name, as Outlook and Exchange
+/// write them in a `TZID`.
+fn windows_zone(id: &str) -> Option<&'static str> {
+    let name = match id {
+        // Africa.
+        "E. Africa Standard Time" => "Africa/Nairobi",
+        "South Africa Standard Time" => "Africa/Johannesburg",
+        "W. Central Africa Standard Time" => "Africa/Lagos",
+        "Egypt Standard Time" => "Africa/Cairo",
+        "Morocco Standard Time" => "Africa/Casablanca",
+        "Libya Standard Time" => "Africa/Tripoli",
+        "Namibia Standard Time" => "Africa/Windhoek",
+        "Sudan Standard Time" => "Africa/Khartoum",
+        "South Sudan Standard Time" => "Africa/Juba",
+        "Mauritius Standard Time" => "Indian/Mauritius",
+        // Europe.
+        "GMT Standard Time" => "Europe/London",
+        "W. Europe Standard Time" => "Europe/Berlin",
+        "Romance Standard Time" => "Europe/Paris",
+        "Central Europe Standard Time" => "Europe/Budapest",
+        "Central European Standard Time" => "Europe/Warsaw",
+        "E. Europe Standard Time" => "Europe/Chisinau",
+        "FLE Standard Time" => "Europe/Kyiv",
+        "GTB Standard Time" => "Europe/Bucharest",
+        "Turkey Standard Time" => "Europe/Istanbul",
+        "Russian Standard Time" => "Europe/Moscow",
+        "Belarus Standard Time" => "Europe/Minsk",
+        // Middle East and Asia.
+        "Israel Standard Time" => "Asia/Jerusalem",
+        "Jordan Standard Time" => "Asia/Amman",
+        "Middle East Standard Time" => "Asia/Beirut",
+        "Arab Standard Time" => "Asia/Riyadh",
+        "Arabic Standard Time" => "Asia/Baghdad",
+        "Arabian Standard Time" => "Asia/Dubai",
+        "Iran Standard Time" => "Asia/Tehran",
+        "Pakistan Standard Time" => "Asia/Karachi",
+        "India Standard Time" => "Asia/Kolkata",
+        "Sri Lanka Standard Time" => "Asia/Colombo",
+        "Nepal Standard Time" => "Asia/Kathmandu",
+        "Bangladesh Standard Time" => "Asia/Dhaka",
+        "SE Asia Standard Time" => "Asia/Bangkok",
+        "China Standard Time" => "Asia/Shanghai",
+        "Singapore Standard Time" => "Asia/Singapore",
+        "Taipei Standard Time" => "Asia/Taipei",
+        "W. Australia Standard Time" => "Australia/Perth",
+        "Tokyo Standard Time" => "Asia/Tokyo",
+        "Korea Standard Time" => "Asia/Seoul",
+        // Australia and the Pacific.
+        "Cen. Australia Standard Time" => "Australia/Adelaide",
+        "AUS Central Standard Time" => "Australia/Darwin",
+        "E. Australia Standard Time" => "Australia/Brisbane",
+        "AUS Eastern Standard Time" => "Australia/Sydney",
+        "Tasmania Standard Time" => "Australia/Hobart",
+        "New Zealand Standard Time" => "Pacific/Auckland",
+        "Hawaiian Standard Time" => "Pacific/Honolulu",
+        // The Americas.
+        "Alaskan Standard Time" => "America/Anchorage",
+        "Pacific Standard Time" => "America/Los_Angeles",
+        "US Mountain Standard Time" => "America/Phoenix",
+        "Mountain Standard Time" => "America/Denver",
+        "Central Standard Time" => "America/Chicago",
+        "Canada Central Standard Time" => "America/Regina",
+        "Central Standard Time (Mexico)" => "America/Mexico_City",
+        "Eastern Standard Time" => "America/New_York",
+        "US Eastern Standard Time" => "America/Indiana/Indianapolis",
+        "SA Pacific Standard Time" => "America/Bogota",
+        "Atlantic Standard Time" => "America/Halifax",
+        "Venezuela Standard Time" => "America/Caracas",
+        "Pacific SA Standard Time" => "America/Santiago",
+        "Newfoundland Standard Time" => "America/St_Johns",
+        "E. South America Standard Time" => "America/Sao_Paulo",
+        "Argentina Standard Time" => "America/Argentina/Buenos_Aires",
+        "UTC" | "Coordinated Universal Time" | "Greenwich Standard Time" => "UTC",
+        _ => return None,
+    };
+    Some(name)
+}
+
 /// A time zone from a `TZID`: an IANA name, a name with a vendor prefix
 /// (`/mozilla.org/.../Europe/Berlin`), or a common Windows name.
 fn zone_for(id: &str) -> Option<chrono_tz::Tz> {
@@ -266,24 +344,7 @@ fn zone_for(id: &str) -> Option<chrono_tz::Tz> {
             return Some(tz);
         }
     }
-    let windows = match id {
-        "E. Africa Standard Time" => "Africa/Nairobi",
-        "South Africa Standard Time" => "Africa/Johannesburg",
-        "W. Central Africa Standard Time" => "Africa/Lagos",
-        "Egypt Standard Time" => "Africa/Cairo",
-        "GMT Standard Time" => "Europe/London",
-        "W. Europe Standard Time" => "Europe/Berlin",
-        "Romance Standard Time" => "Europe/Paris",
-        "Arabian Standard Time" => "Asia/Dubai",
-        "India Standard Time" => "Asia/Kolkata",
-        "China Standard Time" => "Asia/Shanghai",
-        "Eastern Standard Time" => "America/New_York",
-        "Central Standard Time" => "America/Chicago",
-        "Pacific Standard Time" => "America/Los_Angeles",
-        "UTC" | "Coordinated Universal Time" | "Greenwich Standard Time" => "UTC",
-        _ => return None,
-    };
-    windows.parse().ok()
+    windows_zone(id).and_then(|name| name.parse().ok())
 }
 
 fn tz_of(prop: &Prop) -> Tz {
@@ -1591,6 +1652,14 @@ mod tests {
         assert_eq!(
             zone_for("E. Africa Standard Time"),
             Some(chrono_tz::Tz::Africa__Nairobi)
+        );
+        assert_eq!(
+            zone_for("\"Tokyo Standard Time\""),
+            Some(chrono_tz::Tz::Asia__Tokyo)
+        );
+        assert_eq!(
+            zone_for("AUS Eastern Standard Time"),
+            Some(chrono_tz::Tz::Australia__Sydney)
         );
     }
 

@@ -129,6 +129,10 @@ pub enum SendOutcome {
     Transient(String),
     /// A permanent refusal (5xx reply). Retrying will not help.
     Permanent(String),
+    /// The exchange broke off after it began, so the server may have
+    /// accepted the message. Only for accounts whose Sent folder can tell:
+    /// it is looked up there before anything is sent again.
+    Uncertain(String),
 }
 
 /// A transition that is not allowed from the current state.
@@ -253,6 +257,12 @@ impl OutboxItem {
             SendOutcome::Transient(_) => OutboxState::Queued {
                 next_attempt_at: now.saturating_add(policy.delay_after(self.attempts)),
                 maybe_sent: false,
+            },
+            // Wait as for a retry (the server needs a moment to file the
+            // message), then check Sent before sending again.
+            SendOutcome::Uncertain(_) => OutboxState::Queued {
+                next_attempt_at: now.saturating_add(policy.delay_after(self.attempts)),
+                maybe_sent: true,
             },
         };
         Ok(())
@@ -413,6 +423,38 @@ mod tests {
     use proptest::prelude::*;
 
     const T0: UnixSeconds = 1_700_000_000;
+
+    #[test]
+    fn an_attempt_that_may_have_gone_out_is_checked_before_sending_again() {
+        let policy = RetryPolicy::default();
+        let mut item = sending(T0);
+        item.finish(SendOutcome::Uncertain("dropped".into()), T0, &policy)
+            .unwrap();
+        let OutboxState::Queued {
+            next_attempt_at,
+            maybe_sent,
+        } = item.state
+        else {
+            panic!("expected it back in the queue, got {:?}", item.state);
+        };
+        assert!(maybe_sent);
+        assert!(next_attempt_at > T0);
+        // It can't be sent again until Sent has been looked at.
+        assert!(item.clone().begin_send(next_attempt_at).is_err());
+        let mut found = item.clone();
+        found
+            .resolve_duplicate_check(true, next_attempt_at)
+            .unwrap();
+        assert_eq!(
+            found.state,
+            OutboxState::Sent {
+                at: next_attempt_at
+            }
+        );
+        item.resolve_duplicate_check(false, next_attempt_at)
+            .unwrap();
+        assert!(item.begin_send(next_attempt_at).is_ok());
+    }
 
     fn sending(now: UnixSeconds) -> OutboxItem {
         let mut item = OutboxItem::new(now);
