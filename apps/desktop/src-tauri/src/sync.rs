@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
 
-use mail_core::folders::{FolderRole, decode_folder_name, detect_role};
+use mail_core::folders::{FolderRole, decode_folder_name, detect_role_unclaimed, special_use_role};
 use mail_core::message::{parse_body, parse_summary};
 use mail_store::{Account, Folder, MessageFlags, NewFolder, OpKind};
 use mail_sync::imap::{FlagChange, ImapConnection, MAX_BACKGROUND_BODY_BYTES, uid_set};
@@ -62,6 +62,18 @@ pub enum Op {
         /// New answered state.
         answered: Option<bool>,
     },
+    /// Change flags on the messages with this Message-ID: ones moved
+    /// locally whose new UID isn't known yet.
+    SetFlagsByMessageId {
+        /// Folder path on the server.
+        folder: String,
+        /// Message-ID without angle brackets.
+        message_id: String,
+        /// New read state.
+        seen: Option<bool>,
+        /// New flagged state.
+        flagged: Option<bool>,
+    },
     /// Move messages.
     Move {
         /// Source folder path.
@@ -108,7 +120,7 @@ pub enum Op {
 /// Database errors.
 pub fn enqueue(state: &AppState, account_id: &str, op: &Op) -> AppResult<()> {
     let kind = match op {
-        Op::SetFlags { .. } => OpKind::SetFlags,
+        Op::SetFlags { .. } | Op::SetFlagsByMessageId { .. } => OpKind::SetFlags,
         Op::Move { .. } | Op::MoveByMessageId { .. } => OpKind::Move,
         Op::Delete { .. } | Op::DeleteByMessageId { .. } => OpKind::Delete,
     };
@@ -136,9 +148,21 @@ pub fn start(app: &AppHandle, state: &Arc<AppState>, account_id: &str) {
 
 async fn run(app: AppHandle, state: Arc<AppState>, account_id: String, wake: Arc<Notify>) {
     let mut backoff = FIRST_BACKOFF;
+    // Whether a rejected sign-in token has already been swapped for a new
+    // one since the last session that worked.
+    let mut fresh_token_tried = false;
     loop {
-        let Ok(account) = state.store.get_account(&account_id) else {
-            return;
+        let account = match state.store.get_account(&account_id) {
+            Ok(account) => account,
+            // The account was removed: this engine is done.
+            Err(mail_store::StoreError::NotFound(_)) => return,
+            // A database hiccup must not end this account's mail for good.
+            Err(error) => {
+                eprintln!("mail sync couldn't read its account; trying again: {error}");
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+                continue;
+            }
         };
         events::sync_status(&app, &account_id, "syncing", None);
         // A bug must not stop this account's mail for good: a session that
@@ -147,6 +171,7 @@ async fn run(app: AppHandle, state: Arc<AppState>, account_id: String, wake: Arc
         let error = match attempt.await {
             Ok(Ok(())) => {
                 backoff = FIRST_BACKOFF;
+                fresh_token_tried = false;
                 continue;
             }
             Ok(Err(error)) => error,
@@ -155,6 +180,16 @@ async fn run(app: AppHandle, state: Arc<AppState>, account_id: String, wake: Arc
                 AppError::internal("Mail sync stopped unexpectedly. Restarting it.")
             }
         };
+        // A cached sign-in token the server no longer accepts is thrown
+        // away and a new one fetched at once, instead of offering the same
+        // token again after the long wait below.
+        if error.kind == "auth"
+            && !fresh_token_tried
+            && lock(&state.access_tokens).remove(&account_id).is_some()
+        {
+            fresh_token_tried = true;
+            continue;
+        }
         let label = if error.kind == "connect" {
             "offline"
         } else {
@@ -311,6 +346,23 @@ async fn apply(conn: &mut ImapConnection, op: &Op) -> Result<(), mail_sync::Sync
             }
             Ok(())
         }
+        Op::SetFlagsByMessageId {
+            folder,
+            message_id,
+            seen,
+            flagged,
+        } => {
+            let uids = conn.uids_with_message_id(folder, message_id).await?;
+            if uids.is_empty() {
+                // Moved on or deleted since: nothing left to change.
+                return Ok(());
+            }
+            let changes = [seen.map(FlagChange::Seen), flagged.map(FlagChange::Flagged)];
+            for change in changes.into_iter().flatten() {
+                conn.store_flags(folder, &uids, change).await?;
+            }
+            Ok(())
+        }
         Op::Move {
             from,
             uids,
@@ -427,7 +479,17 @@ pub(crate) async fn refresh_folders(
     conn: &mut ImapConnection,
 ) -> AppResult<()> {
     let mut paths = Vec::new();
-    for folder in conn.list_folders().await?.iter().filter(|f| f.selectable) {
+    let listed = conn.list_folders().await?;
+    // Roles the server names with special-use flags. A folder that merely
+    // has the same name (Clients/Sent) must not claim one of these.
+    let claimed: Vec<FolderRole> = listed
+        .iter()
+        .filter_map(|f| {
+            let attributes: Vec<&str> = f.attributes.iter().map(String::as_str).collect();
+            special_use_role(&attributes)
+        })
+        .collect();
+    for folder in listed.iter().filter(|f| f.selectable) {
         let attributes: Vec<&str> = folder.attributes.iter().map(String::as_str).collect();
         // Gmail's "Important" is a virtual view of other folders.
         if attributes
@@ -436,7 +498,12 @@ pub(crate) async fn refresh_folders(
         {
             continue;
         }
-        let role = detect_role(&folder.path, &attributes, folder.delimiter.as_deref());
+        let role = detect_role_unclaimed(
+            &folder.path,
+            &attributes,
+            folder.delimiter.as_deref(),
+            &claimed,
+        );
         let name = if role == FolderRole::Inbox {
             "Inbox".to_owned()
         } else {

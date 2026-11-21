@@ -342,6 +342,57 @@ pub async fn update_account(
     Ok(state.store.get_account(&id)?)
 }
 
+/// `reconnect_account`: sign in again to a Google or Microsoft account
+/// whose saved sign-in has expired or been revoked. Without this the only
+/// way back was removing the account, which also deletes its queued
+/// messages and the contacts kept only on this device.
+#[tauri::command]
+pub async fn reconnect_account(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> AppResult<Account> {
+    let account = state.store.get_account(&id)?;
+    let provider = match account.auth {
+        AuthKind::Google => Provider::Google,
+        AuthKind::Microsoft => Provider::Microsoft,
+        AuthKind::Password => {
+            return Err(AppError::invalid(
+                "This account signs in with a password. Update it in Settings instead.",
+            ));
+        }
+    };
+    let signed_in = sign_in(&app, provider, &account.email).await?;
+    // The provider's chooser lets any account be picked; only this one fits.
+    if !signed_in.email.eq_ignore_ascii_case(&account.email) {
+        return Err(AppError::new(
+            "auth",
+            format!(
+                "You signed in as {}, but this account is {}. Sign in with that account.",
+                signed_in.email, account.email
+            ),
+        ));
+    }
+    let credentials = Credentials::OAuth2 {
+        username: account.email.clone(),
+        access_token: signed_in.access_token.clone(),
+    };
+    verify(
+        &to_sync(&account.imap),
+        &to_sync(&account.smtp),
+        &credentials,
+    )
+    .await?;
+    state
+        .secrets
+        .set(&oauth_key(&id), &signed_in.stored_secret)?;
+    cache_token(&state, &id, &signed_in.access_token, signed_in.expires_at);
+    state.wake_sync(Some(&id));
+    state.outbox_wake.notify_one();
+    events::accounts_changed(&app);
+    Ok(account)
+}
+
 /// `remove_account`: stop syncing, forget secrets and local mail. Mail on
 /// the server is not touched.
 #[tauri::command]
@@ -354,9 +405,16 @@ pub fn remove_account(
         engine.task.abort();
     }
     lock(&state.access_tokens).remove(&id);
-    state.secrets.delete(&password_key(&id))?;
-    state.secrets.delete(&oauth_key(&id))?;
+    // The account's row goes first. If that fails, nothing is lost and the
+    // account still works; had its password been deleted first, it would
+    // be left listed but unable to sign in. A secret that can't be removed
+    // afterwards is harmless without its account.
     state.store.delete_account(&id)?;
+    for key in [password_key(&id), oauth_key(&id)] {
+        if let Err(error) = state.secrets.delete(&key) {
+            eprintln!("couldn't remove a saved sign-in of a removed account: {error}");
+        }
+    }
     crate::signatures::remove(&state, &id)?;
     events::accounts_changed(&app);
     events::outbox_changed(&app, &state);

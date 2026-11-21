@@ -16,7 +16,7 @@ use crate::state::AppState;
 use crate::{credentials, events, sync};
 
 /// The level separator the server uses, from any folder that says.
-fn delimiter_of(folders: &[Folder]) -> Option<String> {
+pub(crate) fn delimiter_of(folders: &[Folder]) -> Option<String> {
     folders
         .iter()
         .find_map(|f| f.delimiter.clone())
@@ -25,7 +25,7 @@ fn delimiter_of(folders: &[Folder]) -> Option<String> {
 
 /// Where a new top-level folder goes. Servers that keep every folder under
 /// Inbox (Courier, some Dovecot setups: `INBOX.Clients`) get it there too.
-fn top_level_prefix(folders: &[Folder], delimiter: Option<&str>) -> String {
+pub(crate) fn top_level_prefix(folders: &[Folder], delimiter: Option<&str>) -> String {
     let Some(d) = delimiter else {
         return String::new();
     };

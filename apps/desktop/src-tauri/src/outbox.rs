@@ -16,7 +16,9 @@ use mail_core::outbox::{OutboxItem, OutboxState, RetryPolicy, SendOutcome};
 use mail_core::signature::html_with_signature;
 use mail_store::{Account, AuthKind, NewOutbox, OutboxEntry};
 use mail_sync::imap::ImapConnection;
-use mail_sync::outgoing::{OutgoingAttachment, OutgoingMessage, build, mime_for_file_name};
+use mail_sync::outgoing::{
+    OutgoingAttachment, OutgoingMessage, build, mime_for_file_name, with_bcc_header,
+};
 use mail_sync::smtp;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -325,6 +327,7 @@ pub async fn save_draft(
     draft: Draft,
 ) -> AppResult<DraftSaved> {
     let (account, mut message) = prepare(&state, &draft).await?;
+    let bcc: Vec<String> = message.bcc.iter().map(|m| m.address.clone()).collect();
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
         // Drafts may have no recipients yet; the builder needs one, and Bcc
         // never reaches the stored headers.
@@ -335,7 +338,10 @@ pub async fn save_draft(
         .ok_or_else(|| AppError::invalid("This account has no Drafts folder."))?;
     let credentials = credentials::for_account(&state, &account).await?;
     let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
-    conn.append(&path, &built.raw, "(\\Draft \\Seen)").await?;
+    // The saved copy names the Bcc recipients, or reopening the draft
+    // would lose them.
+    let saved = with_bcc_header(&built.raw, &bcc);
+    conn.append(&path, &saved, "(\\Draft \\Seen)").await?;
     conn.logout().await;
     if let Some(old) = draft
         .draft_message_id
@@ -430,7 +436,7 @@ fn join(list: &[Mailbox]) -> String {
 
 /// The envelope recipients that are in neither To nor Cc: the Bcc list,
 /// which the message itself never carries.
-fn hidden_recipients(recipients: &[String], to: &[Mailbox], cc: &[Mailbox]) -> String {
+fn hidden_recipients(recipients: &[String], to: &[Mailbox], cc: &[Mailbox]) -> Vec<String> {
     recipients
         .iter()
         .filter(|address| {
@@ -439,8 +445,34 @@ fn hidden_recipients(recipients: &[String], to: &[Mailbox], cc: &[Mailbox]) -> S
                 .any(|shown| shown.address.eq_ignore_ascii_case(address))
         })
         .cloned()
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect()
+}
+
+/// The Bcc recipients recorded in a message saved to Drafts or Sent (see
+/// `with_bcc_header`). Messages from other people never have any.
+pub(crate) fn bcc_in(raw: &[u8]) -> Vec<Mailbox> {
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(raw.len());
+    let headers = String::from_utf8_lossy(raw.get(..end).unwrap_or_default());
+    let mut value = String::new();
+    let mut inside = false;
+    for line in headers.split("\r\n") {
+        if inside {
+            // A folded header carries on over lines that start with a space.
+            if !line.starts_with([' ', '\t']) {
+                break;
+            }
+            value.push_str(line.trim());
+        } else if let (Some(name), Some(rest)) = (line.get(..4), line.get(4..))
+            && name.eq_ignore_ascii_case("bcc:")
+        {
+            value.push_str(rest.trim());
+            inside = true;
+        }
+    }
+    parse_address_list(&value).unwrap_or_default()
 }
 
 /// `outbox_edit`: take a queued or failed message back into compose.
@@ -466,7 +498,7 @@ pub async fn outbox_edit(
         account_id: message.entry.account_id,
         to: join(&summary.to),
         cc: join(&summary.cc),
-        bcc: hidden_recipients(&message.recipients, &summary.to, &summary.cc),
+        bcc: hidden_recipients(&message.recipients, &summary.to, &summary.cc).join(", "),
         subject: summary.subject,
         body_text: body.text.unwrap_or_default(),
         in_reply_to: summary.in_reply_to,
@@ -487,7 +519,7 @@ async fn copy_attachments(
     let body = parse_body(raw)?;
     let dir = state
         .cache_dir
-        .join("attachments")
+        .join(crate::attachments::DRAFT_COPIES_DIR)
         .join(safe_file_name(label));
     tokio::fs::create_dir_all(&dir).await?;
     let mut out = Vec::new();
@@ -600,9 +632,7 @@ async fn finish_sent(
             state.store.get_account(&entry.account_id),
             state.store.get_outbox(&entry.id),
         ) {
-            (Ok(account), Ok(message)) => {
-                file_sent_copy(state, &account, entry, &message.raw).await
-            }
+            (Ok(account), Ok(message)) => file_sent_copy(state, &account, entry, &message).await,
             // The account or the message is gone: nothing left to file.
             _ => true,
         }
@@ -758,7 +788,7 @@ async fn send_one(app: &AppHandle, state: &AppState, entry: &OutboxEntry) -> App
     update(app, state, &entry.id, &item)?;
     if delivered {
         mark_replied(state, &account, entry);
-        if file_sent_copy(state, &account, entry, &message.raw).await {
+        if file_sent_copy(state, &account, entry, &message).await {
             state.store.delete_outbox(&entry.id)?;
         } else {
             // It stays in the Outbox, marked sent, until its copy is saved.
@@ -776,7 +806,7 @@ async fn file_sent_copy(
     state: &AppState,
     account: &Account,
     entry: &OutboxEntry,
-    raw: &[u8],
+    message: &mail_store::OutboxMessage,
 ) -> bool {
     // Gmail and Microsoft 365 file sent mail themselves; others need a copy.
     if account.auth != AuthKind::Password {
@@ -806,8 +836,14 @@ async fn file_sent_copy(
         Some(id) => conn.contains_message_id(&path, id).await.unwrap_or(false),
         None => false,
     };
+    // The copy in Sent says who was Bcc'd; the message that was delivered
+    // never does.
+    let bcc = parse_summary(&message.raw)
+        .map(|shown| hidden_recipients(&message.recipients, &shown.to, &shown.cc))
+        .unwrap_or_default();
+    let copy = with_bcc_header(&message.raw, &bcc);
     let filed = already_there
-        || match conn.append(&path, raw, "(\\Seen)").await {
+        || match conn.append(&path, &copy, "(\\Seen)").await {
             Ok(()) => true,
             Err(error) => {
                 eprintln!("couldn't save a copy to Sent: {error}");
@@ -862,10 +898,26 @@ mod tests {
         ];
         assert_eq!(
             hidden_recipients(&envelope, &[shown("A@x.co")], &[shown("c@x.co")]),
-            "Boss@x.co, audit@x.co"
+            ["Boss@x.co", "audit@x.co"]
         );
         let only_to = ["a@x.co".to_owned()];
-        assert_eq!(hidden_recipients(&only_to, &[shown("a@x.co")], &[]), "");
+        assert!(hidden_recipients(&only_to, &[shown("a@x.co")], &[]).is_empty());
+    }
+
+    #[test]
+    fn a_saved_copy_remembers_its_bcc_and_a_delivered_one_never_has_any() {
+        let delivered =
+            b"From: me@x.co\r\nTo: a@x.co\r\nSubject: Hi\r\n\r\nBcc: not-a-header@x.co\r\n";
+        assert!(bcc_in(delivered).is_empty());
+        let saved = with_bcc_header(
+            delivered,
+            &["boss@x.co".to_owned(), "audit@x.co".to_owned()],
+        );
+        let addresses: Vec<String> = bcc_in(&saved).into_iter().map(|m| m.address).collect();
+        assert_eq!(addresses, ["boss@x.co", "audit@x.co"]);
+        // The rest of the message is untouched.
+        assert!(saved.ends_with(delivered));
+        assert_eq!(with_bcc_header(delivered, &[]), delivered);
     }
 
     #[test]

@@ -46,6 +46,7 @@ type AttachmentMeta = {
 
 type MessageDetail = MessageListItem & {
   cc: Mailbox[]; replyTo: Mailbox[];
+  bcc: Mailbox[];           // only on the user's own drafts and sent mail (read from the Bcc header saved with them)
   html: string | null;      // already sanitized, inline images embedded; render only in <iframe sandbox="allow-popups allow-same-origin"> (never allow-scripts); link popups are routed to the system browser by the backend
   text: string | null;
   blockedRemoteImages: number;
@@ -111,6 +112,7 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `add_account` | `{ input: { email, displayName, password, imap, smtp } }` | `Account` (logs in to IMAP and SMTP first; nothing saved on failure) |
 | `add_oauth_account` | `{ input: { email, displayName, provider: "google" \| "microsoft" } }` | `Account` (opens the system browser at the provider's account chooser; `email` may be `""`, and the account picked there is used; may reject `config` until OAuth is configured) |
 | `update_account` | `{ id, patch: { displayName?, password? } }` | `Account` |
+| `reconnect_account` | `{ id }` (Google and Microsoft accounts: sign in again, same address) | `Account` |
 | `remove_account` | `{ id }` | `void` (deletes local mail and keyring entry, not server mail) |
 | `list_accounts` | | `Account[]` |
 | `list_folders` | `{ accountId }` | `Folder[]` (sorted by role, then name) |

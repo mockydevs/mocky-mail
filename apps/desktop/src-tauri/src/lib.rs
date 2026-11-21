@@ -182,6 +182,7 @@ pub fn run() {
             accounts::add_account,
             accounts::add_oauth_account,
             accounts::update_account,
+            accounts::reconnect_account,
             accounts::remove_account,
             mail::list_folders,
             folders::create_folder,

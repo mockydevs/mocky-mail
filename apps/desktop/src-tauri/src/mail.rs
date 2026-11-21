@@ -99,6 +99,8 @@ pub struct MessageDetail {
     #[serde(flatten)]
     item: MessageListItem,
     cc: Vec<Mailbox>,
+    /// Bcc recipients, for the user's own drafts and sent mail.
+    bcc: Vec<Mailbox>,
     reply_to: Vec<Mailbox>,
     html: Option<String>,
     text: Option<String>,
@@ -147,6 +149,7 @@ pub async fn get_message(
     Ok(MessageDetail {
         item: stored.item,
         cc: stored.cc,
+        bcc: crate::outbox::bcc_in(&raw),
         reply_to: stored.reply_to,
         html,
         text: body.text,
@@ -199,22 +202,38 @@ pub fn set_flags(
     let groups = sync::group_by_folder(&state, &ids)?;
     state.store.set_flags(&ids, seen, flagged, None)?;
     for ((account_id, folder_id), messages) in &groups {
-        let uids: Vec<u32> = messages.iter().filter_map(|(_, uid)| *uid).collect();
-        if uids.is_empty() {
-            continue;
-        }
         let folder = state.store.get_folder(folder_id)?;
-        sync::enqueue(
-            &state,
-            account_id,
-            &Op::SetFlags {
-                folder: folder.path,
-                uids,
-                seen,
-                flagged,
-                answered: None,
-            },
-        )?;
+        let uids: Vec<u32> = messages.iter().filter_map(|(_, uid)| *uid).collect();
+        if !uids.is_empty() {
+            sync::enqueue(
+                &state,
+                account_id,
+                &Op::SetFlags {
+                    folder: folder.path.clone(),
+                    uids,
+                    seen,
+                    flagged,
+                    answered: None,
+                },
+            )?;
+        }
+        // Moved here a moment ago, so the server's new UID isn't known
+        // yet: find them by Message-ID, or the change never leaves this
+        // device and the next sync puts the old state back.
+        for (id, _) in messages.iter().filter(|(_, uid)| uid.is_none()) {
+            if let Some(message_id) = state.store.get_message(id)?.message_id_header {
+                sync::enqueue(
+                    &state,
+                    account_id,
+                    &Op::SetFlagsByMessageId {
+                        folder: folder.path.clone(),
+                        message_id: message_id.trim_matches(['<', '>']).to_owned(),
+                        seen,
+                        flagged,
+                    },
+                )?;
+            }
+        }
     }
     notify_changed(&app, &groups.into_keys().collect::<Vec<_>>());
     Ok(())
@@ -263,23 +282,25 @@ fn resolve_target(
             Ok((folder, false))
         }
         MoveTarget::Role { role } => {
-            if let Some(folder) = state
-                .store
-                .list_folders(account_id)?
-                .into_iter()
-                .find(|f| f.role == *role)
-            {
-                return Ok((folder, false));
+            let folders = state.store.list_folders(account_id)?;
+            if let Some(folder) = folders.iter().find(|f| f.role == *role) {
+                return Ok((folder.clone(), false));
             }
-            let path = default_path(*role)
+            let name = default_path(*role)
                 .ok_or_else(|| AppError::invalid("That folder doesn't exist in this account."))?;
+            // Servers that keep every folder under Inbox (`INBOX.Archive`)
+            // refuse a folder created beside it, so the message would bounce
+            // back to where it came from.
+            let delimiter = crate::folders::delimiter_of(&folders);
+            let prefix = crate::folders::top_level_prefix(&folders, delimiter.as_deref());
+            let path = format!("{prefix}{name}");
             let id = state.store.upsert_folder(
                 account_id,
                 &NewFolder {
-                    path,
-                    name: path,
+                    path: &path,
+                    name,
                     role: *role,
-                    delimiter: None,
+                    delimiter: delimiter.as_deref(),
                 },
             )?;
             Ok((state.store.get_folder(&id)?, true))
@@ -380,10 +401,24 @@ pub fn delete_forever(
                 &state,
                 account_id,
                 &Op::Delete {
-                    folder: folder.path,
+                    folder: folder.path.clone(),
                     uids,
                 },
             )?;
+        }
+        // Moved to Trash a moment ago (no UID yet): delete by Message-ID,
+        // or the queued move puts it back in Trash on the server.
+        for (id, _) in messages.iter().filter(|(_, uid)| uid.is_none()) {
+            if let Some(message_id) = state.store.get_message(id)?.message_id_header {
+                sync::enqueue(
+                    &state,
+                    account_id,
+                    &Op::DeleteByMessageId {
+                        folder: folder.path.clone(),
+                        message_id: message_id.trim_matches(['<', '>']).to_owned(),
+                    },
+                )?;
+            }
         }
     }
     state.store.delete_messages(&ids)?;

@@ -92,6 +92,18 @@ impl InstallKind {
     }
 }
 
+/// Whether this copy lives under Program Files, where only the .msi puts it.
+#[cfg(windows)]
+fn installed_for_all_users() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .any(|dir| exe.starts_with(dir))
+}
+
 fn install_kind() -> InstallKind {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -101,6 +113,11 @@ fn install_kind() -> InstallKind {
     {
         if crate::events::running_from_store() {
             InstallKind::Store
+        } else if installed_for_all_users() {
+            // The .msi (for company-wide installs) puts the app under
+            // Program Files. Running the per-user setup program from there
+            // would add a second copy instead of updating this one.
+            InstallKind::Manual
         } else {
             InstallKind::WindowsInstaller
         }

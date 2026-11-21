@@ -26,6 +26,8 @@ pub const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 /// the app starts; files picked to attach live elsewhere because queued
 /// messages may still need them.
 const OPENED_DIR: &str = "opened";
+/// Cache folder holding attachments copied out for a draft.
+pub const DRAFT_COPIES_DIR: &str = "attachments";
 
 async fn load(
     state: &AppState,
@@ -52,8 +54,15 @@ async fn write_copy(
 }
 
 /// Empty the copies left from the last run. Called once at start-up.
+///
+/// That includes the attachments copied out for a draft (a forward, an
+/// edited Outbox message): queued messages carry their own bytes, and the
+/// list of files a draft may attach starts empty on every run, so nothing
+/// can still use them. Left alone they pile up, including for accounts
+/// that have since been removed.
 pub fn clear_opened(cache_dir: &Path) {
     let _ = std::fs::remove_dir_all(cache_dir.join(OPENED_DIR));
+    let _ = std::fs::remove_dir_all(cache_dir.join(DRAFT_COPIES_DIR));
 }
 
 /// `preview_attachment`: the attachment's bytes, for the in-app preview.
@@ -182,6 +191,14 @@ pub async fn pick_attachments(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         );
+        // Checked before reading: a disc image or a long video must not
+        // be loaded into memory only to be refused afterwards.
+        if metadata.len() > MAX_ATTACHMENT_BYTES {
+            return Err(AppError::new(
+                "too_large",
+                format!("{file_name} is too large to attach. The limit is 100 MB."),
+            ));
+        }
         // Programs and scripts can't be sent; say so now, not at Send.
         let data = tokio::fs::read(&path).await?;
         attachment_policy::check_outgoing(&file_name, &data)
