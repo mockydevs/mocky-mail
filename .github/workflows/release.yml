@@ -116,3 +116,79 @@ jobs:
             [ "$name" = "$clean" ] || cp "$f" "$clean"
             gh release upload "$TAG" "$clean" --clobber
           done
+
+  android:
+    name: Android app bundle
+    needs: draft
+    runs-on: ubuntu-24.04
+    env:
+      PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+        working-directory: apps/desktop
+      - name: Set up the Play upload key
+        working-directory: apps/desktop/src-tauri/gen/android
+        env:
+          ANDROID_UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_UPLOAD_KEYSTORE" ]; then
+            echo "The ANDROID_UPLOAD_KEYSTORE secret is not set" >&2
+            exit 1
+          fi
+          echo "$ANDROID_UPLOAD_KEYSTORE" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          {
+            echo "password=$ANDROID_UPLOAD_KEY_PASSWORD"
+            echo "keyAlias=upload"
+            echo "storeFile=$RUNNER_TEMP/upload.jks"
+          } > keystore.properties
+      - name: Build the app bundle
+        working-directory: apps/desktop
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          MOCKY_MAIL_GOOGLE_CLIENT_ID: ${{ secrets.MOCKY_MAIL_GOOGLE_CLIENT_ID }}
+          MOCKY_MAIL_GOOGLE_CLIENT_SECRET: ${{ secrets.MOCKY_MAIL_GOOGLE_CLIENT_SECRET }}
+          MOCKY_MAIL_MS_CLIENT_ID: ${{ secrets.MOCKY_MAIL_MS_CLIENT_ID }}
+        run: |
+          export NDK_HOME="${NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          npx --yes @tauri-apps/cli@2.12.4 android build --aab --ci
+          aab=$(find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' | head -n 1)
+          [ -n "$aab" ] || { echo "No .aab was built" >&2; exit 1; }
+          cp "$aab" "$RUNNER_TEMP/mocky-mail_${TAG#v}.aab"
+          echo "AAB=$RUNNER_TEMP/mocky-mail_${TAG#v}.aab" >> "$GITHUB_ENV"
+      - name: Keep the bundle with this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab
+          path: ${{ env.AAB }}
+          retention-days: 30
+      # Sends the bundle to Play's production track as a draft for review in
+      # Play Console. Skipped until the PLAY_SERVICE_ACCOUNT_JSON secret exists.
+      - name: Send to Google Play
+        if: env.PLAY_SERVICE_ACCOUNT_JSON != ''
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ke.co.mocky.mail
+          releaseFiles: ${{ env.AAB }}
+          track: production
+          status: draft
+          releaseName: ${{ env.TAG }}
