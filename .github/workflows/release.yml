@@ -192,8 +192,9 @@ jobs:
           name: android-aab
           path: ${{ env.AAB }}
           retention-days: 30
-      # Sends the bundle to Play's production track as a draft for review in
-      # Play Console. Skipped until the PLAY_SERVICE_ACCOUNT_JSON secret exists.
+      # Sends the bundle to Play's production track and submits it for review;
+      # it goes live once Google approves it. Skipped without the
+      # PLAY_SERVICE_ACCOUNT_JSON secret.
       - name: Send to Google Play
         if: env.PLAY_SERVICE_ACCOUNT_JSON != ''
         uses: r0adkll/upload-google-play@v1
@@ -202,5 +203,5 @@ jobs:
           packageName: ke.co.mocky.mail
           releaseFiles: ${{ env.AAB }}
           track: production
-          status: draft
+          status: completed
           releaseName: ${{ env.TAG }}
