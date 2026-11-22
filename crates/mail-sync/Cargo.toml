@@ -30,7 +30,7 @@ tokio-util = "0.7.20"
 # The desktop keyrings (Secret Service, Credential Manager, Keychain).
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = "4.2.0"
-lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "ring"] }
+lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "ring"] }
 
 # Android: secrets encrypted with a key held in the Android Keystore.
 [target.'cfg(target_os = "android")'.dependencies]
@@ -38,7 +38,7 @@ android-native-keyring-store = "1.0.0"
 # lettre's platform-verifier path doesn't build on Android (it needs an API
 # that only exists on desktop), so sending checks certificates against
 # Mozilla's root list there. IMAP still uses Android's own trust store.
-lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "webpki-roots", "ring"] }
+lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "webpki-roots", "ring"] }
 
 [features]
 # Allows unencrypted connections. Only for integration tests against a
