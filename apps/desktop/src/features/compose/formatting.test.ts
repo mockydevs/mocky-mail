@@ -49,7 +49,9 @@ describe('compose formatting in the app', () => {
     expect(body.value.startsWith('Please **confirm**')).toBe(true);
     // The toolbar puts the selection back on the next frame; wait for that
     // before choosing a new one, or it lands on top of ours.
-    await waitFor(() => expect(body.selectionStart).toBe(9));
+    await waitFor(() => {
+      expect(body.selectionStart).toBe(9);
+    });
 
     await user.click(body);
     body.setSelectionRange(0, 6);
