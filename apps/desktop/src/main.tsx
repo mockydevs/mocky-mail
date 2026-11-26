@@ -12,6 +12,7 @@ import { createRoot } from 'react-dom/client';
 import { createMockMailApi } from './api/mock/mockMailApi';
 import { createTauriMailApi } from './api/tauriMailApi';
 import { App } from './app/App';
+import { messageWindowId } from './features/reader/MessageWindow';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing #root element');
@@ -22,6 +23,6 @@ const api = '__TAURI_INTERNALS__' in window ? createTauriMailApi() : createMockM
 
 createRoot(root).render(
   <StrictMode>
-    <App api={api} />
+    <App api={api} messageId={messageWindowId(window.location.search)} />
   </StrictMode>,
 );

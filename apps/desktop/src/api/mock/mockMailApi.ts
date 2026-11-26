@@ -8,7 +8,9 @@ import type {
   OutOfOffice,
   Contact,
   AttachmentMeta,
+  Category,
   Focus,
+  ListQuery,
   Mailto,
   AppError,
   Draft,
@@ -29,7 +31,16 @@ import type {
   Settings,
 } from '../types';
 import { MOCK_CALENDARS, MOCK_EVENTS, mockOccurrences, mockSave, type MockEvent } from './mockCalendar';
-import { foldersFor, MOCK_ACCOUNTS, MOCK_FOLDERS, MOCK_MESSAGES, MOCK_NOW, MOCK_OUTBOX, MOCK_SETTINGS } from './mockData';
+import {
+  foldersFor,
+  MOCK_ACCOUNTS,
+  MOCK_CATEGORIES,
+  MOCK_FOLDERS,
+  MOCK_MESSAGES,
+  MOCK_NOW,
+  MOCK_OUTBOX,
+  MOCK_SETTINGS,
+} from './mockData';
 
 /** A stored message; `remoteHtml` is what get_message returns when remote images are allowed. */
 export type MockMessage = MessageDetail & { remoteHtml?: string };
@@ -65,6 +76,12 @@ export interface MockOptions {
   books?: AddressBookStatus[];
   /** Dev preview: new messages go sending, then sent, like the real Outbox. */
   simulateDelivery?: boolean;
+  /** Colour categories; default: a few samples. */
+  categories?: Category[];
+  /** Folder ids listed under Favourites. */
+  favorites?: string[];
+  /** Behave like the Android app: no message windows. */
+  phone?: boolean;
 }
 
 export interface MockMailApi extends MailApi {
@@ -78,6 +95,8 @@ export interface MockMailApi extends MailApi {
   readonly openedFiles: string[];
   /** Pages passed to printHtml, for assertions. */
   readonly printed: string[];
+  /** Message ids passed to openMessageWindow, for assertions. */
+  readonly openedWindows: string[];
   /** Make takeMailto return this link once, as if the app were opened with it. */
   launchWith(url: string): void;
   /** A new message arrives, as a sync would bring it in. */
@@ -149,6 +168,39 @@ const SUGGESTIONS: Record<string, ServerSuggestion> = {
   },
 };
 
+/** The months a sync window may keep (null: everything). */
+const SYNC_MONTHS = [1, 3, 6, 12, 24];
+
+const HEX = /^#[0-9a-f]{6}$/i;
+
+/** Sort key of a list row for `sort`. */
+function sortKey(m: MessageListItem, sort: NonNullable<ListQuery['sort']>): string | number {
+  switch (sort) {
+    case 'date':
+      return m.date ?? 0;
+    case 'size':
+      return m.size;
+    case 'from':
+      return (m.from?.name ?? m.from?.address ?? '').toLocaleLowerCase();
+    case 'subject':
+      return m.subject.replace(/^((re|fwd?|aw|sv):\s*)+/i, '').toLocaleLowerCase();
+  }
+}
+
+/** Order rows as list_messages does: by the sort, newest first on ties, pinned first in folder views. */
+function ordered<T extends MessageListItem>(rows: T[], query: ListQuery): T[] {
+  const sort = query.sort ?? 'date';
+  const sign = query.descending === false ? 1 : -1;
+  const pinnedFirst = !query.search?.trim();
+  return [...rows].sort((a, b) => {
+    if (pinnedFirst && a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    const ka = sortKey(a, sort);
+    const kb = sortKey(b, sort);
+    const by = typeof ka === 'number' && typeof kb === 'number' ? ka - kb : String(ka).localeCompare(String(kb));
+    return by !== 0 ? by * sign : (b.date ?? 0) - (a.date ?? 0);
+  });
+}
+
 function listItem(m: MockMessage): MessageListItem {
   return {
     id: m.id,
@@ -163,6 +215,11 @@ function listItem(m: MockMessage): MessageListItem {
     flagged: m.flagged,
     answered: m.answered,
     hasAttachments: m.hasAttachments,
+    pinned: m.pinned,
+    importance: m.importance,
+    categories: m.categories,
+    flagDue: m.flagDue,
+    size: m.size,
     threadCount: 1,
   };
 }
@@ -202,6 +259,10 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   let messages = clone(options.messages ?? MOCK_MESSAGES).filter(known);
   let outbox = clone(options.outbox ?? MOCK_OUTBOX).filter(known);
   let settings = clone(options.settings ?? MOCK_SETTINGS);
+  let categories = clone(options.categories ?? MOCK_CATEGORIES);
+  const favoriteIds = new Set(options.favorites ?? []);
+  folders = folders.map((f) => ({ ...f, favorite: favoriteIds.has(f.id) }));
+  const openedWindows: string[] = [];
   const signatures = new Map<string, SignatureSet>(
     Object.entries(options.signatures ?? {}).map(([accountId, signature]) => [
       accountId,
@@ -350,10 +411,29 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     return { estimatedBytes, limitBytes };
   };
 
+  const sameName = (a: string, b: string) => a.trim().toLocaleLowerCase() === b.trim().toLocaleLowerCase();
+  /** The folder a message goes to for a role in its own account. */
+  const roleFolder = (accountId: string, role: string) => {
+    const dest = folders.find((f) => f.accountId === accountId && f.role === role);
+    if (!dest) throw appError('not_found', 'That folder does not exist.');
+    return dest;
+  };
+  const destination = (m: MockMessage, target: { role: string } | { folderId: string }) => {
+    if ('folderId' in target) {
+      const dest = folderOf(target.folderId);
+      if (!dest) throw appError('not_found', 'That folder does not exist.');
+      if (dest.accountId !== m.accountId) throw appError('invalid', 'Messages can only go to folders of their own account.');
+      return dest;
+    }
+    return roleFolder(m.accountId, target.role);
+  };
+  const sortedAccounts = () => [...accounts].sort((a, b) => a.sortOrder - b.sortOrder);
+
   const api: MockMailApi = {
     opened,
     openedFiles,
     printed,
+    openedWindows,
     launchWith: (url) => {
       launchLink = url;
     },
@@ -405,6 +485,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           imap: input.imap,
           smtp: input.smtp,
           sizeLimitBytes: 25 * 1024 * 1024,
+          sortOrder: Math.max(-1, ...accounts.map((a) => a.sortOrder)) + 1,
+          syncMonths: null,
         };
         accounts = [...accounts, created];
         folders = [...folders, ...foldersFor(id)];
@@ -432,6 +514,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           imap: { host: 'imap.gmail.com', port: 993, security: 'tls' },
           smtp: { host: 'smtp.gmail.com', port: 465, security: 'tls' },
           sizeLimitBytes: 25 * 1024 * 1024,
+          sortOrder: Math.max(-1, ...accounts.map((a) => a.sortOrder)) + 1,
+          syncMonths: null,
         };
         accounts = [...accounts, created];
         folders = [...folders, ...foldersFor(id)];
@@ -443,7 +527,14 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
       run('updateAccount', () => {
         const acc = account(id);
         if (patch.password === 'wrong') throw appError('auth', 'The server rejected the new password.');
-        const next = { ...acc, ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}) };
+        if (patch.syncMonths !== undefined && patch.syncMonths !== null && !SYNC_MONTHS.includes(patch.syncMonths)) {
+          throw appError('invalid', 'Choose 1, 3, 6, 12 or 24 months, or all mail.');
+        }
+        const next = {
+          ...acc,
+          ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
+          ...(patch.syncMonths !== undefined ? { syncMonths: patch.syncMonths } : {}),
+        };
         accounts = accounts.map((a) => (a.id === id ? next : a));
         accountsChanged();
         return next;
@@ -468,7 +559,16 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         outboxChanged();
       }),
 
-    listAccounts: () => run('listAccounts', () => accounts),
+    listAccounts: () => run('listAccounts', sortedAccounts),
+
+    reorderAccounts: (ids) =>
+      run('reorderAccounts', () => {
+        if (ids.length !== accounts.length || !accounts.every((a) => ids.includes(a.id))) {
+          throw appError('invalid', 'List every account once.');
+        }
+        accounts = accounts.map((a) => ({ ...a, sortOrder: ids.indexOf(a.id) }));
+        accountsChanged();
+      }),
 
     createFolder: (accountId, name, parentId) =>
       run('createFolder', () => {
@@ -481,7 +581,10 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         if (folders.some((f) => f.accountId === accountId && f.path.toLowerCase() === path.toLowerCase())) {
           throw appError('invalid', "There's already a folder with that name here.");
         }
-        folders = [...folders, { id: `${accountId}:${path}`, accountId, name: clean, path, role: 'other', delimiter }];
+        folders = [
+          ...folders,
+          { id: `${accountId}:${path}`, accountId, name: clean, path, role: 'other', delimiter, favorite: false },
+        ];
         changed(accountId, []);
       }),
 
@@ -515,6 +618,14 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         changed(folder.accountId, []);
       }),
 
+    setFolderFavorite: (folderId, favorite) =>
+      run('setFolderFavorite', () => {
+        const folder = folderOf(folderId);
+        if (!folder) throw appError('not_found', 'That folder no longer exists.');
+        folders = folders.map((f) => (f.id === folderId ? { ...f, favorite } : f));
+        changed(folder.accountId, []);
+      }),
+
     listFolders: (accountId) =>
       run('listFolders', () =>
         folders
@@ -535,6 +646,13 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           .filter((m) => query.role === null || folderOf(m.folderId)?.role === query.role)
           .filter((m) => query.filter !== 'unread' || m.unread)
           .filter((m) => query.filter !== 'flagged' || m.flagged)
+          .filter((m) => query.filter !== 'attachments' || m.hasAttachments)
+          .filter((m) => query.filter !== 'pinned' || m.pinned)
+          .filter((m) => {
+            if (query.filter !== 'toMe') return true;
+            const own = accounts.find((a) => a.id === m.accountId)?.email.toLowerCase();
+            return [...m.to, ...m.cc].some((t) => t.address.toLowerCase() === own);
+          })
           .filter((m) => !query.focus || folderOf(m.folderId)?.role !== 'inbox' || focusOf(m) === query.focus)
           .filter(
             (m) =>
@@ -547,7 +665,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
         if (!query.threads) {
           return {
-            items: matches.slice(query.offset, query.offset + query.limit).map(listItem),
+            items: ordered(matches.map(listItem), query).slice(query.offset, query.offset + query.limit),
             total: matches.length,
           };
         }
@@ -563,11 +681,13 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           return {
             ...listItem(newest),
             unread: group.some((m) => m.unread),
+            pinned: group.some((m) => m.pinned),
+            categories: [...new Set(group.flatMap((m) => m.categories))],
             threadCount: group.length,
             threadIds: group.map((m) => m.id),
           };
         });
-        return { items: rows.slice(query.offset, query.offset + query.limit), total: rows.length };
+        return { items: ordered(rows, query).slice(query.offset, query.offset + query.limit), total: rows.length };
       }),
 
     setFocusRule: (sender, focus, wholeDomain) =>
@@ -622,6 +742,11 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
                 ...m,
                 ...(change.seen !== undefined ? { unread: !change.seen } : {}),
                 ...(change.flagged !== undefined ? { flagged: change.flagged } : {}),
+                ...(change.flagged === false ? { flagDue: null } : {}),
+                ...(change.flagDue !== undefined ? { flagDue: change.flagDue } : {}),
+                ...(change.flagDue !== undefined && change.flagDue !== null ? { flagged: true } : {}),
+                ...(change.pinned !== undefined ? { pinned: change.pinned } : {}),
+                ...(change.importance !== undefined ? { importance: change.importance } : {}),
               }
             : m,
         );
@@ -629,15 +754,70 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
 
     moveMessages: (ids, target) =>
       run('moveMessages', () => {
+        messages = messages.map((m) => (ids.includes(m.id) ? { ...m, folderId: destination(m, target).id } : m));
+      }),
+
+    copyMessages: (ids, target) =>
+      run('copyMessages', () => {
+        const copies = messages
+          .filter((m) => ids.includes(m.id))
+          .map((m) => ({ ...clone(m), id: `copy${String(seq++)}`, folderId: destination(m, target).id }));
+        messages = [...messages, ...copies];
+        for (const c of copies) changed(c.accountId, [c.folderId]);
+      }),
+
+    markJunk: (ids, junk) =>
+      run('markJunk', () => {
+        messages = messages.map((m) =>
+          ids.includes(m.id) ? { ...m, folderId: roleFolder(m.accountId, junk ? 'junk' : 'inbox').id } : m,
+        );
+      }),
+
+    listCategories: () => run('listCategories', () => categories),
+
+    saveCategory: (category, previousName) =>
+      run('saveCategory', () => {
+        const name = category.name.trim().replace(/\s+/g, ' ');
+        if (!name) throw appError('invalid', 'Type a name for the category.');
+        if (name.length > 40) throw appError('invalid', 'Category names can be up to 40 characters.');
+        if (!HEX.test(category.color)) throw appError('invalid', 'Pick a colour.');
+        const old = previousName === null ? undefined : categories.find((c) => sameName(c.name, previousName));
+        if (previousName !== null && !old) throw appError('not_found', 'That category no longer exists.');
+        if (categories.some((c) => c !== old && sameName(c.name, name))) {
+          throw appError('invalid', `There's already a category called ${name}.`);
+        }
+        const saved = { name, color: category.color.toLowerCase() };
+        categories = old ? categories.map((c) => (c === old ? saved : c)) : [...categories, saved];
+        if (old && old.name !== name) {
+          messages = messages.map((m) => ({ ...m, categories: m.categories.map((c) => (sameName(c, old.name) ? name : c)) }));
+        }
+        return categories;
+      }),
+
+    deleteCategory: (name) =>
+      run('deleteCategory', () => {
+        categories = categories.filter((c) => !sameName(c.name, name));
+        messages = messages.map((m) => ({ ...m, categories: m.categories.filter((c) => !sameName(c, name)) }));
+        return categories;
+      }),
+
+    setCategories: (ids, add, remove) =>
+      run('setCategories', () => {
+        const unknown = add.find((name) => !categories.some((c) => sameName(c.name, name)));
+        if (unknown) throw appError('not_found', `There's no category called ${unknown}.`);
         messages = messages.map((m) => {
           if (!ids.includes(m.id)) return m;
-          const dest =
-            'folderId' in target
-              ? folderOf(target.folderId)
-              : folders.find((f) => f.accountId === m.accountId && f.role === target.role);
-          if (!dest) throw appError('not_found', 'That folder does not exist.');
-          return { ...m, folderId: dest.id };
+          const kept = m.categories.filter((c) => !remove.some((r) => sameName(r, c)));
+          const added = add.filter((a) => !kept.some((c) => sameName(a, c)));
+          return { ...m, categories: [...kept, ...added] };
         });
+      }),
+
+    openMessageWindow: (id) =>
+      run('openMessageWindow', () => {
+        if (options.phone) throw appError('invalid', 'Phones show one message at a time.');
+        stored(id);
+        openedWindows.push(id);
       }),
 
     deleteForever: (ids) =>
@@ -749,6 +929,11 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
             flagged: false,
             answered: false,
             hasAttachments: draft.attachments.length > 0,
+            pinned: false,
+            importance: draft.importance ?? 'normal',
+            categories: [],
+            flagDue: null,
+            size: 2048 + draft.bodyText.length + draft.attachments.reduce((sum, a) => sum + a.size, 0),
             cc: parseRecipients(draft.cc).valid.map((address) => ({ name: null, address })),
             bcc: parseRecipients(draft.bcc).valid.map((address) => ({ name: null, address })),
             replyTo: [],
@@ -836,6 +1021,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
 
     syncNow: (accountId) =>
       run('syncNow', () => {
+        if (settings.workOffline) throw appError('invalid', 'Work Offline is on.');
         for (const acc of accounts.filter((a) => accountId === null || a.id === accountId)) {
           emit('mail://sync-status', { accountId: acc.id, state: 'syncing', lastSyncedAt: null, message: null });
           emit('mail://sync-status', { accountId: acc.id, state: 'idle', lastSyncedAt: now(), message: null });

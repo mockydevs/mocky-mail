@@ -11,7 +11,20 @@ describe('shortcutFor', () => {
     expect(press('?')).toBe('help');
     expect(press('Escape')).toBe('close');
     expect(press('x')).toBeNull();
-    expect(SHORTCUTS).toHaveLength(14);
+    expect(press('v')).toBe('move');
+    expect(SHORTCUTS).toHaveLength(18);
+  });
+
+  it('maps Ctrl+A, Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z, but not while typing', () => {
+    expect(press('a', document.body, { ctrlKey: true })).toBe('selectAll');
+    expect(press('a', document.body, { metaKey: true })).toBe('selectAll');
+    expect(press('z', document.body, { ctrlKey: true })).toBe('undo');
+    expect(press('y', document.body, { ctrlKey: true })).toBe('redo');
+    expect(press('Z', document.body, { ctrlKey: true, shiftKey: true })).toBe('redo');
+    expect(press('z', document.body, { ctrlKey: true, altKey: true })).toBeNull();
+    const input = document.createElement('input');
+    expect(press('z', input, { ctrlKey: true })).toBeNull();
+    expect(press('a', input, { ctrlKey: true })).toBeNull();
   });
 
   it('ignores keys while typing, Esc included, so it cannot discard what was typed', () => {

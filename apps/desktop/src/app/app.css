@@ -4487,3 +4487,666 @@ button.contact-row:hover,
 .ooo__message {
   resize: vertical;
 }
+
+/* ---------------------------------------------------------------------------
+   0.5.0 mail handling: menus, selection, row extras, folder picker,
+   categories, reading pane position, message windows.
+   ------------------------------------------------------------------------- */
+
+/* Drop-down and context menus. */
+.menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-height: min(420px, 70vh);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 22%);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-align: left;
+}
+
+.menu-wrap--left .menu {
+  right: auto;
+  left: 0;
+}
+
+.menu--context {
+  position: fixed;
+  right: auto;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.menu__item:hover,
+.menu__item:focus-visible {
+  background: var(--row-hover);
+}
+
+.menu__item:disabled {
+  color: var(--faint);
+}
+
+.menu__item--danger {
+  color: var(--error-text);
+}
+
+.menu__tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.menu__mixed {
+  width: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.menu__group + .menu__group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.menu__heading {
+  margin: 4px 10px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.menu__sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border-soft);
+}
+
+.menu__note {
+  margin: 6px 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tab--menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tab--menu.is-active {
+  border-color: var(--tab-on-bg);
+  background: var(--tab-on-bg);
+  color: var(--tab-on-text);
+  font-weight: 600;
+}
+
+/* List header tools: sort and reading pane. */
+.list__heading {
+  flex-wrap: wrap;
+}
+
+.list__tools {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+  align-self: center;
+}
+
+/* The selection bar takes the place of the list header. */
+.selection-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.selection-bar__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-bar__count {
+  margin: 0;
+  font-weight: 600;
+}
+
+.selection-bar__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+/* Rows: checkbox, read edge, quick actions, importance, chips, due dates. */
+.list__scroll {
+  position: relative;
+}
+
+.row-wrap {
+  position: relative;
+}
+
+.row {
+  position: relative;
+}
+
+.row__check {
+  position: absolute;
+  top: 23px;
+  left: 25px;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+  accent-color: var(--primary);
+}
+
+.row__check:focus-visible,
+.row-wrap:hover .row__check,
+.list--selecting .row__check {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.row-wrap:hover .row .avatar,
+.row-wrap:focus-within .row .avatar,
+.list--selecting .row .avatar {
+  visibility: hidden;
+}
+
+.row--checked,
+.row-wrap--checked .row {
+  background: var(--row-sel);
+}
+
+/* The left edge: click it to mark read or unread. */
+.row__edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 10px;
+  cursor: pointer;
+}
+
+.row__edge::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 3px;
+  width: 3px;
+  border-radius: 3px;
+  background: transparent;
+}
+
+.row__edge--unread::after {
+  background: var(--unread);
+}
+
+.row__edge:hover::after {
+  background: var(--faint);
+}
+
+.row__icon--pin {
+  color: var(--primary);
+}
+
+.row__importance--high {
+  flex: none;
+  color: var(--error-text);
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.row__importance--low {
+  color: var(--muted);
+}
+
+.row__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.row__due {
+  font-size: 12px;
+  color: var(--hue-orange);
+  font-weight: 600;
+}
+
+.row__due--overdue {
+  color: var(--error-text);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  padding: 1px 8px 1px 6px;
+  border-left: 3px solid var(--chip, var(--muted));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--chip, var(--muted)) 16%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--chip, var(--muted));
+}
+
+/* Quick actions over the row under the pointer. */
+.row-actions {
+  position: absolute;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 12%);
+}
+
+.icon-btn--small {
+  width: 32px;
+  height: 32px;
+}
+
+.icon-btn.is-active {
+  color: var(--primary);
+}
+
+/* Reading pane: below the list, or off (the list, then the message, full width). */
+.panes--bottom {
+  flex-direction: column;
+}
+
+.panes--bottom .list {
+  flex: 0 0 42%;
+  min-width: 0;
+  min-height: 200px;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.panes--off .list {
+  flex: 1 1 auto;
+  border-right: 0;
+}
+
+.panes--off .reader {
+  flex: 1 1 auto;
+}
+
+/* A message in its own window. */
+.app--window .panes--window {
+  flex: 1 1 auto;
+}
+
+.window-error {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+}
+
+/* Reader labels: importance, due date, categories. */
+.reader__labels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.reader__categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.badge--high,
+.badge--overdue {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.badge--low {
+  background: var(--list);
+  color: var(--muted);
+}
+
+.badge--due {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+/* Folder picker (Move to, Copy to). */
+.picker {
+  max-height: min(50vh, 420px);
+  margin-top: 12px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.picker__list {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+}
+
+.picker__list .picker__list {
+  padding: 0;
+}
+
+.picker__folder {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px 0 calc(10px + var(--depth, 0) * 18px);
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.picker__folder:hover:not(:disabled) {
+  background: var(--row-hover);
+}
+
+.picker__folder:disabled {
+  color: var(--faint);
+}
+
+.picker__folder--container {
+  color: var(--muted);
+}
+
+.picker__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Drag and drop onto the sidebar. */
+.nav__item--drop {
+  outline: 1px dashed var(--info-border);
+  outline-offset: -2px;
+}
+
+.nav__item--drop-over {
+  background: var(--info-bg);
+  color: var(--info-text);
+  outline: 2px solid var(--primary);
+}
+
+.nav-group--drop-over {
+  box-shadow: inset 0 2px 0 var(--primary);
+}
+
+/* Categories: editor and Settings list. */
+.category-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.category-editor__colours {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+
+.swatch {
+  display: inline-flex;
+  cursor: pointer;
+}
+
+.swatch__dot {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: var(--chip);
+  box-shadow: inset 0 0 0 2px var(--surface);
+}
+
+.swatch input:checked + .swatch__dot,
+.swatch__dot--on {
+  border-color: var(--text);
+}
+
+.swatch input:focus-visible + .swatch__dot {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.category-editor__hex-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.category-editor__hex-row .field {
+  max-width: 140px;
+  font-family: ui-monospace, monospace;
+}
+
+.category-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.category-list__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+
+.category-list__hex {
+  margin-right: auto;
+  font-family: ui-monospace, monospace;
+}
+
+/* Status bar: Work Offline. */
+.statusbar__toggle {
+  min-height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+}
+
+.statusbar__toggle--on {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
+/* Compose: importance. */
+.compose__importance {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--input-border);
+  border-radius: 999px;
+}
+
+.compose__importance-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+}
+
+.compose__importance-btn + .compose__importance-btn {
+  border-left: 1px solid var(--input-border);
+}
+
+.compose__importance-btn[aria-pressed='true'] {
+  background: var(--tab-on-bg);
+  color: var(--tab-on-text);
+  font-weight: 600;
+}
+
+.compose__importance-btn--high[aria-pressed='true'] {
+  background: var(--error-text);
+  color: #fff;
+}
+
+/* Manage folders: favourite star. */
+.folder-manage__star--on {
+  color: var(--hue-orange);
+}
+
+/* Settings: account order, reading pane choice. */
+.account-row__order {
+  display: inline-flex;
+}
+
+.flip {
+  display: inline-flex;
+  transform: rotate(180deg);
+}
+
+.settings__sub {
+  margin: 10px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+/* Phones: no hover, so the checkbox shows only while selecting; bigger targets. */
+@media (max-width: 640px) {
+  .row-wrap:hover .row__check {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .list--selecting .row__check,
+  .list--selecting .row-wrap:hover .row__check {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .row-wrap:hover .row .avatar {
+    visibility: visible;
+  }
+
+  .list--selecting .row .avatar,
+  .list--selecting .row-wrap:hover .row .avatar {
+    visibility: hidden;
+  }
+
+  .selection-bar__actions .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .row__edge {
+    width: 14px;
+  }
+}
+
+@media (forced-colors: active) {
+  .row__edge--unread::after,
+  .chip-dot,
+  .swatch__dot {
+    background: CanvasText;
+  }
+
+  .nav__item--drop-over {
+    outline-color: Highlight;
+  }
+}

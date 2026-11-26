@@ -9,7 +9,7 @@ import {
 } from './folderTree';
 
 function folder(path: string, name: string, role: Folder['role'] = 'other', delimiter: string | null = '/'): Folder {
-  return { id: `a:${path}`, accountId: 'a', name, path, role, unread: 0, total: 0, delimiter };
+  return { id: `a:${path}`, accountId: 'a', name, path, role, unread: 0, total: 0, delimiter, favorite: false };
 }
 
 /** "label(child,child)" for compact assertions; containers are marked with *. */

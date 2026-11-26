@@ -1,4 +1,4 @@
-import type { Account, Folder, FolderRole, OutboxEntry, Settings } from '../types';
+import type { Account, Category, Folder, FolderRole, OutboxEntry, Settings } from '../types';
 import type { MockMessage } from './mockMailApi';
 
 const MB = 1024 * 1024;
@@ -19,6 +19,8 @@ export const MOCK_ACCOUNTS: Account[] = [
     imap: { host: 'imap.work.example', port: 993, security: 'tls' },
     smtp: { host: 'smtp.work.example', port: 465, security: 'tls' },
     sizeLimitBytes: 25 * MB,
+    sortOrder: 0,
+    syncMonths: null,
   },
   {
     id: 'personal',
@@ -30,7 +32,16 @@ export const MOCK_ACCOUNTS: Account[] = [
     imap: { host: 'imap.personal.example', port: 993, security: 'tls' },
     smtp: { host: 'smtp.personal.example', port: 587, security: 'starttls' },
     sizeLimitBytes: 20 * MB,
+    sortOrder: 1,
+    syncMonths: 12,
   },
+];
+
+/** Colour categories shared by every account. */
+export const MOCK_CATEGORIES: Category[] = [
+  { name: 'Clients', color: '#2450C8' },
+  { name: 'Invoices', color: '#1E6B3A' },
+  { name: 'Family', color: '#A1356B' },
 ];
 
 const ROLE_FOLDERS: [FolderRole, string][] = [
@@ -49,7 +60,15 @@ export function foldersFor(
   delimiter: string | null = '/',
 ): Omit<Folder, 'unread' | 'total'>[] {
   return [
-    ...ROLE_FOLDERS.map(([role, name]) => ({ id: `${accountId}:${role}`, accountId, name, path: name, role, delimiter })),
+    ...ROLE_FOLDERS.map(([role, name]) => ({
+      id: `${accountId}:${role}`,
+      accountId,
+      name,
+      path: name,
+      role,
+      delimiter,
+      favorite: false,
+    })),
     ...extra.map(([name, path]) => ({
       id: `${accountId}:${path}`,
       accountId,
@@ -57,6 +76,7 @@ export function foldersFor(
       path,
       role: 'other' as const,
       delimiter,
+      favorite: false,
     })),
   ];
 }
@@ -80,7 +100,15 @@ const me = (accountId: string) => ({
   address: accountId === 'work' ? 'you@work.example' : 'you@personal.example',
 });
 
-function message(m: Partial<MockMessage> & Pick<MockMessage, 'id' | 'accountId' | 'folderId' | 'subject'>): MockMessage {
+/** Rough size of a stored message: headers, body and encoded attachments. */
+function sizeOf(m: Partial<MockMessage>): number {
+  const body = (m.text ?? '').length + (m.html ?? '').length;
+  const files = (m.attachments ?? []).reduce((sum, a) => sum + Math.ceil(a.size / 3) * 4, 0);
+  return 2048 + body + files;
+}
+
+/** A sample message with the usual defaults filled in. */
+export function message(m: Partial<MockMessage> & Pick<MockMessage, 'id' | 'accountId' | 'folderId' | 'subject'>): MockMessage {
   return {
     from: null,
     to: [me(m.accountId)],
@@ -90,6 +118,11 @@ function message(m: Partial<MockMessage> & Pick<MockMessage, 'id' | 'accountId' 
     flagged: false,
     answered: false,
     hasAttachments: (m.attachments?.length ?? 0) > 0,
+    pinned: false,
+    importance: 'normal',
+    categories: [],
+    flagDue: null,
+    size: sizeOf(m),
     cc: [],
     replyTo: [],
     html: null,
@@ -112,7 +145,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     cc: [{ name: 'Amina Hassan', address: 'amina@studio.example' }, { name: null, address: 'you@work.example' }],
     subject: 'Revised quotation for the Westlands office fit-out',
     preview: 'Attached is the revised quotation with the changes we discussed on Tuesday.',
-    date: at('2026-11-13T06:42:00Z'), unread: true,
+    date: at('2026-11-13T06:42:00Z'), unread: true, importance: 'high', categories: ['Clients'],
     text: para(
       'Hi,',
       'Attached is the revised quotation with the changes we discussed on Tuesday. The glass partitions are now frosted on the lower half, and the electrical work has its own line so you can approve it separately.',
@@ -150,7 +183,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     from: { name: 'Amina Hassan', address: 'amina@studio.example' },
     subject: 'Logo files, final round',
     preview: 'Here are the final logo files in SVG, PNG and PDF, plus the white version.',
-    date: at('2026-11-12T13:20:00Z'), flagged: true,
+    date: at('2026-11-12T13:20:00Z'), flagged: true, flagDue: at('2026-11-16T14:00:00Z'), categories: ['Clients'],
     text: para('Hi,', 'Here are the final logo files in SVG, PNG and PDF.', 'Amina'),
     attachments: [{ index: 0, fileName: 'Logo-final.zip', mimeType: 'application/zip', size: Math.round(6.4 * MB), preview: null }],
   }),
@@ -167,7 +200,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     from: { name: 'Peter Mwangi', address: 'peter@client.example' },
     subject: 'Invoice INV-0142 paid',
     preview: 'Payment received, thank you. Receipt attached for your records.',
-    date: at('2026-11-11T12:47:00Z'), answered: true,
+    date: at('2026-11-11T12:47:00Z'), answered: true, categories: ['Invoices'],
     text: para('Hello,', 'Payment for INV-0142 has gone through.', 'Regards,\nPeter'),
     attachments: [{ index: 0, fileName: 'Receipt-INV-0142.pdf', mimeType: 'application/pdf', size: 96 * 1024, preview: 'pdf' }],
   }),
@@ -242,5 +275,7 @@ export const MOCK_SETTINGS: Settings = {
   defaultReminderMins: 15,
   closeToTray: true,
   startAtLogin: false,
+  readingPane: 'right',
+  workOffline: false,
   device: { tray: true, startAtLogin: true },
 };

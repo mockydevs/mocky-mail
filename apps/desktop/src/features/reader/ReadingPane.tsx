@@ -1,13 +1,28 @@
-import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, AttachmentMeta, Focus, FolderRole, MessageDetail, MessageListItem } from '../../api/types';
+import type {
+  Account,
+  AppError,
+  AttachmentMeta,
+  Category,
+  Focus,
+  FolderRole,
+  Importance,
+  MessageDetail,
+  MessageListItem,
+} from '../../api/types';
 import { formatBytes, formatListTime, formatLongDate, nowSeconds } from '../../lib/format';
 import { useLoad } from '../../lib/useLoad';
 import type { Theme } from '../../theme/useTheme';
 import { Avatar } from '../../ui/Avatar';
-import { Icon } from '../../ui/Icon';
+import { Icon, type IconName } from '../../ui/Icon';
+import { CategoryMenu } from '../categories/CategoryMenu';
+import { FlagMenu } from '../mailbox/FlagMenu';
+import { dueLabel, isOverdue } from '../mailbox/flagDue';
+import { colourOf } from '../mailbox/MessageList';
+import type { FlagValue } from '../mailbox/useMessageActions';
 import { formatMailbox, formatMailboxes, replyDraft, toolbarActions, withSignature } from '../compose/seed';
 import { useSendStatus } from '../outbox/useSendStatus';
 import { printMessage } from '../../lib/print';
@@ -27,6 +42,16 @@ export interface ReaderActions {
   onDeleteForever: () => void;
   onToggleFlag: () => void;
   onToggleRead: () => void;
+  onTogglePin?: () => void;
+  /** Flag with a due date, without one, or clear the flag. */
+  onFlagDue?: (flag: FlagValue) => void;
+  onCategory?: (name: string, add: boolean) => void;
+  onCategoryCreated?: (categories: Category[], name: string) => void;
+  onImportance?: (importance: Importance) => void;
+  /** true: Junk; false: Not junk. */
+  onJunk?: (junk: boolean) => void;
+  /** Computers: the message in a window of its own. */
+  onOpenWindow?: (() => void) | undefined;
 }
 
 interface Props extends ReaderActions {
@@ -52,7 +77,21 @@ interface Props extends ReaderActions {
   focusTab?: Focus | null;
   /** Always put this sender's mail in the other half. */
   onFocusRule?: (sender: string, focus: Focus) => void;
+  /** Colours for category chips and the Categorise menu. */
+  categories?: readonly Category[];
+  /** Unix seconds, for due dates. */
+  now?: number;
+  /** Computers with the reading pane off: a Back button returns to the list. */
+  showBack?: boolean;
+  /** Work Offline is on: a message not yet on this device can't be fetched. */
+  workOffline?: boolean;
 }
+
+const IMPORTANCE_ACTIONS: readonly [Importance, string][] = [
+  ['high', 'Mark as high importance'],
+  ['normal', 'Mark as normal importance'],
+  ['low', 'Mark as low importance'],
+];
 
 export const ReadingPane = forwardRef<HTMLElement, Props>(function ReadingPane(props, ref) {
   const { item } = props;
@@ -105,8 +144,12 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
   if (loaded.status === 'error') {
     return (
       <article className="reader reader--empty" aria-label="Reading pane" ref={ref} tabIndex={-1}>
-        <p className="empty__title">This message could not be opened</p>
-        <p className="empty__text">{loaded.message}</p>
+        <p className="empty__title">{props.workOffline ? "You're working offline" : 'This message could not be opened'}</p>
+        <p className="empty__text">
+          {props.workOffline
+            ? "This message isn't on this device yet. Turn off Work Offline to download it."
+            : loaded.message}
+        </p>
       </article>
     );
   }
@@ -222,7 +265,21 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
   // Whole-message actions, in the More menu on both layouts.
   const senderAddress = message.from?.address;
   const moveTo: Focus | null = props.focusTab === 'focused' ? 'other' : props.focusTab === 'other' ? 'focused' : null;
-  const extras: { key: string; label: string; icon: 'print' | 'download' | 'code' | 'inbox'; run: () => void }[] = [
+  const now = props.now ?? nowSeconds();
+  const junkAction = role === 'junk' ? 'notJunk' : role === 'drafts' || role === 'sent' ? null : 'junk';
+  const extras: { key: string; label: string; icon: IconName; run: () => void }[] = [
+    ...(props.onOpenWindow
+      ? [
+          {
+            key: 'window',
+            label: 'Open in new window',
+            icon: 'external' as const,
+            run: () => {
+              props.onOpenWindow?.();
+            },
+          },
+        ]
+      : []),
     ...(moveTo && senderAddress && props.onFocusRule
       ? [
           {
@@ -262,7 +319,54 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
         api.messageSource(message.id).then(setSource, failed);
       },
     },
+    ...(props.onImportance && role !== 'drafts'
+      ? IMPORTANCE_ACTIONS.filter(([value]) => value !== item.importance).map(([value, label]) => ({
+          key: `importance-${value}`,
+          label,
+          icon: value === 'low' ? ('arrowDown' as const) : ('alert' as const),
+          run: () => {
+            props.onImportance?.(value);
+          },
+        }))
+      : []),
   ];
+
+  /** Importance, a flag's due date and the categories, under the sender. */
+  const labels = (item.importance !== 'normal' ||
+    (item.flagged && item.flagDue !== null) ||
+    item.categories.length > 0) && (
+    <div className="reader__labels">
+      {item.importance === 'high' && <span className="badge badge--high">High importance</span>}
+      {item.importance === 'low' && <span className="badge badge--low">Low importance</span>}
+      {item.flagged && item.flagDue !== null && (
+        <span className={`badge badge--due${isOverdue(item.flagDue, now) ? ' badge--overdue' : ''}`}>
+          <Icon name="flag" size={14} filled />
+          {dueLabel(item.flagDue, now)}
+        </span>
+      )}
+      {item.categories.length > 0 && (
+        <ul className="reader__categories" aria-label="Categories">
+          {item.categories.map((c) => (
+            <li key={c} className="chip" style={{ '--chip': colourOf(props.categories, c) } as CSSProperties}>
+              {c}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+
+  const categoryMenu = props.onCategory && props.onCategoryCreated && role !== 'drafts' && (
+    <CategoryMenu
+      categories={props.categories ?? []}
+      rows={[item]}
+      onToggle={props.onCategory}
+      onCreated={props.onCategoryCreated}
+    />
+  );
+  const flagMenu = props.onFlagDue && actions.includes('flag') && (
+    <FlagMenu flagged={item.flagged} due={item.flagDue} now={now} onFlag={props.onFlagDue} />
+  );
 
   const sourceDialog = source !== null && (
     <Modal
@@ -362,6 +466,8 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
               <Icon name="trash" />
             </button>
           )}
+          {flagMenu}
+          {categoryMenu}
           {
             <div className="phone-menu">
               <button
@@ -388,6 +494,32 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
                     >
                       <Icon name="flag" filled={item.flagged} />
                       {item.flagged ? 'Remove flag' : 'Flag'}
+                    </button>
+                  )}
+                  {props.onTogglePin && role !== 'drafts' && (
+                    <button
+                      type="button"
+                      className="phone-menu__item"
+                      onClick={() => {
+                        setMenu(false);
+                        props.onTogglePin?.();
+                      }}
+                    >
+                      <Icon name="pin" filled={item.pinned} />
+                      {item.pinned ? 'Unpin' : 'Pin'}
+                    </button>
+                  )}
+                  {props.onJunk && junkAction && (
+                    <button
+                      type="button"
+                      className="phone-menu__item"
+                      onClick={() => {
+                        setMenu(false);
+                        props.onJunk?.(junkAction === 'junk');
+                      }}
+                    >
+                      <Icon name="junk" />
+                      {junkAction === 'junk' ? 'Junk' : 'Not junk'}
                     </button>
                   )}
                   {actions.includes('read') && (
@@ -444,11 +576,12 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
                     setDetails((on) => !on);
                   }}
                 >
-                  {toLabel} · {formatListTime(message.date, nowSeconds())}
+                  {toLabel} · {formatListTime(message.date, now)}
                   <Icon name="chevron" size={14} />
                 </button>
               </div>
             </div>
+            {labels}
             {details && (
               <div className="phone-details">
                 {sender?.name && <p className="reader__meta">From {sender.address}</p>}
@@ -592,6 +725,11 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
   return (
     <article className="reader" aria-label="Reading pane" ref={ref} tabIndex={-1}>
       <div className="toolbar" role="toolbar" aria-label="Message actions">
+        {props.showBack && (
+          <button type="button" className="icon-btn" aria-label="Back to list" title="Back to list (Esc)" onClick={props.onBack}>
+            <Icon name="back" />
+          </button>
+        )}
         {actions.includes('edit') && (
           <button
             type="button"
@@ -657,6 +795,20 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
             Delete forever
           </button>
         )}
+        {props.onJunk && junkAction && (
+          <button
+            type="button"
+            className={junkAction === 'junk' ? 'icon-btn' : 'btn btn--ghost'}
+            aria-label={junkAction === 'junk' ? 'Junk' : 'Not junk'}
+            title={junkAction === 'junk' ? 'Junk: move to Spam' : 'Not junk: back to the Inbox'}
+            onClick={() => {
+              props.onJunk?.(junkAction === 'junk');
+            }}
+          >
+            <Icon name="junk" />
+            {junkAction === 'notJunk' && 'Not junk'}
+          </button>
+        )}
         {actions.includes('flag') && (
           <button
             type="button"
@@ -669,6 +821,20 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
             <Icon name="flag" filled={item.flagged} />
           </button>
         )}
+        {flagMenu}
+        {props.onTogglePin && role !== 'drafts' && (
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label={item.pinned ? 'Unpin' : 'Pin'}
+            title={item.pinned ? 'Unpin' : 'Pin to the top of the folder'}
+            aria-pressed={item.pinned}
+            onClick={props.onTogglePin}
+          >
+            <Icon name="pin" filled={item.pinned} />
+          </button>
+        )}
+        {categoryMenu}
         {actions.includes('read') && (
           <button
             type="button"
@@ -734,6 +900,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
             {message.replyTo.length > 0 && !outgoing && (
               <p className="reader__meta">Replies go to {message.replyTo.map(formatMailbox).join(', ')}</p>
             )}
+            {labels}
           </div>
           <div className="reader__when">
             {account && (

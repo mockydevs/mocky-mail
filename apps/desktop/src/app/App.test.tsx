@@ -104,7 +104,8 @@ describe('mailbox', () => {
       id: `bulk${String(i)}`, accountId: 'work', folderId: 'work:inbox',
       from: { name: `Sender ${String(i)}`, address: `s${String(i)}@x.example` }, to: [],
       subject: `Message ${String(i)}`, preview: '', date: MOCK_NOW - i * 60, unread: false, flagged: false,
-      answered: false, hasAttachments: false, cc: [], replyTo: [], html: null, text: 'x',
+      answered: false, hasAttachments: false, pinned: false, importance: 'normal', categories: [], flagDue: null,
+      size: 2048, cc: [], replyTo: [], html: null, text: 'x',
       blockedRemoteImages: 0, attachments: [], messageIdHeader: null, inReplyTo: null, references: [],
     }));
 
@@ -279,7 +280,7 @@ describe('sync status and notifications', () => {
 
     cleanup();
     chime.mockClear();
-    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15, closeToTray: true, startAtLogin: false, device: { tray: true, startAtLogin: true } } });
+    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15, closeToTray: true, startAtLogin: false, readingPane: 'right', workOffline: false, device: { tray: true, startAtLogin: true } } });
     await rows();
     act(() => {
       quiet.api.emit('mail://new-mail', { accountId: 'work', count: 1 });
