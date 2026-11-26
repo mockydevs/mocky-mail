@@ -92,6 +92,10 @@ pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
     let WindowEvent::CloseRequested { api, .. } = event else {
         return;
     };
+    // Message windows simply close.
+    if window.label() != "main" {
+        return;
+    }
     let app = window.app_handle();
     let Some(state) = app.try_state::<Arc<AppState>>() else {
         return;

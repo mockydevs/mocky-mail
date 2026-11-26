@@ -85,6 +85,7 @@ pub fn unreadable_summary(arrived: Option<i64>) -> MessageSummary {
         in_reply_to: None,
         references: Vec::new(),
         bulk: false,
+        importance: mail_core::importance::Importance::Normal,
     }
 }
 /// Messages larger than this are not downloaded in the background.
@@ -167,6 +168,106 @@ pub struct FolderStatus {
     pub uid_next: Option<u32>,
     /// Number of messages.
     pub exists: u32,
+    /// The folder keeps keywords of the app's own (PERMANENTFLAGS has
+    /// `\*`), so categories and junk marks can be stored on the server.
+    pub accepts_keywords: bool,
+}
+
+/// Keywords and (on Gmail) labels of a message: where categories are kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tags {
+    /// IMAP keywords (flags without a backslash), as the server sent them.
+    pub keywords: Vec<String>,
+    /// Gmail labels (`X-GM-LABELS`), modified UTF-7 as sent; `None` on
+    /// other servers.
+    pub labels: Option<Vec<String>>,
+}
+
+impl Tags {
+    fn from_fetch(fetch: &Fetch) -> Self {
+        Self {
+            keywords: fetch
+                .flags()
+                .filter_map(|flag| match flag {
+                    Flag::Custom(keyword) if !keyword.starts_with('\\') => {
+                        Some(keyword.into_owned())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            labels: fetch
+                .gmail_labels()
+                .map(|labels| labels.iter().map(|label| unescape_quoted(label)).collect()),
+        }
+    }
+}
+
+/// A label as Gmail meant it. The parser hands over a quoted label's
+/// contents without undoing its escapes (`"\\Inbox"`, `"a \"b\""`); a
+/// backslash before anything else is part of an unquoted flag (`\Inbox`).
+fn unescape_quoted(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\'
+            && let Some(&next) = chars.peek()
+            && matches!(next, '\\' | '"')
+        {
+            out.push(next);
+            chars.next();
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// An IMAP keyword safe to send: a non-empty atom (RFC 3501 `flag-keyword`).
+fn check_keyword(keyword: &str) -> Result<(), SyncError> {
+    let ok = !keyword.is_empty()
+        && keyword.bytes().all(|b| {
+            b.is_ascii_graphic()
+                && !matches!(b, b'(' | b')' | b'{' | b'%' | b'*' | b'"' | b'\\' | b']')
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(SyncError::Invalid(format!(
+            "\"{keyword}\" can't be an IMAP keyword"
+        )))
+    }
+}
+
+/// `+FLAGS.SILENT (a b)` style commands for adding and removing keywords.
+fn keyword_commands(add: &[String], remove: &[String]) -> Result<Vec<String>, SyncError> {
+    let mut commands = Vec::new();
+    for (sign, list) in [('+', add), ('-', remove)] {
+        if list.is_empty() {
+            continue;
+        }
+        for keyword in list {
+            check_keyword(keyword)?;
+        }
+        commands.push(format!("{sign}FLAGS.SILENT ({})", list.join(" ")));
+    }
+    Ok(commands)
+}
+
+/// `+X-GM-LABELS.SILENT ("a" "b")` style commands for Gmail labels, which
+/// are given already encoded (modified UTF-7).
+fn label_commands(add: &[String], remove: &[String]) -> Result<Vec<String>, SyncError> {
+    let mut commands = Vec::new();
+    for (sign, list) in [('+', add), ('-', remove)] {
+        if list.is_empty() {
+            continue;
+        }
+        let quoted = list
+            .iter()
+            .map(|label| quote_search(label))
+            .collect::<Result<Vec<_>, _>>()?;
+        commands.push(format!("{sign}X-GM-LABELS.SILENT ({})", quoted.join(" ")));
+    }
+    Ok(commands)
 }
 
 /// Standard flags we track.
@@ -216,6 +317,8 @@ pub struct RemoteMessage {
     pub size: u32,
     /// Parsed headers (preview is empty until the body is fetched).
     pub summary: MessageSummary,
+    /// Keywords and Gmail labels.
+    pub tags: Tags,
 }
 
 /// A flag change.
@@ -351,6 +454,8 @@ pub struct ImapConnection {
     host: String,
     capabilities: HashSet<String>,
     selected: Option<String>,
+    /// Whether the selected folder keeps the app's own keywords.
+    selected_accepts_keywords: bool,
 }
 
 impl std::fmt::Debug for ImapConnection {
@@ -449,6 +554,7 @@ impl ImapConnection {
             host,
             capabilities,
             selected: None,
+            selected_accepts_keywords: false,
         })
     }
 
@@ -509,13 +615,22 @@ impl ImapConnection {
         self.selected = None;
         let mailbox = within(&host, self.session.select(path)).await??;
         self.selected = Some(path.to_owned());
+        let accepts_keywords = mailbox.permanent_flags.contains(&Flag::MayCreate);
+        self.selected_accepts_keywords = accepts_keywords;
         Ok(FolderStatus {
             uid_validity: mailbox.uid_validity.ok_or_else(|| {
                 SyncError::Protocol("the server didn't report UIDVALIDITY".to_owned())
             })?,
             uid_next: mailbox.uid_next,
             exists: mailbox.exists,
+            accepts_keywords,
         })
+    }
+
+    /// Whether this is Gmail (its IMAP extensions, labels among them).
+    #[must_use]
+    pub fn is_gmail(&self) -> bool {
+        self.has("X-GM-EXT-1")
     }
 
     async fn ensure_selected(&mut self, path: &str) -> Result<(), SyncError> {
@@ -558,13 +673,12 @@ impl ImapConnection {
         path: &str,
         set: &str,
     ) -> Result<Vec<RemoteMessage>, SyncError> {
-        let fetches = self
-            .fetch(
-                path,
-                set,
-                "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])",
-            )
-            .await?;
+        let query = if self.is_gmail() {
+            "(UID FLAGS RFC822.SIZE INTERNALDATE X-GM-LABELS BODY.PEEK[HEADER])"
+        } else {
+            "(UID FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER])"
+        };
+        let fetches = self.fetch(path, set, query).await?;
         Ok(fetches
             .iter()
             .filter_map(|fetch| {
@@ -583,6 +697,7 @@ impl ImapConnection {
                     flags: Flags::from_fetch(fetch),
                     size: fetch.size.unwrap_or(0),
                     summary,
+                    tags: Tags::from_fetch(fetch),
                 })
             })
             .collect())
@@ -625,6 +740,127 @@ impl ImapConnection {
             .iter()
             .filter_map(|f| Some((f.uid?, Flags::from_fetch(f))))
             .collect())
+    }
+
+    /// Current flags with keywords and (on Gmail) labels, for the given UIDs.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn fetch_flags_and_tags(
+        &mut self,
+        path: &str,
+        set: &str,
+    ) -> Result<Vec<(u32, Flags, Tags)>, SyncError> {
+        let query = if self.is_gmail() {
+            "(UID FLAGS X-GM-LABELS)"
+        } else {
+            "(UID FLAGS)"
+        };
+        let fetches = self.fetch(path, set, query).await?;
+        Ok(fetches
+            .iter()
+            .filter_map(|f| Some((f.uid?, Flags::from_fetch(f), Tags::from_fetch(f))))
+            .collect())
+    }
+
+    /// UIDs of the messages that arrived on or after `since` (an IMAP date,
+    /// see `mail_core::sync_window::imap_since`).
+    ///
+    /// # Errors
+    /// Network or server errors, or a malformed date.
+    pub async fn uids_since(&mut self, path: &str, since: &str) -> Result<HashSet<u32>, SyncError> {
+        if since.is_empty() || !since.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(SyncError::Invalid(format!(
+                "\"{since}\" is not an IMAP date"
+            )));
+        }
+        self.ensure_selected(path).await?;
+        let host = self.host.clone();
+        within(&host, self.session.uid_search(format!("SINCE {since}")))
+            .await?
+            .map_err(SyncError::from)
+    }
+
+    /// Add and remove keywords (`$Junk`, category keywords). Returns
+    /// `false`, changing nothing, when the folder doesn't keep keywords of
+    /// the app's own.
+    ///
+    /// # Errors
+    /// A keyword that isn't an IMAP atom; network or server errors.
+    pub async fn store_keywords(
+        &mut self,
+        path: &str,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<bool, SyncError> {
+        let commands = keyword_commands(add, remove)?;
+        let Some(set) = uid_set(uids) else {
+            return Ok(true);
+        };
+        self.ensure_selected(path).await?;
+        if !self.selected_accepts_keywords {
+            return Ok(false);
+        }
+        for command in commands {
+            self.uid_store(&set, &command).await?;
+        }
+        Ok(true)
+    }
+
+    /// Add and remove Gmail labels (encoded in modified UTF-7). Gmail
+    /// creates a label the first time it is used.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn store_labels(
+        &mut self,
+        path: &str,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<(), SyncError> {
+        let commands = label_commands(add, remove)?;
+        let Some(set) = uid_set(uids) else {
+            return Ok(());
+        };
+        self.ensure_selected(path).await?;
+        for command in commands {
+            self.uid_store(&set, &command).await?;
+        }
+        Ok(())
+    }
+
+    async fn uid_store(&mut self, set: &str, command: &str) -> Result<(), SyncError> {
+        let host = self.host.clone();
+        within(&host, async {
+            self.session
+                .uid_store(set, command)
+                .await?
+                .try_collect::<Vec<_>>()
+                .await
+        })
+        .await??;
+        Ok(())
+    }
+
+    /// Copy messages to another folder; the originals stay.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn copy_messages(
+        &mut self,
+        from: &str,
+        uids: &[u32],
+        to: &str,
+    ) -> Result<(), SyncError> {
+        let Some(set) = uid_set(uids) else {
+            return Ok(());
+        };
+        self.ensure_selected(from).await?;
+        let host = self.host.clone();
+        within(&host, self.session.uid_copy(&set, to)).await??;
+        Ok(())
     }
 
     /// The full raw message, without marking it read. `size` is its size as
@@ -923,6 +1159,7 @@ impl ImapConnection {
             host,
             capabilities,
             selected,
+            selected_accepts_keywords,
         } = self;
         let mut handle = session.idle();
         within(&host, handle.init()).await??;
@@ -952,6 +1189,7 @@ impl ImapConnection {
                 host,
                 capabilities,
                 selected,
+                selected_accepts_keywords,
             },
             end,
         ))
@@ -1073,6 +1311,36 @@ mod tests {
     fn search_values_are_quoted_and_line_breaks_refused() {
         assert_eq!(quote_search(r#"a"b\c@x"#).unwrap(), r#""a\"b\\c@x""#);
         assert!(quote_search("x\r\nA1 DELETE INBOX").is_err());
+    }
+
+    #[test]
+    fn quoted_labels_lose_their_escapes() {
+        assert_eq!(unescape_quoted(r"\\Inbox"), r"\Inbox");
+        assert_eq!(unescape_quoted(r"\Important"), r"\Important");
+        assert_eq!(unescape_quoted(r#"Old \"one\""#), r#"Old "one""#);
+        assert_eq!(unescape_quoted(r"a\\\\b"), r"a\\b");
+        assert_eq!(unescape_quoted("Clients"), "Clients");
+    }
+
+    #[test]
+    fn keyword_and_label_commands_are_silent_and_safe() {
+        let s = |list: &[&str]| -> Vec<String> { list.iter().map(|k| (*k).to_owned()).collect() };
+        assert_eq!(
+            keyword_commands(&s(&["$Junk", "$Cat_Red"]), &s(&["$NotJunk"])).unwrap(),
+            ["+FLAGS.SILENT ($Junk $Cat_Red)", "-FLAGS.SILENT ($NotJunk)"]
+        );
+        assert!(keyword_commands(&[], &[]).unwrap().is_empty());
+        for bad in ["", "a b", "x)", "\\Seen", "a\r\nA1 LOGOUT", "caf\u{e9}"] {
+            assert!(keyword_commands(&s(&[bad]), &[]).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            label_commands(&s(&["Clients", "Entw&APw-rfe"]), &s(&["a\"b"])).unwrap(),
+            [
+                "+X-GM-LABELS.SILENT (\"Clients\" \"Entw&APw-rfe\")",
+                "-X-GM-LABELS.SILENT (\"a\\\"b\")"
+            ]
+        );
+        assert!(label_commands(&s(&["x\r\ny"]), &[]).is_err());
     }
 
     #[test]

@@ -109,6 +109,8 @@ fn newest_unread(state: &AppState, account: &Account) -> Option<MessageListItem>
         role: Some(FolderRole::Inbox),
         filter: ListFilter::Unread,
         limit: 1,
+        // The newest, even with an older unread one pinned.
+        ignore_pinned: true,
         ..ListQuery::default()
     };
     match state.store.list_messages(&query) {
@@ -220,6 +222,8 @@ mod tests {
             smtp: server,
             size_limit_bytes: None,
             created_at: 0,
+            sort_order: 0,
+            sync_months: None,
         }
     }
 
@@ -237,6 +241,11 @@ mod tests {
             flagged: false,
             answered: false,
             has_attachments: false,
+            pinned: false,
+            importance: mail_core::importance::Importance::Normal,
+            categories: Vec::new(),
+            flag_due: None,
+            size: 0,
             thread_count: 1,
             thread_ids: Vec::new(),
         }

@@ -248,8 +248,53 @@ CREATE TABLE calendar_events (
 CREATE INDEX calendar_events_time ON calendar_events (starts_at, ends_at);
 ";
 
+/// Version 7: mail handling (0.5.0).
+///
+/// - `accounts.sort_order`: the user's order in the sidebar; NULL until
+///   they reorder, and for accounts added after (those go last, oldest
+///   first). `sync_months`: months of mail kept in full; NULL for all.
+/// - `folders.favorite`: listed under Favourites.
+/// - `messages.pinned`, `flag_due` (Unix seconds) and `categories` (JSON
+///   array of names, in the order they were added) are the user's;
+///   `importance` comes from the headers unless `importance_local` says it
+///   was set here.
+/// - `categories`: name (unique ignoring case) and colour.
+/// - `pending_ops` is rebuilt so its kinds include `copy`.
+const V7: &str = r"
+ALTER TABLE accounts ADD COLUMN sort_order INTEGER;
+ALTER TABLE accounts ADD COLUMN sync_months INTEGER;
+ALTER TABLE folders ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN importance TEXT NOT NULL DEFAULT 'normal'
+    CHECK (importance IN ('low', 'normal', 'high'));
+ALTER TABLE messages ADD COLUMN importance_local INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN categories TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE messages ADD COLUMN flag_due INTEGER;
+CREATE INDEX messages_flag_due ON messages (flag_due) WHERE flag_due IS NOT NULL;
+
+CREATE TABLE categories (
+    name  TEXT PRIMARY KEY NOT NULL COLLATE NOCASE,
+    color TEXT NOT NULL
+);
+
+CREATE TABLE pending_ops_v7 (
+    seq        INTEGER PRIMARY KEY,
+    id         TEXT NOT NULL UNIQUE,
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    kind       TEXT NOT NULL CHECK (kind IN ('set_flags', 'move', 'delete', 'copy')),
+    payload    TEXT NOT NULL,
+    refusals   INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO pending_ops_v7 (seq, id, account_id, created_at, kind, payload, refusals)
+    SELECT seq, id, account_id, created_at, kind, payload, refusals FROM pending_ops;
+DROP TABLE pending_ops;
+ALTER TABLE pending_ops_v7 RENAME TO pending_ops;
+CREATE INDEX pending_ops_account ON pending_ops (account_id, created_at, seq);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -348,6 +393,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(refusals, 0);
+    }
+
+    #[test]
+    fn a_version_six_database_keeps_its_queued_changes_and_takes_copies() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(6) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        conn.execute_batch(
+            "INSERT INTO accounts VALUES ('a', 'a@x.co', 'A', 'password', '#000',
+                 'imap.x.co', 993, 'tls', 'smtp.x.co', 465, 'tls', NULL, 0);
+             INSERT INTO pending_ops (id, account_id, created_at, kind, payload, refusals)
+                 VALUES ('op', 'a', 1, 'move', '{}', 2);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        let (kind, refusals): (String, i64) = conn
+            .query_row(
+                "SELECT kind, refusals FROM pending_ops WHERE id = 'op'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), refusals), ("move", 2));
+        conn.execute(
+            "INSERT INTO pending_ops (id, account_id, created_at, kind, payload)
+             VALUES ('copy', 'a', 2, 'copy', '{}')",
+            [],
+        )
+        .unwrap();
+        let order: Option<i64> = conn
+            .query_row("SELECT sort_order FROM accounts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(order, None);
+        // Removing the account still removes its queued changes.
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM accounts;")
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM pending_ops", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

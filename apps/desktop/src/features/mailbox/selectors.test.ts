@@ -16,13 +16,14 @@ import {
 import { MOCK_ACCOUNTS } from '../../api/mock/mockData';
 
 const folder = (id: string, role: Folder['role'], name: string, unread = 0, total = 0): Folder => ({
-  id, accountId: 'work', name, path: name, role, unread, total, delimiter: '/',
+  id, accountId: 'work', name, path: name, role, unread, total, delimiter: '/', favorite: false,
 });
 
 function item(id: string, extra: Partial<MessageListItem> = {}): MessageListItem {
   return {
     id, accountId: 'work', folderId: 'work:inbox', from: null, to: [], subject: id, preview: '', date: 0,
-    unread: false, flagged: false, answered: false, hasAttachments: false, ...extra,
+    unread: false, flagged: false, answered: false, hasAttachments: false, pinned: false, importance: 'normal',
+    categories: [], flagDue: null, size: 0, ...extra,
   };
 }
 

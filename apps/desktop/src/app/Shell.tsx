@@ -1,26 +1,44 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 
 import { useMailApi } from '../api/MailApiContext';
-import { errorTitle, toAppError } from '../api/errors';
-import type { AppError, Draft, Focus, Folder, Mailto, MessageDetail, MessageListItem, OutboxEntry, ReadFilter, Settings, SyncStatus } from '../api/types';
+import { toAppError } from '../api/errors';
+import type {
+  AppError,
+  Category,
+  Draft,
+  Folder,
+  Mailto,
+  MessageDetail,
+  MessageListItem,
+  MoveTarget,
+  OutboxEntry,
+  Settings,
+  SyncStatus,
+} from '../api/types';
 import { AddAccountForm } from '../features/accounts/AddAccountForm';
 import { Welcome } from '../features/accounts/Welcome';
 import { ComposeView, type LeaveCompose } from '../features/compose/ComposeView';
 import { blankDraft, draftFromMessage, forwardDraft, replyDraft, type ComposeKind } from '../features/compose/seed';
-import { MessageList } from '../features/mailbox/MessageList';
+import { FolderPicker } from '../features/mailbox/FolderPicker';
+import { groupRows } from '../features/mailbox/grouping';
+import { ListTools } from '../features/mailbox/ListTools';
+import { MessageList, type PickMode } from '../features/mailbox/MessageList';
+import { RowActions } from '../features/mailbox/RowActions';
 import {
   applyOverrides,
+  folderLabel,
   INBOX_VIEW,
-  neighbourAfterRemoval,
-  nextOverride,
   resolveSelection,
   rowHolds,
   viewInfo,
   viewQuery,
   withPinned,
   type MailView,
-  type Override,
 } from '../features/mailbox/selectors';
+import { SelectionBar } from '../features/mailbox/SelectionBar';
+import { useListView } from '../features/mailbox/useListView';
+import { countLabel, idsOf, useMessageActions, type FlagValue } from '../features/mailbox/useMessageActions';
+import { useSelection } from '../features/mailbox/useSelection';
 import { Sidebar } from '../features/mailbox/Sidebar';
 import { useMessagePage } from '../features/mailbox/useMessagePage';
 import { OutboxView } from '../features/outbox/OutboxView';
@@ -35,7 +53,6 @@ import { ManageFolders } from '../features/mailbox/ManageFolders';
 import { HelpSheet } from '../features/shortcuts/HelpSheet';
 import { shortcutFor, type ShortcutAction } from '../features/shortcuts/shortcuts';
 import { nowSeconds } from '../lib/format';
-import { useDebounced } from '../lib/useDebounced';
 import { useMailEvent } from '../lib/useEvent';
 import { useWakeSync } from '../lib/useWakeSync';
 import { UpdateBanner } from '../features/updates/UpdateBanner';
@@ -44,11 +61,11 @@ import { useTheme } from '../theme/useTheme';
 import { ConfirmDialog } from '../ui/Modal';
 import { Icon } from '../ui/Icon';
 import { StatusBar } from './StatusBar';
-import { syncSummary } from './sync';
+import { syncSummary, type SyncSummary } from './sync';
 import { usePhone, usePhoneBack } from './usePhone';
+import { Toast } from './Toast';
 import { TopBar } from './TopBar';
-
-export const SEARCH_DEBOUNCE_MS = 300;
+import { NOTICE_MS, useToasts, type Notice } from './useToasts';
 
 type Screen =
   | { kind: 'mail' }
@@ -57,15 +74,6 @@ type Screen =
   | { kind: 'contacts' }
   | { kind: 'calendar' }
   | { kind: 'addAccount' };
-
-/** How long a confirmation toast stays up. */
-const NOTICE_MS = 4000;
-
-/** The messages a list row stands for: the whole conversation when grouped. */
-function idsOf(item: MessageListItem | undefined, fallback = ''): string[] {
-  if (!item) return fallback ? [fallback] : [];
-  return item.threadIds && item.threadIds.length > 0 ? item.threadIds : [item.id];
-}
 
 /** The toast for a message the user just sent, if one is being followed. */
 function sendNoticeOf(status: SendStatus | null, undo: (id: string) => void): Notice | null {
@@ -96,39 +104,6 @@ function sendNoticeOf(status: SendStatus | null, undo: (id: string) => void): No
   }
 }
 
-interface Notice {
-  tone: 'error' | 'info';
-  title: string;
-  text: string;
-  /** Stays up until replaced or dismissed (an action still under way). */
-  sticky?: boolean;
-  /** One button beside the text, such as Undo. */
-  action?: { label: string; run: () => void };
-}
-
-function errorNotice(error: AppError, what: string): Notice {
-  return { tone: 'error', title: `${what}: ${errorTitle(error.kind)}`, text: error.message };
-}
-
-function Toast({ notice, onDismiss }: { notice: Notice; onDismiss: () => void }) {
-  return (
-    <div className={`toast toast--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>
-      <div>
-        <p className="toast__title">{notice.title}</p>
-        <p className="toast__text">{notice.text}</p>
-      </div>
-      {notice.action && (
-        <button type="button" className="btn btn--secondary btn--small toast__action" onClick={notice.action.run}>
-          {notice.action.label}
-        </button>
-      )}
-      <button type="button" className="icon-btn" aria-label="Dismiss" onClick={onDismiss}>
-        <Icon name="close" />
-      </button>
-    </div>
-  );
-}
-
 const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
   remoteImages: 'block',
@@ -144,6 +119,8 @@ const DEFAULT_SETTINGS: Settings = {
   defaultReminderMins: 15,
   closeToTray: true,
   startAtLogin: false,
+  readingPane: 'right',
+  workOffline: false,
   device: { tray: false, startAtLogin: false },
 };
 
@@ -159,6 +136,32 @@ function pressEscape(form: Element | null): void {
   target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 }
 
+/** The row to show once `removed` leave the list: the next one after them, else the one before. */
+function neighbourOf(rows: readonly MessageListItem[], removed: ReadonlySet<string>): string | null {
+  const last = rows.reduce((at, m, i) => (removed.has(m.id) ? i : at), -1);
+  if (last < 0) return null;
+  const after = rows.slice(last + 1).find((m) => !removed.has(m.id));
+  if (after) return after.id;
+  return [...rows.slice(0, last)].reverse().find((m) => !removed.has(m.id))?.id ?? null;
+}
+
+/** "Wanjiru's quotation" for one message, "3 messages" for several. */
+function whatOf(rows: readonly MessageListItem[]): string {
+  const [first] = rows;
+  return rows.length === 1 && first ? first.subject || '(no subject)' : `${String(rows.length)} messages`;
+}
+
+/** Work Offline wins over whatever the accounts last reported. */
+function withWorkOffline(summary: SyncSummary, on: boolean): SyncSummary {
+  if (!on) return summary;
+  return {
+    pill: 'Working offline',
+    tone: 'warn',
+    status: 'Working offline. Mail is not checked or sent until you switch Work Offline off.',
+    lastSync: summary.lastSync,
+  };
+}
+
 export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const api = useMailApi();
   const [revision, setRevision] = useState(0);
@@ -168,7 +171,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
 
   // Accounts, folders, settings, outbox and sync status.
   const accountsLoad = useLoad('accounts', revision, () => api.listAccounts());
-  const accounts = accountsLoad.status === 'ready' ? accountsLoad.value : [];
+  const accounts = accountsLoad.status === 'ready' ? [...accountsLoad.value].sort((a, b) => a.sortOrder - b.sortOrder) : [];
   const accountKey = accounts.map((a) => a.id).join(',');
   const foldersLoad = useLoad(`folders:${accountKey}`, revision, async () => {
     const lists = await Promise.all(accounts.map((a) => api.listFolders(a.id)));
@@ -181,18 +184,24 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [outbox, setOutbox] = useState<OutboxEntry[] | null>(null);
   const [sync, setSync] = useState<Record<string, SyncStatus>>({});
-  const [notice, setNotice] = useState<Notice | null>(null);
-
-  // Confirmations close by themselves; errors stay until dismissed.
-  useEffect(() => {
-    if (notice?.tone !== 'info' || notice.sticky) return;
-    const timer = window.setTimeout(() => {
-      setNotice(null);
-    }, NOTICE_MS);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [notice]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const toasts = useToasts();
+  const { notice } = toasts;
+  const setNotice = toasts.show;
+  /** Work Offline is on (kept in a ref so callbacks see it without changing). */
+  const offlineRef = useRef(false);
+  /**
+   * Explain an error. While working offline the backend refuses anything that
+   * needs the server with a connection error; say so plainly instead.
+   */
+  const report = (error: AppError, what: string) => {
+    if (settings?.workOffline && error.kind === 'connect') {
+      setNotice({ tone: 'info', title: "You're working offline", text: `${what}. Turn off Work Offline to connect.` });
+    } else {
+      toasts.report(error, what);
+    }
+  };
+  const reportLoad = toasts.report;
 
   // Tell the user whether a message they sent actually went out.
   const sending = useSendStatus(api);
@@ -220,26 +229,31 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     };
   }, [sendPhase, clearSending]);
 
-  const report = (error: AppError, what: string) => {
-    setNotice(errorNotice(error, what));
-  };
-
   useEffect(() => {
     api.getSettings().then(setSettings, (e: unknown) => {
       setSettings(DEFAULT_SETTINGS);
-      setNotice(errorNotice(toAppError(e), 'Could not load settings'));
+      reportLoad(toAppError(e), 'Could not load settings');
     });
-  }, [api]);
+  }, [api, reportLoad]);
 
   useEffect(() => {
     api.listOutbox().then(setOutbox, (e: unknown) => {
-      setNotice(errorNotice(toAppError(e), 'Could not load the Outbox'));
+      reportLoad(toAppError(e), 'Could not load the Outbox');
     });
+  }, [api, revision, reportLoad]);
+
+  // Categories are few and shared by all accounts; a rename elsewhere comes with mail://changed.
+  useEffect(() => {
+    api.listCategories().then(setCategories, () => undefined);
   }, [api, revision]);
 
   useMailEvent(api, 'mail://changed', refresh);
   // Coming back (focus, wake, network) checks for new mail at once.
+  useEffect(() => {
+    offlineRef.current = settings?.workOffline ?? false;
+  });
   const syncOnWake = useCallback(() => {
+    if (offlineRef.current) return;
     api.syncNow(null).catch(() => undefined);
   }, [api]);
   useWakeSync(syncOnWake);
@@ -265,31 +279,37 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       report(toAppError(e), 'Could not save settings');
     });
   };
+  const currentSettings = settings ?? DEFAULT_SETTINGS;
+  const workOffline = currentSettings.workOffline;
 
   const theme = useTheme(settings?.theme ?? 'system');
 
   // What the list shows.
   const [screen, setScreen] = useState<Screen>({ kind: 'mail' });
-  const [view, setView] = useState<MailView>(INBOX_VIEW);
-  const [filter, setFilter] = useState<ReadFilter>('all');
-  const [searchInput, setSearchInput] = useState('');
-  const search = useDebounced(searchInput, SEARCH_DEBOUNCE_MS);
+  const listView = useListView();
+  const { view, setView, filter, setFilter, searchInput, setSearchInput, search, focusTab, setFocusTab, order } = listView;
   const baseQuery = viewQuery(view, filter, search);
   const threads = settings?.threads ?? true;
   // Focused Inbox: inbox views show one half at a time.
-  const [focusTab, setFocusTab] = useState<Focus>('focused');
   const inboxView =
     view.type === 'unified'
       ? view.role === 'inbox'
       : view.type === 'folder' && allFolders.some((f) => f.id === view.folderId && f.role === 'inbox');
   const focusSplit = (settings?.focusedInbox ?? false) && inboxView;
-  const query = baseQuery && { ...baseQuery, threads, focus: focusSplit ? focusTab : null };
+  const query = baseQuery && {
+    ...baseQuery,
+    threads,
+    focus: focusSplit ? focusTab : null,
+    sort: order.sort,
+    descending: order.descending,
+  };
   const page = useMessagePage(api, query, revision);
-  const [overrides, setOverrides] = useState<Record<string, Override>>({});
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const roleOfFolder = (folderId: string) => allFolders.find((f) => f.id === folderId)?.role ?? null;
+  const actions = useMessageActions({ api, version: page.version, refresh, report, roleOfFolder });
+  const selection = useSelection();
+  const { selectedId, setSelectedId, kept, setKept } = selection;
   /** An unread message opened under the "delay" setting, waiting to count as read. */
   const [readPending, setReadPending] = useState<string | null>(null);
-  const [pinned, setPinned] = useState<MessageListItem | null>(null);
   const [loaded, setLoaded] = useState<MessageDetail | null>(null);
   const [help, setHelp] = useState(false);
   // The account whose folders are being managed, if any.
@@ -298,7 +318,12 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const phone = usePhone();
   /** Phones: the folder menu slid in over the list. */
   const [drawer, setDrawer] = useState(false);
-  const [confirmForever, setConfirmForever] = useState<MessageListItem | null>(null);
+  /** Messages waiting for "Delete forever?" to be answered. */
+  const [confirmForever, setConfirmForever] = useState<MessageListItem[] | null>(null);
+  /** "Move to…" or "Copy to…" is open for these messages. */
+  const [picker, setPicker] = useState<{ mode: 'move' | 'copy'; rows: MessageListItem[] } | null>(null);
+  /** Messages being dragged to a folder (computers). */
+  const [dragging, setDragging] = useState<MessageListItem[] | null>(null);
   // An account removed in Settings takes its folders with it. Staying on one
   // of them would show an empty "Folder" and start new messages from an
   // account that no longer exists, so go back to the inbox.
@@ -306,25 +331,29 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     setView(INBOX_VIEW);
     setFilter('all');
     setSelectedId(null);
-    setPinned(null);
+    setKept(null);
   }
   const searchRef = useRef<HTMLInputElement>(null);
   const readerRef = useRef<HTMLElement>(null);
-  const versionRef = useRef(page.version);
-  useEffect(() => {
-    versionRef.current = page.version;
-  });
 
   const filtering = filter !== 'all' || search.trim() !== '';
-  const items = applyOverrides(filtering ? withPinned(page.items, pinned) : page.items, overrides, page.version);
-  const activeId = resolveSelection(items, selectedId);
-  const active = items.find((m) => m.id === activeId) ?? null;
+  const items = applyOverrides(filtering ? withPinned(page.items, kept) : page.items, actions.overrides, page.version);
   const info = viewInfo(view, accounts, allFolders);
+  const outgoing = info.role === 'sent' || info.role === 'drafts';
+  const groups = groupRows(items, order.groupBy, now(), outgoing);
+  /** The rows in the order they are shown (grouping can reorder the page). */
+  const shown = groups.flatMap((g) => g.items);
+  const activeId = resolveSelection(shown, selectedId);
+  const active = shown.find((m) => m.id === activeId) ?? null;
+  const checkedRows = shown.filter((m) => selection.checked.has(m.id));
+  const selecting = checkedRows.length > 0;
   const roleOf = (item: MessageListItem | null) =>
     item ? (allFolders.find((f) => f.id === item.folderId)?.role ?? info.role) : info.role;
   const outboxActive = (outbox ?? []).filter(isActive).length;
-  const summary = syncSummary(Object.values(sync), accounts);
+  const summary = withWorkOffline(syncSummary(Object.values(sync), accounts), workOffline);
   const offline = summary.tone === 'warn' || summary.tone === 'error';
+  /** Where the open message shows: phones always use the full screen. */
+  const pane = phone ? 'right' : currentSettings.readingPane;
   /**
    * The message the reader shows: the one the user opened. A conversation
    * row takes the id of a reply that arrives later; the reader stays on the
@@ -332,7 +361,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
    */
   const readerId = active && selectedId !== null && rowHolds(active, selectedId) ? selectedId : activeId;
   const message = loaded?.id === readerId ? loaded : null;
-  /** Phones show one pane: the list, or the message the user opened. */
+  /** Phones (and the reading pane switched off) show one pane: the list, or the message the user opened. */
   const reading = selectedId !== null && activeId !== null;
   /** The account a new message starts from: the open folder's, else the first. */
   const composeFrom = () => {
@@ -342,9 +371,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
 
   const closeMessage = () => {
     setSelectedId(null);
-    setPinned(null);
+    setKept(null);
   };
-  usePhoneBack(phone ? Number(drawer) + Number(screen.kind !== 'mail') + Number(reading) : 0, () => {
+  usePhoneBack(phone ? Number(drawer) + Number(screen.kind !== 'mail') + Number(reading) + Number(selecting) : 0, () => {
     if (drawer) setDrawer(false);
     else if (screen.kind === 'compose') pressEscape(document.querySelector('form.compose'));
     else if (screen.kind === 'calendar') {
@@ -354,49 +383,17 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       if (!section || section.dispatchEvent(escape)) setScreen({ kind: 'mail' });
     }
     else if (screen.kind !== 'mail') setScreen({ kind: 'mail' });
+    else if (selecting) selection.clearChecked();
     else closeMessage();
   });
 
-  /** Apply a change at once; undo it and explain if the backend refuses. */
-  const optimistic = (
-    ids: string[],
-    patch: Pick<Override, 'unread' | 'flagged' | 'removed'>,
-    call: () => Promise<void>,
-    what: string,
-    onRollback?: () => void,
-  ) => {
-    const version = versionRef.current;
-    setOverrides((o) => ({ ...o, ...Object.fromEntries(ids.map((id) => [id, nextOverride(o[id], patch, version)])) }));
-    call().then(
-      () => {
-        setOverrides((o) => {
-          const next = { ...o };
-          for (const id of ids) {
-            const entry = next[id];
-            if (entry) next[id] = { ...entry, settled: true, version: versionRef.current };
-          }
-          return next;
-        });
-        refresh();
-      },
-      (e: unknown) => {
-        setOverrides((o) => {
-          const next = { ...o };
-          for (const id of ids) Reflect.deleteProperty(next, id);
-          return next;
-        });
-        onRollback?.();
-        report(toAppError(e), what);
-      },
-    );
-  };
-
   /** The user opened a message: select it and mark it read. */
   const open = (id: string) => {
+    selection.clearChecked();
     setSelectedId(id);
-    const item = items.find((m) => m.id === id);
+    const item = shown.find((m) => m.id === id);
     if (!item) return;
-    setPinned(item);
+    setKept(item);
     if (!item.unread) return;
     const when = settings?.markRead ?? 'open';
     if (when === 'open') markRead(id);
@@ -404,9 +401,10 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     else if (when === 'delay') setReadPending(id);
   };
 
+  /** Opening a message reads it; that is not something to undo. */
   const markRead = (id: string) => {
-    const ids = idsOf(items.find((m) => m.id === id), id);
-    optimistic([id], { unread: false }, () => api.setFlags(ids, { seen: true }), 'Could not mark as read');
+    const ids = idsOf(shown.find((m) => m.id === id), id);
+    actions.optimistic([id], { unread: false }, () => api.setFlags(ids, { seen: true }), 'Could not mark as read');
   };
 
   // "Mark as read after a few seconds": a quick peek leaves it unread.
@@ -444,82 +442,173 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
 
   const goTo = (next: MailView) => {
     leaving(() => {
-      setView(next);
-      setFocusTab('focused');
-      setFilter('all');
+      listView.goTo(next);
       setSelectedId(null);
-      setPinned(null);
+      setKept(null);
+      selection.clearChecked();
       setScreen({ kind: 'mail' });
     });
   };
 
-  /** Show the neighbour now; go back to the message if the backend refuses. */
-  const restore = (item: MessageListItem) => () => {
-    setSelectedId(item.id);
+  /** The messages an action applies to: the ticked rows, else the open one. */
+  const targets = (): MessageListItem[] => (selecting ? checkedRows : active ? [active] : []);
+
+  /**
+   * Rows are leaving the list. If the open message is one of them, show the
+   * next one (phones, and the reading pane switched off, go back to the
+   * list). Returns how to put the selection back if the backend refuses.
+   */
+  const leave = (rows: readonly MessageListItem[]): (() => void) => {
+    const before = selectedId;
+    const openRow = active;
+    selection.clearChecked();
+    if (openRow && rows.some((r) => r.id === openRow.id)) {
+      setSelectedId(phone || pane === 'off' ? null : neighbourOf(shown, new Set(rows.map((r) => r.id))));
+      setKept(null);
+    }
+    return () => {
+      if (openRow && rows.some((r) => r.id === openRow.id)) setSelectedId(before ?? openRow.id);
+    };
   };
 
-  const remove = (item: MessageListItem, target: 'archive' | 'trash') => {
-    // On a phone, archiving or deleting the open message returns to the list.
-    setSelectedId(phone ? null : neighbourAfterRemoval(items, item.id));
-    setPinned(null);
-    optimistic(
-      [item.id],
-      { removed: true },
-      () => api.moveMessages(idsOf(item), { role: target }),
-      target === 'archive' ? 'Could not archive' : 'Could not delete',
-      restore(item),
-    );
+  /** A toast for a change that took messages away, with Undo. */
+  const undoable = (title: string, rows: readonly MessageListItem[], entry: ReturnType<typeof actions.move>) => {
     setNotice({
       tone: 'info',
-      title: target === 'archive' ? 'Archived' : 'Moved to Trash',
-      text: item.subject || '(no subject)',
+      title,
+      text: whatOf(rows),
       action: {
         label: 'Undo',
         run: () => {
-          undoRemove(item);
+          setNotice(null);
+          actions.history.undoEntry(entry);
         },
       },
     });
   };
 
-  /** Undo archive or delete: put the message back where it was. */
-  const undoRemove = (item: MessageListItem) => {
-    setNotice(null);
-    optimistic(
-      [item.id],
-      { removed: false },
-      () => api.moveMessages(idsOf(item), { folderId: item.folderId }),
-      'Could not undo',
+  const remove = (rows: readonly MessageListItem[], target: 'archive' | 'trash') => {
+    if (rows.length === 0) return;
+    const rollback = leave(rows);
+    const title = target === 'archive' ? 'Archived' : 'Moved to Trash';
+    const entry = actions.move(
+      rows,
+      { role: target },
+      countLabel(title, rows),
+      target === 'archive' ? 'Could not archive' : 'Could not delete',
+      rollback,
     );
+    undoable(title, rows, entry);
   };
 
-  const deleteForever = (item: MessageListItem) => {
-    setSelectedId(phone ? null : neighbourAfterRemoval(items, item.id));
-    setPinned(null);
-    optimistic([item.id], { removed: true }, () => api.deleteForever(idsOf(item)), 'Could not delete', restore(item));
+  const moveTo = (rows: readonly MessageListItem[], target: MoveTarget, name: string) => {
+    const moving = 'folderId' in target ? rows.filter((r) => r.folderId !== target.folderId) : rows;
+    if (moving.length === 0) return;
+    const rollback = leave(moving);
+    const entry = actions.move(moving, target, countLabel(`Moved to ${name}`, moving), 'Could not move', rollback);
+    undoable(`Moved to ${name}`, moving, entry);
   };
 
-  const deleteItem = (item: MessageListItem) => {
-    const role = roleOf(item);
-    if (role === 'trash' || role === 'junk') setConfirmForever(item);
-    else remove(item, 'trash');
+  const copyTo = (rows: readonly MessageListItem[], target: MoveTarget, name: string) => {
+    if (rows.length === 0) return;
+    selection.clearChecked();
+    actions.copy(rows, target);
+    setNotice({ tone: 'info', title: `Copied to ${name}`, text: whatOf(rows) });
   };
 
+  const junk = (rows: readonly MessageListItem[], isJunk: boolean) => {
+    if (rows.length === 0) return;
+    const rollback = leave(rows);
+    const entry = actions.markJunk(rows, isJunk, rollback);
+    undoable(isJunk ? 'Marked as junk' : 'Not junk: moved to the Inbox', rows, entry);
+  };
+
+  const deleteForever = (rows: readonly MessageListItem[]) => {
+    const rollback = leave(rows);
+    actions.deleteForever(rows, rollback);
+  };
+
+  const deleteRows = (rows: readonly MessageListItem[]) => {
+    const [first] = rows;
+    if (!first) return;
+    const role = roleOf(first);
+    if (role === 'trash' || role === 'junk') setConfirmForever([...rows]);
+    else remove(rows, 'trash');
+  };
+
+  const flagRows = (rows: readonly MessageListItem[], flag: FlagValue) => {
+    if (rows.length > 0) actions.setFlag(rows, flag);
+  };
   const toggleFlag = (item: MessageListItem) => {
-    optimistic([item.id], { flagged: !item.flagged }, () => api.setFlags([item.id], { flagged: !item.flagged }), 'Could not flag');
+    flagRows([item], { flagged: !item.flagged });
+  };
+  const toggleRead = (item: MessageListItem) => {
+    actions.setRead([item], item.unread);
+  };
+  const togglePin = (item: MessageListItem) => {
+    actions.setPinned([item], !item.pinned);
   };
 
-  const toggleRead = (item: MessageListItem) => {
-    optimistic(
-      [item.id],
-      { unread: !item.unread },
-      () => api.setFlags(idsOf(item), { seen: item.unread }),
-      'Could not change read state',
+  /** "New category…" made one: remember it and put it on the messages. */
+  const categoryCreated = (rows: readonly MessageListItem[], all: Category[], name: string) => {
+    setCategories(all);
+    if (rows.length > 0) actions.setCategory(rows, name, true);
+  };
+
+  const openWindow = (id: string) => {
+    if (phone) return;
+    api.openMessageWindow(id).catch((e: unknown) => {
+      report(toAppError(e), 'Could not open a new window');
+    });
+  };
+
+  /** Ctrl+Z and Ctrl+Y, with a word about what changed. */
+  const undo = () => {
+    const entry = actions.history.undo();
+    setNotice(
+      entry
+        ? { tone: 'info', title: 'Undone', text: entry.label }
+        : { tone: 'info', title: 'Nothing to undo', text: 'Changes to messages can be undone here.' },
     );
+  };
+  const redo = () => {
+    const entry = actions.history.redo();
+    setNotice(
+      entry
+        ? { tone: 'info', title: 'Redone', text: entry.label }
+        : { tone: 'info', title: 'Nothing to redo', text: 'Undo something first.' },
+    );
+  };
+
+  const pick = (id: string, mode: PickMode) => {
+    if (mode === 'range') selection.extendTo(shown, id, activeId);
+    else if (mode === 'toggle' && !phone) selection.toggle(id, selectedId !== null ? activeId : null);
+    else selection.toggle(id);
+  };
+
+  const dragRows = (id: string, event: DragEvent<HTMLElement>) => {
+    const row = shown.find((m) => m.id === id);
+    if (!row) return;
+    const rows = selection.checked.has(id) ? checkedRows : [row];
+    setDragging(rows);
+    const transfer = event.dataTransfer as DataTransfer | null | undefined;
+    if (transfer) {
+      transfer.effectAllowed = 'copyMove';
+      transfer.setData('text/plain', whatOf(rows));
+    }
+  };
+  const dragAccount = dragging && new Set(dragging.map((r) => r.accountId)).size === 1 ? (dragging[0]?.accountId ?? null) : null;
+
+  /**
+   * Open a dialog only when nothing else is in the way.
+   */
+  const openPicker = (mode: 'move' | 'copy') => {
+    const rows = targets();
+    if (rows.length > 0) setPicker({ mode, rows });
   };
 
   /**
-   * Open compose. `kind` says what is being written, which decides the
+   * Compose. `kind` says what is being written, which decides the
    * signature (see ComposeView). `attachmentsFrom` loads copies of that
    * message's attachments into the draft. `unsaved`: the draft exists nowhere
    * else (taken back out of the Outbox).
@@ -623,6 +712,10 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           screen.kind === 'addAccount'
         ) {
           setScreen({ kind: 'mail' });
+        } else if (screen.kind === 'mail' && selecting) {
+          selection.clearChecked();
+        } else if (screen.kind === 'mail' && pane === 'off' && reading) {
+          closeMessage();
         }
         return;
       }
@@ -641,10 +734,22 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         newMessage();
         return;
       }
+      if (action === 'undo') {
+        undo();
+        return;
+      }
+      if (action === 'redo') {
+        redo();
+        return;
+      }
       if (view.type === 'outbox') return;
-      const index = items.findIndex((m) => m.id === activeId);
+      if (action === 'selectAll') {
+        selection.selectAll(shown);
+        return;
+      }
+      const index = shown.findIndex((m) => m.id === activeId);
       if (action === 'next' || action === 'previous') {
-        const target = items[action === 'next' ? index + 1 : index - 1];
+        const target = shown[action === 'next' ? index + 1 : index - 1];
         if (target) open(target.id);
         else if (action === 'next' && page.hasMore) page.loadMore();
         return;
@@ -653,27 +758,32 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         readerRef.current?.focus();
         return;
       }
-      if (!active) return;
-      const role = roleOf(active);
+      const rows = targets();
+      const [first] = rows;
+      if (!first || !active) return;
+      const role = roleOf(first);
       switch (action) {
         case 'reply':
         case 'replyAll':
-          if (message && role !== 'drafts') reply(message, action === 'replyAll');
+          if (message && roleOf(active) !== 'drafts') reply(message, action === 'replyAll');
           return;
         case 'forward':
-          if (message && role !== 'drafts') forward(message);
+          if (message && roleOf(active) !== 'drafts') forward(message);
           return;
         case 'archive':
-          if (role !== 'archive' && role !== 'trash' && role !== 'junk' && role !== 'drafts') remove(active, 'archive');
+          if (role !== 'archive' && role !== 'trash' && role !== 'junk' && role !== 'drafts') remove(rows, 'archive');
           return;
         case 'delete':
-          deleteItem(active);
+          deleteRows(rows);
           return;
         case 'flag':
-          toggleFlag(active);
+          flagRows(rows, { flagged: !rows.every((r) => r.flagged) });
           return;
         case 'toggleRead':
-          toggleRead(active);
+          actions.setRead(rows, rows.some((r) => r.unread));
+          return;
+        case 'move':
+          openPicker('move');
           return;
       }
     };
@@ -683,8 +793,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       const action = shortcutFor(event);
       if (!action) return;
       // A dialog is open (help, view source, manage folders, a confirmation…):
-      // keys belong to it, not to the mail underneath.
+      // keys belong to it, not to the mail underneath. So do they in a menu.
       if (document.querySelector('[aria-modal="true"]')) return;
+      if (event.target instanceof Element && event.target.closest('[role="menu"]')) return;
       // Stop the key from also being typed into a field the shortcut focuses
       // (for example the body of the reply that "r" opens).
       if (action !== 'close') event.preventDefault();
@@ -725,6 +836,49 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     );
   }
 
+  const selectionBar = selecting && (
+    <SelectionBar
+      rows={checkedRows}
+      shown={shown.length}
+      role={info.role}
+      categories={categories}
+      onClear={selection.clearChecked}
+      onSelectAll={() => {
+        selection.selectAll(shown);
+      }}
+      onRead={(read) => {
+        actions.setRead(checkedRows, read);
+      }}
+      onFlag={(flagged) => {
+        flagRows(checkedRows, { flagged });
+      }}
+      onPin={(pinned) => {
+        actions.setPinned(checkedRows, pinned);
+      }}
+      onCategory={(name, add) => {
+        actions.setCategory(checkedRows, name, add);
+      }}
+      onCategoryCreated={(all, name) => {
+        categoryCreated(checkedRows, all, name);
+      }}
+      onMove={() => {
+        openPicker('move');
+      }}
+      onCopy={() => {
+        openPicker('copy');
+      }}
+      onArchive={() => {
+        remove(checkedRows, 'archive');
+      }}
+      onDelete={() => {
+        deleteRows(checkedRows);
+      }}
+      onJunk={(isJunk) => {
+        junk(checkedRows, isJunk);
+      }}
+    />
+  );
+
   let main;
   switch (screen.kind) {
     case 'compose':
@@ -753,10 +907,16 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     case 'settings':
       main = (
         <SettingsView
-          settings={settings ?? DEFAULT_SETTINGS}
+          settings={currentSettings}
           accounts={accounts}
           onChange={changeSettings}
           onAccountsChanged={refresh}
+          categories={categories}
+          onCategoriesChanged={(next) => {
+            setCategories(next);
+            refresh();
+          }}
+          phone={phone}
           onAddAccount={() => {
             setScreen({ kind: 'addAccount' });
           }}
@@ -784,7 +944,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             goTo(INBOX_VIEW);
             setSearchInput(address);
             setSelectedId(null);
-            setPinned(null);
+            setKept(null);
           }}
         />
       );
@@ -819,9 +979,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         </div>
       );
       break;
-    case 'mail':
-      main =
-        view.type === 'outbox' ? (
+    case 'mail': {
+      if (view.type === 'outbox') {
+        main = (
           <OutboxView
             entries={outbox}
             accounts={accounts}
@@ -830,91 +990,190 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               compose(draft, 'Edit message', 'draft', { unsaved: true });
             }}
           />
-        ) : (
-          <>
-            <MessageList
-              title={info.title}
-              subtitle={info.subtitle}
-              role={info.role}
-              status={page.status}
-              items={items}
-              total={page.total}
-              error={page.error}
-              filtered={filtering}
-              filter={filter}
-              focus={focusSplit ? focusTab : null}
-              onFocus={(next) => {
-                setFocusTab(next);
-                setSelectedId(null);
-                setPinned(null);
-              }}
-              selectedId={activeId}
-              accounts={accounts}
-              now={now()}
-              hasMore={page.hasMore}
-              loadingMore={page.loadingMore}
-              onFilter={(next) => {
-                setFilter(next);
-                setSelectedId(null);
-                setPinned(null);
-              }}
-              onSelect={open}
-              onLoadMore={page.loadMore}
-              onRetry={refresh}
-              onRefresh={phone ? () => api.syncNow(null) : undefined}
-            />
-            <ReadingPane
-              ref={readerRef}
-              item={active}
-              messageId={readerId}
-              account={accounts.find((a) => a.id === active?.accountId)}
-              role={roleOf(active)}
-              alwaysLoadImages={settings?.remoteImages === 'allow'}
-              theme={theme}
-              onLoaded={setLoaded}
-              focusTab={focusSplit ? focusTab : null}
-              onFocusRule={(sender, focus) => {
-                api.setFocusRule(sender, focus, false).then(
-                  () => {
-                    setSelectedId(null);
-                    setPinned(null);
-                    refresh();
-                    setNotice({
-                      tone: 'info',
-                      title: focus === 'other' ? 'Moved to Other' : 'Moved to Focused',
-                      text: `Mail from ${sender} will go there from now on.`,
-                    });
-                  },
-                  (e: unknown) => {
-                    report(toAppError(e), 'Could not move');
-                  },
-                );
-              }}
-              narrow={phone}
-              onBack={closeMessage}
-              onReply={reply}
-              onForward={forward}
-              onEdit={continueDraft}
-              onArchive={() => {
-                if (active) remove(active, 'archive');
-              }}
-              onDelete={() => {
-                if (active) deleteItem(active);
-              }}
-              onDeleteForever={() => {
-                if (active) setConfirmForever(active);
-              }}
-              onToggleFlag={() => {
-                if (active) toggleFlag(active);
-              }}
-              onToggleRead={() => {
-                if (active) toggleRead(active);
-              }}
-            />
-          </>
         );
+        break;
+      }
+      const list = (
+        <MessageList
+          title={info.title}
+          subtitle={info.subtitle}
+          role={info.role}
+          status={page.status}
+          groups={groups}
+          total={page.total}
+          error={page.error}
+          filtered={filtering}
+          filter={filter}
+          focus={focusSplit ? focusTab : null}
+          onFocus={(next) => {
+            setFocusTab(next);
+            setSelectedId(null);
+            setKept(null);
+          }}
+          selectedId={activeId}
+          accounts={accounts}
+          categories={categories}
+          now={now()}
+          hasMore={page.hasMore}
+          loadingMore={page.loadingMore}
+          onFilter={(next) => {
+            setFilter(next);
+            setSelectedId(null);
+            setKept(null);
+            selection.clearChecked();
+          }}
+          onSelect={open}
+          onLoadMore={page.loadMore}
+          onRetry={refresh}
+          onRefresh={phone ? () => api.syncNow(null) : undefined}
+          phone={phone}
+          checked={selection.checked}
+          onPick={pick}
+          onLongPress={(id) => {
+            if (!selection.checked.has(id)) selection.toggle(id);
+          }}
+          onToggleRead={(id) => {
+            const row = shown.find((m) => m.id === id);
+            if (row) toggleRead(row);
+          }}
+          onOpenWindow={phone ? undefined : openWindow}
+          onDragRows={phone ? undefined : dragRows}
+          onDragEnd={() => {
+            setDragging(null);
+          }}
+          rowActions={
+            phone
+              ? undefined
+              : (item) => (
+                  <RowActions
+                    item={item}
+                    role={roleOf(item)}
+                    onPin={() => {
+                      togglePin(item);
+                    }}
+                    onFlag={() => {
+                      toggleFlag(item);
+                    }}
+                    onRead={() => {
+                      toggleRead(item);
+                    }}
+                    onJunk={(isJunk) => {
+                      junk([item], isJunk);
+                    }}
+                    onArchive={() => {
+                      remove([item], 'archive');
+                    }}
+                    onDelete={() => {
+                      deleteRows([item]);
+                    }}
+                  />
+                )
+          }
+          selectionBar={selectionBar || undefined}
+          tools={
+            <ListTools
+              order={order}
+              onOrder={listView.setOrder}
+              pane={phone ? null : pane}
+              onPane={(next) => {
+                changeSettings({ ...currentSettings, readingPane: next });
+              }}
+            />
+          }
+        />
+      );
+      const reader = (
+        <ReadingPane
+          ref={readerRef}
+          item={active}
+          messageId={readerId}
+          account={accounts.find((a) => a.id === active?.accountId)}
+          role={roleOf(active)}
+          alwaysLoadImages={settings?.remoteImages === 'allow'}
+          theme={theme}
+          onLoaded={setLoaded}
+          focusTab={focusSplit ? focusTab : null}
+          onFocusRule={(sender, focus) => {
+            api.setFocusRule(sender, focus, false).then(
+              () => {
+                setSelectedId(null);
+                setKept(null);
+                refresh();
+                setNotice({
+                  tone: 'info',
+                  title: focus === 'other' ? 'Moved to Other' : 'Moved to Focused',
+                  text: `Mail from ${sender} will go there from now on.`,
+                });
+              },
+              (e: unknown) => {
+                report(toAppError(e), 'Could not move');
+              },
+            );
+          }}
+          narrow={phone}
+          workOffline={workOffline}
+          showBack={!phone && pane === 'off'}
+          onBack={closeMessage}
+          categories={categories}
+          now={now()}
+          onReply={reply}
+          onForward={forward}
+          onEdit={continueDraft}
+          onArchive={() => {
+            if (active) remove([active], 'archive');
+          }}
+          onDelete={() => {
+            if (active) deleteRows([active]);
+          }}
+          onDeleteForever={() => {
+            if (active) setConfirmForever([active]);
+          }}
+          onToggleFlag={() => {
+            if (active) toggleFlag(active);
+          }}
+          onFlagDue={(flag) => {
+            if (active) flagRows([active], flag);
+          }}
+          onToggleRead={() => {
+            if (active) toggleRead(active);
+          }}
+          onTogglePin={() => {
+            if (active) togglePin(active);
+          }}
+          onCategory={(name, add) => {
+            if (active) actions.setCategory([active], name, add);
+          }}
+          onCategoryCreated={(all, name) => {
+            categoryCreated(active ? [active] : [], all, name);
+          }}
+          onImportance={(importance) => {
+            if (active) actions.setImportance([active], importance);
+          }}
+          onJunk={(isJunk) => {
+            if (active) junk([active], isJunk);
+          }}
+          onOpenWindow={
+            phone
+              ? undefined
+              : () => {
+                  if (readerId) openWindow(readerId);
+                }
+          }
+        />
+      );
+      main = pane === 'off' ? (reading ? reader : list) : (
+        <>
+          {list}
+          {reader}
+        </>
+      );
       break;
+    }
   }
+
+  const panesClass = phone
+    ? `panes panes--phone ${reading ? 'panes--reading' : 'panes--listing'}`
+    : `panes${screen.kind === 'mail' && pane !== 'right' ? ` panes--${pane}` : ''}`;
 
   return (
     <div className={phone && reading && screen.kind === 'mail' ? 'app app--reading' : 'app'}>
@@ -923,14 +1182,16 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         searchField={searchRef}
         sync={summary}
         theme={theme}
+        workOffline={workOffline}
         onSearch={(value) => {
           setSearchInput(value);
           setSelectedId(null);
-          setPinned(null);
+          setKept(null);
+          selection.clearChecked();
         }}
         onSync={() => api.syncNow(null)}
         onToggleTheme={() => {
-          changeSettings({ ...(settings ?? DEFAULT_SETTINGS), theme: theme === 'dark' ? 'light' : 'dark' });
+          changeSettings({ ...currentSettings, theme: theme === 'dark' ? 'light' : 'dark' });
         }}
         onHelp={() => {
           setHelp(true);
@@ -952,6 +1213,23 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               accounts={accounts}
               folders={foldersByAccount}
               outboxCount={outboxActive}
+              drag={dragging ? { accountId: dragAccount } : null}
+              onDropFolder={(folder, copy) => {
+                const rows = dragging ?? [];
+                setDragging(null);
+                if (copy) copyTo(rows, { folderId: folder.id }, folderLabel(folder));
+                else moveTo(rows, { folderId: folder.id }, folderLabel(folder));
+              }}
+              onFavorite={(folder, favorite) => {
+                api.setFolderFavorite(folder.id, favorite).then(refresh, (e: unknown) => {
+                  report(toAppError(e), favorite ? 'Could not add to Favourites' : 'Could not remove from Favourites');
+                });
+              }}
+              onReorderAccounts={(ids) => {
+                api.reorderAccounts(ids).then(refresh, (e: unknown) => {
+                  report(toAppError(e), 'Could not change the order of accounts');
+                });
+              }}
               onView={(next) => {
                 setDrawer(false);
                 goTo(next);
@@ -993,16 +1271,22 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             )}
           </div>
         )}
-        <main className={phone ? `panes panes--phone ${reading ? 'panes--reading' : 'panes--listing'}` : 'panes'}>
-          {main}
-        </main>
-        {phone && screen.kind === 'mail' && !reading && view.type !== 'outbox' && accounts.length > 0 && (
+        <main className={panesClass}>{main}</main>
+        {phone && screen.kind === 'mail' && !reading && !selecting && view.type !== 'outbox' && accounts.length > 0 && (
           <button type="button" className="fab" aria-label="New message" onClick={newMessage}>
             <Icon name="pen" />
           </button>
         )}
       </div>
-      <StatusBar sync={summary} outbox={outboxActive} accountCount={accounts.length} />
+      <StatusBar
+        sync={summary}
+        outbox={outboxActive}
+        accountCount={accounts.length}
+        workOffline={workOffline}
+        onWorkOffline={(on) => {
+          changeSettings({ ...currentSettings, workOffline: on });
+        }}
+      />
 
       {(notice ?? sendNotice) && (
         // A send being followed and another message (Archived, an error) are
@@ -1028,6 +1312,23 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           }}
         />
       )}
+      {picker && (
+        <FolderPicker
+          mode={picker.mode}
+          rows={picker.rows}
+          accounts={accounts}
+          folders={foldersByAccount}
+          onClose={() => {
+            setPicker(null);
+          }}
+          onPick={(target, name) => {
+            const { mode, rows } = picker;
+            setPicker(null);
+            if (mode === 'move') moveTo(rows, target, name);
+            else copyTo(rows, target, name);
+          }}
+        />
+      )}
       {help && (
         <HelpSheet
           onClose={() => {
@@ -1037,17 +1338,21 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       )}
       {confirmForever && (
         <ConfirmDialog
-          title="Delete forever?"
-          description="This message is removed from the server and cannot be recovered."
+          title={confirmForever.length === 1 ? 'Delete forever?' : `Delete ${String(confirmForever.length)} messages forever?`}
+          description={
+            confirmForever.length === 1
+              ? 'This message is removed from the server and cannot be recovered.'
+              : `These ${String(confirmForever.length)} messages are removed from the server and cannot be recovered.`
+          }
           confirmLabel="Delete forever"
           danger
           onCancel={() => {
             setConfirmForever(null);
           }}
           onConfirm={() => {
-            const item = confirmForever;
+            const rows = confirmForever;
             setConfirmForever(null);
-            deleteForever(item);
+            deleteForever(rows);
           }}
         />
       )}

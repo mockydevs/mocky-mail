@@ -9,6 +9,7 @@ use mail_sync::imap::ImapConnection;
 use mail_sync::{Credentials, Security, ServerConfig, ServerSuggestion, smtp};
 use serde::Deserialize;
 use tauri::{AppHandle, State};
+
 use tauri_plugin_opener::OpenerExt;
 
 use crate::convert::{to_store, to_sync};
@@ -43,11 +44,18 @@ pub struct AddOAuthInput {
 }
 
 /// Changes for `update_account`.
+#[allow(
+    clippy::option_option,
+    reason = "a syncMonths of null differs from one left out"
+)]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountPatch {
     display_name: Option<String>,
     password: Option<String>,
+    /// Left out: unchanged; null: keep all mail in full; months otherwise.
+    #[serde(default, deserialize_with = "crate::convert::present")]
+    sync_months: Option<Option<u32>>,
 }
 
 fn clean_email(email: &str) -> AppResult<String> {
@@ -311,6 +319,14 @@ pub async fn update_account(
     patch: AccountPatch,
 ) -> AppResult<Account> {
     let account = state.store.get_account(&id)?;
+    if let Some(Some(months)) = patch.sync_months
+        && !mail_core::sync_window::is_valid(months)
+    {
+        return Err(AppError::invalid(format!(
+            "Choose between 1 and {} months.",
+            mail_core::sync_window::MAX_MONTHS
+        )));
+    }
     if let Some(password) = patch.password.filter(|p| !p.is_empty()) {
         if account.auth != AuthKind::Password {
             return Err(AppError::invalid(
@@ -337,6 +353,13 @@ pub async fn update_account(
         state
             .store
             .update_account_display_name(&id, &clean_name(&name, &account.email))?;
+    }
+    if let Some(months) = patch.sync_months
+        && months != account.sync_months
+    {
+        state.store.set_account_sync_months(&id, months)?;
+        // A wider window downloads the rest now. Bodies already kept stay.
+        state.wake_sync(Some(&id));
     }
     events::accounts_changed(&app);
     Ok(state.store.get_account(&id)?)
@@ -443,6 +466,14 @@ mod tests {
             Some("don@outlook.com")
         );
         assert_eq!(chosen_address("", None).map_err(|e| e.kind), Err("auth"));
+    }
+
+    #[test]
+    fn a_null_sync_window_is_told_from_one_left_out() {
+        let patch = |json: &str| serde_json::from_str::<AccountPatch>(json).ok();
+        assert!(patch(r#"{"displayName":"Don"}"#).is_some_and(|p| p.sync_months.is_none()));
+        assert!(patch(r#"{"syncMonths":null}"#).is_some_and(|p| p.sync_months == Some(None)));
+        assert!(patch(r#"{"syncMonths":6}"#).is_some_and(|p| p.sync_months == Some(Some(6))));
     }
 
     #[test]

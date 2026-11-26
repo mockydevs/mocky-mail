@@ -1,5 +1,8 @@
+import { useEffect } from 'react';
+
 import type { Account } from '../../api/types';
 import { Icon, Logo, type IconName } from '../../ui/Icon';
+import { matchSystemBars } from '../../theme/useTheme';
 import { AddAccountForm } from './AddAccountForm';
 
 const POINTS: readonly { icon: IconName; title: string; text: string }[] = [
@@ -10,6 +13,11 @@ const POINTS: readonly { icon: IconName; title: string; text: string }[] = [
 
 /** First run: a brand panel beside the add-account card (stacked on a phone). */
 export function Welcome({ onAdded }: { onAdded: (account: Account) => void }) {
+  // Android: the status bar sits over the brand panel (see matchSystemBars).
+  useEffect(() => {
+    matchSystemBars();
+    return matchSystemBars;
+  }, []);
   return (
     <main className="welcome">
       <section className="welcome__intro">

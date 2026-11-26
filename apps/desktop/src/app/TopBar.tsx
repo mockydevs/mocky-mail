@@ -16,6 +16,8 @@ interface Props {
   onHelp: () => void;
   /** Phones: opens the folder menu. Desktop has the sidebar instead. */
   onMenu?: (() => void) | undefined;
+  /** Work Offline is on: nothing is checked, so the sync button is off. */
+  workOffline?: boolean;
 }
 
 export function TopBar({ searchField, ...props }: Props) {
@@ -76,11 +78,18 @@ export function TopBar({ searchField, ...props }: Props) {
           className="icon-btn"
           aria-label={syncing ? 'Syncing' : 'Check for new mail'}
           aria-busy={syncing}
-          disabled={syncing}
+          aria-describedby={props.workOffline ? 'sync-offline' : undefined}
+          title={props.workOffline ? 'Working offline. Switch off Work Offline to check for mail.' : 'Check for new mail'}
+          disabled={syncing || props.workOffline === true}
           onClick={sync}
         >
           <Icon name="sync" />
         </button>
+        {props.workOffline && (
+          <span id="sync-offline" className="visually-hidden">
+            Working offline. Switch off Work Offline to check for mail.
+          </span>
+        )}
         <button type="button" className="icon-btn" aria-label={themeLabel} title={themeLabel} onClick={props.onToggleTheme}>
           <Icon name={props.theme === 'dark' ? 'sun' : 'moon'} />
         </button>

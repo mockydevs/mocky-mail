@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use mail_core::folders::FolderRole;
+use mail_core::importance::Importance;
 use mail_core::message::{AttachmentInfo, Mailbox, MessageSummary};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,13 @@ pub enum ListFilter {
     Unread,
     /// Only flagged messages.
     Flagged,
+    /// Only messages with attachments.
+    Attachments,
+    /// Only messages sent to the account's own address (To or Cc).
+    #[serde(rename = "toMe")]
+    ToMe,
+    /// Only pinned messages.
+    Pinned,
 }
 
 impl ListFilter {
@@ -50,7 +58,51 @@ impl ListFilter {
             Self::All => 0,
             Self::Unread => 1,
             Self::Flagged => 2,
+            Self::Attachments => 3,
+            Self::ToMe => 4,
+            Self::Pinned => 5,
         }
+    }
+}
+
+/// How the message list is ordered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListSort {
+    /// By date.
+    #[default]
+    Date,
+    /// By sender name (or address).
+    From,
+    /// By subject.
+    Subject,
+    /// By size.
+    Size,
+}
+
+/// The `ORDER BY` for a page: pinned messages first (`pinned` is the
+/// column or expression saying so) unless searching, then the chosen sort,
+/// newest first among equals. Built only from the fixed pieces below.
+fn order_by(query: &ListQuery, pinned: &str, searching: bool) -> String {
+    let dir = if query.descending.unwrap_or(true) {
+        "DESC"
+    } else {
+        "ASC"
+    };
+    let newest = "m.date IS NULL, m.date DESC, m.seq DESC";
+    let key = match query.sort.unwrap_or_default() {
+        // Undated mail last either way.
+        ListSort::Date => format!("m.date IS NULL, m.date {dir}, m.seq {dir}"),
+        ListSort::From => format!(
+            "lower(coalesce(nullif(trim(m.from_name), ''), m.from_address, '')) {dir}, {newest}"
+        ),
+        ListSort::Subject => format!("lower(m.subject) {dir}, {newest}"),
+        ListSort::Size => format!("m.size {dir}, {newest}"),
+    };
+    if searching || query.ignore_pinned {
+        key
+    } else {
+        format!("{pinned} DESC, {key}")
     }
 }
 
@@ -77,6 +129,16 @@ pub struct ListQuery {
     /// unaffected). `None` shows everything.
     #[serde(default)]
     pub focus: Option<mail_core::focus::Focus>,
+    /// Order; `None` is by date.
+    #[serde(default)]
+    pub sort: Option<ListSort>,
+    /// Largest first (newest, Z to A, biggest); `None` is `true`.
+    #[serde(default)]
+    pub descending: Option<bool>,
+    /// Leave pinned messages in their place (for the app's own lookups,
+    /// such as the newest unread message; not part of the interface).
+    #[serde(skip)]
+    pub ignore_pinned: bool,
 }
 
 /// One row of the message list.
@@ -109,6 +171,16 @@ pub struct MessageListItem {
     pub answered: bool,
     /// Has attachments.
     pub has_attachments: bool,
+    /// Kept at the top of its folder (this device only).
+    pub pinned: bool,
+    /// From the headers, or as set here.
+    pub importance: Importance,
+    /// Category names, in the order they were added.
+    pub categories: Vec<String>,
+    /// Follow-up date of a flagged message, Unix seconds.
+    pub flag_due: Option<i64>,
+    /// Size of the whole message in bytes.
+    pub size: u64,
     /// Messages in this conversation shown by the list (1 when not grouped).
     pub thread_count: u32,
     /// Their ids, newest first, when grouped; empty otherwise. Actions on a
@@ -155,9 +227,11 @@ pub struct StoredMessage {
 macro_rules! item_columns {
     () => {
         "m.id, m.account_id, m.folder_id, m.from_name, m.from_address, m.to_json, m.subject, \
-         m.preview, m.date, m.seen, m.flagged, m.answered, m.has_attachments"
+         m.preview, m.date, m.seen, m.flagged, m.answered, m.has_attachments, m.pinned, \
+         m.importance, m.categories, m.flag_due, m.size"
     };
 }
+// 18 columns: queries that select more read them from index 18 on.
 
 /// Selection shared by the page and the count. `?1` account, `?2` folder,
 /// `?3` role, `?4` filter code, `?5` FTS query; a NULL selector matches all.
@@ -170,7 +244,14 @@ macro_rules! list_where {
           WHERE (?1 IS NULL OR m.account_id = ?1)
             AND (?2 IS NULL OR m.folder_id = ?2)
             AND (?3 IS NULL OR f.role = ?3)
-            AND (?4 = 0 OR (?4 = 1 AND m.seen = 0) OR (?4 = 2 AND m.flagged = 1))
+            AND (?4 = 0 OR (?4 = 1 AND m.seen = 0) OR (?4 = 2 AND m.flagged = 1)
+                 OR (?4 = 3 AND m.has_attachments = 1) OR (?4 = 5 AND m.pinned = 1)
+                 OR (?4 = 4 AND EXISTS (
+                     SELECT 1 FROM accounts a
+                     WHERE a.id = m.account_id AND lower(a.email) IN (
+                         SELECT lower(json_extract(t.value, '$.address')) FROM json_each(m.to_json) t
+                         UNION ALL
+                         SELECT lower(json_extract(c.value, '$.address')) FROM json_each(m.cc_json) c))))
             AND (?5 IS NULL OR m.seq IN
                  (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?5))
             AND (?8 IS NULL OR f.role != 'inbox' OR coalesce(r1.focus, r2.focus,
@@ -218,6 +299,11 @@ struct ItemRow {
     flagged: bool,
     answered: bool,
     has_attachments: bool,
+    pinned: bool,
+    importance: String,
+    categories: String,
+    flag_due: Option<i64>,
+    size: i64,
 }
 
 impl ItemRow {
@@ -236,6 +322,11 @@ impl ItemRow {
             flagged: row.get(10)?,
             answered: row.get(11)?,
             has_attachments: row.get(12)?,
+            pinned: row.get(13)?,
+            importance: row.get(14)?,
+            categories: row.get(15)?,
+            flag_due: row.get(16)?,
+            size: row.get(17)?,
         })
     }
 
@@ -256,6 +347,12 @@ impl ItemRow {
             flagged: self.flagged,
             answered: self.answered,
             has_attachments: self.has_attachments,
+            pinned: self.pinned,
+            importance: Importance::parse(&self.importance)
+                .ok_or(StoreError::Corrupt("importance"))?,
+            categories: serde_json::from_str(&self.categories)?,
+            flag_due: self.flag_due,
+            size: to_u64(self.size, "message size")?,
             thread_count: 1,
             thread_ids: Vec::new(),
         })
@@ -279,15 +376,15 @@ impl DetailRow {
     fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             item: ItemRow::read(row)?,
-            uid: row.get(13)?,
-            message_id_header: row.get(14)?,
-            cc_json: row.get(15)?,
-            reply_to_json: row.get(16)?,
-            references_json: row.get(17)?,
-            in_reply_to: row.get(18)?,
-            size: row.get(19)?,
-            attachments_json: row.get(20)?,
-            has_raw: row.get(21)?,
+            uid: row.get(18)?,
+            message_id_header: row.get(19)?,
+            cc_json: row.get(20)?,
+            reply_to_json: row.get(21)?,
+            references_json: row.get(22)?,
+            in_reply_to: row.get(23)?,
+            size: row.get(24)?,
+            attachments_json: row.get(25)?,
+            has_raw: row.get(26)?,
         })
     }
 
@@ -345,7 +442,9 @@ fn update_headers(
              from_address = ?6, to_json = ?7, cc_json = ?8, reply_to_json = ?9,
              references_json = ?10, attachments_json = ?11, in_reply_to = ?12, date = ?13,
              preview = ?14, has_attachments = ?15, seen = ?16, flagged = ?17, answered = ?18,
-             size = ?19, bulk = ?20
+             size = ?19, bulk = ?20,
+             importance = CASE WHEN importance_local = 1 THEN importance ELSE ?21 END,
+             flag_due = CASE WHEN ?17 = 0 THEN NULL ELSE flag_due END
          WHERE id = ?1",
         params![
             id,
@@ -368,6 +467,7 @@ fn update_headers(
             flags.answered,
             size,
             s.bulk,
+            s.importance.as_str(),
         ],
     )?;
     link_thread(tx, id, s)
@@ -586,11 +686,10 @@ impl Store {
         let total: i64 = conn
             .prepare_cached(concat!("SELECT count(*)", list_where!()))?
             .query_row(selectors, |row| row.get(0))?;
-        let mut stmt = conn.prepare_cached(concat!(
-            "SELECT ",
-            item_columns!(),
-            list_where!(),
-            " ORDER BY m.date IS NULL, m.date DESC, m.seq DESC LIMIT ?6 OFFSET ?7"
+        let order = order_by(query, "m.pinned", search.is_some());
+        let mut stmt = conn.prepare_cached(&format!(
+            "{} ORDER BY {order} LIMIT ?6 OFFSET ?7",
+            concat!("SELECT ", item_columns!(), list_where!())
         ))?;
         let items = stmt
             .query_map(
@@ -654,23 +753,28 @@ impl Store {
                 ],
                 |row| row.get(0),
             )?;
-        let mut stmt = conn.prepare_cached(concat!(
-            "WITH hits AS (SELECT m.seq AS seq, m.id AS id, m.account_id AS account_id,
-                    coalesce(m.thread_key, m.id) AS tk, m.date AS date, m.seen AS seen",
-            list_where!(),
-            "), ranked AS (SELECT seq,
+        let order = order_by(query, "r.any_pinned", search.is_some());
+        let mut stmt = conn.prepare_cached(&format!(
+            "{} ORDER BY {order} LIMIT ?6 OFFSET ?7",
+            concat!(
+                "WITH hits AS (SELECT m.seq AS seq, m.id AS id, m.account_id AS account_id,
+                    coalesce(m.thread_key, m.id) AS tk, m.date AS date, m.seen AS seen,
+                    m.pinned AS pinned",
+                list_where!(),
+                "), ranked AS (SELECT seq,
                     row_number() OVER (PARTITION BY account_id, tk
                         ORDER BY date IS NULL, date DESC, seq DESC) AS rn,
                     count(*) OVER whole AS n,
                     max(seen = 0) OVER whole AS any_unread,
-                    group_concat(id, ',') OVER whole AS ids
+                    group_concat(id, ',') OVER whole AS ids,
+                    max(pinned) OVER whole AS any_pinned
                 FROM hits
                 WINDOW whole AS (PARTITION BY account_id, tk))
              SELECT ",
-            item_columns!(),
-            ", r.n, r.any_unread, r.ids FROM ranked r JOIN messages m ON m.seq = r.seq
-             WHERE r.rn = 1
-             ORDER BY m.date IS NULL, m.date DESC, m.seq DESC LIMIT ?6 OFFSET ?7"
+                item_columns!(),
+                ", r.n, r.any_unread, r.ids, r.any_pinned FROM ranked r JOIN messages m ON m.seq = r.seq
+             WHERE r.rn = 1"
+            )
         ))?;
         let rows = stmt.query_map(
             params![
@@ -686,18 +790,20 @@ impl Store {
             |row| {
                 Ok((
                     ItemRow::read(row)?,
-                    row.get::<_, i64>(13)?,
-                    row.get::<_, bool>(14)?,
-                    row.get::<_, String>(15)?,
+                    row.get::<_, i64>(18)?,
+                    row.get::<_, bool>(19)?,
+                    row.get::<_, String>(20)?,
+                    row.get::<_, bool>(21)?,
                 ))
             },
         )?;
         let mut items = Vec::new();
         for row in rows {
-            let (item, count, any_unread, ids) = row?;
+            let (item, count, any_unread, ids, any_pinned) = row?;
             let mut item = item.into_item()?;
             item.thread_count = u32::try_from(count).unwrap_or(1).max(1);
             item.unread = any_unread;
+            item.pinned = any_pinned;
             let mut ids: Vec<String> = ids.split(',').map(str::to_owned).collect();
             // The shown message first.
             ids.retain(|id| id != &item.id);
@@ -747,8 +853,8 @@ impl Store {
                 |row| {
                     Ok((
                         ItemRow::read(row)?,
-                        row.get::<_, i64>(13)?,
-                        row.get::<_, Option<String>>(14)?,
+                        row.get::<_, i64>(18)?,
+                        row.get::<_, Option<String>>(19)?,
                     ))
                 },
             )?
@@ -786,8 +892,9 @@ impl Store {
         Ok(items)
     }
 
-    /// Change flags on messages; `None` leaves a flag as it is. Returns how
-    /// many messages were found.
+    /// Change flags on messages; `None` leaves a flag as it is. Clearing
+    /// the flag also clears its follow-up date. Returns how many messages
+    /// were found.
     ///
     /// # Errors
     /// Fails on a database error.
@@ -804,7 +911,8 @@ impl Store {
         {
             let mut stmt = tx.prepare(
                 "UPDATE messages SET seen = coalesce(?2, seen), flagged = coalesce(?3, flagged),
-                     answered = coalesce(?4, answered)
+                     answered = coalesce(?4, answered),
+                     flag_due = CASE WHEN ?3 = 0 THEN NULL ELSE flag_due END
                  WHERE id = ?1",
             )?;
             for id in ids {
@@ -818,6 +926,74 @@ impl Store {
         }
         tx.commit()?;
         Ok(changed)
+    }
+
+    /// Change what is kept only on this device: pinned, importance (which
+    /// then no longer follows the headers) and the follow-up date
+    /// (`Some(None)` clears it). `None` leaves each as it is. Returns how
+    /// many messages were found.
+    ///
+    /// # Errors
+    /// Fails on a database error.
+    pub fn set_marks<S: AsRef<str>>(
+        &self,
+        ids: &[S],
+        pinned: Option<bool>,
+        importance: Option<Importance>,
+        flag_due: Option<Option<i64>>,
+    ) -> Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut changed = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE messages SET pinned = coalesce(?2, pinned),
+                     importance = coalesce(?3, importance),
+                     importance_local = CASE WHEN ?3 IS NULL THEN importance_local ELSE 1 END,
+                     flag_due = CASE WHEN ?4 THEN ?5 ELSE flag_due END
+                 WHERE id = ?1",
+            )?;
+            for id in ids {
+                changed = changed.saturating_add(stmt.execute(params![
+                    id.as_ref(),
+                    pinned,
+                    importance.map(Importance::as_str),
+                    flag_due.is_some(),
+                    flag_due.flatten()
+                ])?);
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Record the importance a message's headers give, unless it was set
+    /// here (for mail synced before importance was read).
+    ///
+    /// # Errors
+    /// Fails on a database error.
+    pub fn set_header_importance(&self, id: &str, importance: Importance) -> Result<()> {
+        self.conn().execute(
+            "UPDATE messages SET importance = ?2 WHERE id = ?1 AND importance_local = 0",
+            params![id, importance.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Flagged messages whose follow-up date is after `after` and no later
+    /// than `upto`: `(id, subject)`, earliest first.
+    ///
+    /// # Errors
+    /// Fails on a database error.
+    pub fn flag_due_between(&self, after: i64, upto: i64) -> Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, subject FROM messages
+             WHERE flag_due > ?1 AND flag_due <= ?2 AND flagged = 1
+             ORDER BY flag_due, seq",
+        )?;
+        let rows = stmt.query_map(params![after, upto], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Move messages to another folder of the same account locally. Their
@@ -1735,6 +1911,238 @@ mod tests {
         .unwrap();
         assert_eq!(query.role, Some(FolderRole::Inbox));
         assert_eq!(query.filter, ListFilter::Unread);
+        assert_eq!(query.sort, None);
+        assert_eq!(json["pinned"], false);
+        assert_eq!(json["importance"], "normal");
+        assert_eq!(json["categories"], serde_json::json!([]));
+        assert!(json["flagDue"].is_null());
+        assert_eq!(json["size"], 100);
+        let query: ListQuery = serde_json::from_value(serde_json::json!({
+            "accountId": null, "folderId": null, "role": null, "filter": "toMe",
+            "search": null, "offset": 0, "limit": 50, "sort": "size", "descending": false
+        }))
+        .unwrap();
+        assert_eq!(query.filter, ListFilter::ToMe);
+        assert_eq!(query.sort, Some(ListSort::Size));
+        assert_eq!(query.descending, Some(false));
+        for (name, filter) in [
+            ("attachments", ListFilter::Attachments),
+            ("pinned", ListFilter::Pinned),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<ListFilter>(serde_json::json!(name)).unwrap(),
+                filter
+            );
+        }
+    }
+
+    #[test]
+    fn attachments_to_me_and_pinned_filters() {
+        let f = fixture();
+        let mut to_me = summary("to me", 3);
+        to_me.cc.push(Mailbox {
+            name: None,
+            address: "A@Example.com".into(),
+        });
+        add_message(&f.store, &f.inbox, 1, &to_me);
+        add_message(
+            &f.store,
+            &f.inbox,
+            2,
+            &with_attachment(summary("attached", 2)),
+        );
+        let pinned = add_message(&f.store, &f.inbox, 3, &summary("pinned", 1));
+        f.store
+            .set_marks(&[&pinned], Some(true), None, None)
+            .unwrap();
+        let only = |filter| {
+            let page = f
+                .store
+                .list_messages(&ListQuery { filter, ..query() })
+                .unwrap();
+            page.items
+                .iter()
+                .map(|i| i.subject.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(only(ListFilter::ToMe), ["to me"]);
+        assert_eq!(only(ListFilter::Attachments), ["attached"]);
+        assert_eq!(only(ListFilter::Pinned), ["pinned"]);
+        assert_eq!(only(ListFilter::All), ["pinned", "to me", "attached"]);
+    }
+
+    #[test]
+    fn sorts_by_sender_subject_and_size_with_pinned_first() {
+        let f = fixture();
+        let mut zed = summary("apples", 10);
+        zed.from = Some(Mailbox {
+            name: Some("Zed".into()),
+            address: "zed@x.co".into(),
+        });
+        let mut amy = summary("Bananas", 20);
+        amy.from = Some(Mailbox {
+            name: None,
+            address: "amy@x.co".into(),
+        });
+        let mut mo = summary("cherries", 30);
+        mo.from = Some(Mailbox {
+            name: Some("mo".into()),
+            address: "b@x.co".into(),
+        });
+        let zed = f
+            .store
+            .upsert_message(&f.inbox, 1, &zed, MessageFlags::default(), 500)
+            .unwrap();
+        f.store
+            .upsert_message(&f.inbox, 2, &amy, MessageFlags::default(), 900)
+            .unwrap();
+        f.store
+            .upsert_message(&f.inbox, 3, &mo, MessageFlags::default(), 100)
+            .unwrap();
+        let sorted = |sort, descending| {
+            let page = f
+                .store
+                .list_messages(&ListQuery {
+                    sort: Some(sort),
+                    descending,
+                    ..query()
+                })
+                .unwrap();
+            page.items
+                .iter()
+                .map(|i| i.subject.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            sorted(ListSort::Date, None),
+            ["cherries", "Bananas", "apples"]
+        );
+        assert_eq!(
+            sorted(ListSort::Date, Some(false)),
+            ["apples", "Bananas", "cherries"]
+        );
+        assert_eq!(
+            sorted(ListSort::From, Some(false)),
+            ["Bananas", "cherries", "apples"]
+        );
+        assert_eq!(
+            sorted(ListSort::Subject, Some(true)),
+            ["cherries", "Bananas", "apples"]
+        );
+        assert_eq!(
+            sorted(ListSort::Size, None),
+            ["Bananas", "apples", "cherries"]
+        );
+        // Pinned first, whatever the order, except in search results.
+        f.store.set_marks(&[&zed], Some(true), None, None).unwrap();
+        assert_eq!(
+            sorted(ListSort::Size, None),
+            ["apples", "Bananas", "cherries"]
+        );
+        assert_eq!(
+            sorted(ListSort::Date, None),
+            ["apples", "cherries", "Bananas"]
+        );
+        let threads = f.store.list_threads(&query()).unwrap();
+        assert_eq!(subjects(&threads), ["apples", "cherries", "Bananas"]);
+        assert!(threads.items[0].pinned);
+        let found = f
+            .store
+            .list_messages(&ListQuery {
+                search: Some("preview".into()),
+                ..query()
+            })
+            .unwrap();
+        assert_eq!(subjects(&found), ["cherries", "Bananas", "apples"]);
+        // The app's own lookups can leave pins out.
+        let plain = f
+            .store
+            .list_messages(&ListQuery {
+                ignore_pinned: true,
+                ..query()
+            })
+            .unwrap();
+        assert_eq!(subjects(&plain), ["cherries", "Bananas", "apples"]);
+    }
+
+    #[test]
+    fn marks_are_local_and_importance_follows_headers_until_set() {
+        let f = fixture();
+        let mut urgent = summary("urgent", 1);
+        urgent.importance = Importance::High;
+        let id = add_message(&f.store, &f.inbox, 1, &urgent);
+        let item = f.store.get_message(&id).unwrap().item;
+        assert_eq!(item.importance, Importance::High);
+        assert!(!item.pinned);
+
+        // Synced again: still from the headers.
+        let mut calm = urgent.clone();
+        calm.importance = Importance::Normal;
+        add_message(&f.store, &f.inbox, 1, &calm);
+        assert_eq!(
+            f.store.get_message(&id).unwrap().item.importance,
+            Importance::Normal
+        );
+        // Set here: the headers no longer change it.
+        f.store
+            .set_marks(&[&id], Some(true), Some(Importance::Low), Some(Some(5000)))
+            .unwrap();
+        let flagged = MessageFlags {
+            flagged: true,
+            ..MessageFlags::default()
+        };
+        f.store
+            .upsert_message(&f.inbox, 1, &urgent, flagged, 100)
+            .unwrap();
+        f.store
+            .set_header_importance(&id, Importance::High)
+            .unwrap();
+        let item = f.store.get_message(&id).unwrap().item;
+        assert_eq!(item.importance, Importance::Low);
+        assert!(item.pinned);
+        assert_eq!(item.flag_due, Some(5000));
+        // Leaving each out changes nothing; Some(None) clears the date.
+        f.store.set_marks(&[&id], None, None, None).unwrap();
+        assert_eq!(f.store.get_message(&id).unwrap().item.flag_due, Some(5000));
+        f.store.set_marks(&[&id], None, None, Some(None)).unwrap();
+        assert_eq!(f.store.get_message(&id).unwrap().item.flag_due, None);
+    }
+
+    #[test]
+    fn follow_up_dates_end_with_the_flag() {
+        let f = fixture();
+        let id = add_message(&f.store, &f.inbox, 1, &summary("follow up", 1));
+        let other = add_message(&f.store, &f.inbox, 2, &summary("other", 2));
+        f.store
+            .set_flags(&[&id, &other], None, Some(true), None)
+            .unwrap();
+        f.store
+            .set_marks(&[&id, &other], None, None, Some(Some(1000)))
+            .unwrap();
+        assert_eq!(
+            f.store.flag_due_between(999, 1000).unwrap(),
+            [
+                (id.clone(), "follow up".to_owned()),
+                (other.clone(), "other".to_owned())
+            ]
+        );
+        assert!(f.store.flag_due_between(1000, 2000).unwrap().is_empty());
+        // Unflagged here, or on another device.
+        f.store.set_flags(&[&id], None, Some(false), None).unwrap();
+        assert_eq!(f.store.get_message(&id).unwrap().item.flag_due, None);
+        f.store
+            .set_flags_by_uid(
+                &f.inbox,
+                2,
+                MessageFlags {
+                    seen: false,
+                    flagged: false,
+                    answered: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(f.store.get_message(&other).unwrap().item.flag_due, None);
+        assert!(f.store.flag_due_between(0, 2000).unwrap().is_empty());
     }
 
     #[test]

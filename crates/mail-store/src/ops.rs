@@ -18,6 +18,8 @@ pub enum OpKind {
     Move,
     /// Delete for good.
     Delete,
+    /// Copy to another folder.
+    Copy,
 }
 
 impl OpKind {
@@ -26,6 +28,7 @@ impl OpKind {
             Self::SetFlags => "set_flags",
             Self::Move => "move",
             Self::Delete => "delete",
+            Self::Copy => "copy",
         }
     }
 
@@ -34,6 +37,7 @@ impl OpKind {
             "set_flags" => Ok(Self::SetFlags),
             "move" => Ok(Self::Move),
             "delete" => Ok(Self::Delete),
+            "copy" => Ok(Self::Copy),
             _ => Err(StoreError::Corrupt("pending op kind")),
         }
     }
@@ -213,7 +217,7 @@ mod tests {
 
     #[test]
     fn kind_names_round_trip() {
-        for kind in [OpKind::SetFlags, OpKind::Move, OpKind::Delete] {
+        for kind in [OpKind::SetFlags, OpKind::Move, OpKind::Delete, OpKind::Copy] {
             assert_eq!(OpKind::parse(kind.as_str()).unwrap(), kind);
         }
         assert!(OpKind::parse("other").is_err());

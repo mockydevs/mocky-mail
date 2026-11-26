@@ -277,6 +277,28 @@ const PATHS = {
       <path d="M8.5 20h7M12 16.5V20" />
     </>
   ),
+  star: <path d="m12 2.5 2.94 5.96 6.56.95-4.75 4.63 1.12 6.54L12 17.5l-5.87 3.08 1.12-6.54L2.5 9.41l6.56-.95z" />,
+  copy: (
+    <>
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </>
+  ),
+  sort: <path d="M3 6h13M3 12h9M3 18h5M18 8v12M15 17l3 3 3-3" />,
+  layout: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M10 4v16" />
+    </>
+  ),
+  arrowDown: <path d="M12 5v14M6 13l6 6 6-6" />,
+  move: (
+    <>
+      <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+      <path d="M10 13h6M13.5 10.5 16 13l-2.5 2.5" />
+    </>
+  ),
+  undo: <path d="M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3" />,
 } satisfies Record<string, ReactElement>;
 
 export type IconName = keyof typeof PATHS;

@@ -3,6 +3,7 @@ import { useId, useState, type SyntheticEvent } from 'react';
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
 import type { Account, AppError, Folder } from '../../api/types';
+import { Icon } from '../../ui/Icon';
 import { ConfirmDialog, Modal } from '../../ui/Modal';
 
 interface Props {
@@ -165,6 +166,22 @@ export function ManageFolders({ account, folders, onClose }: Props) {
                     {label}
                     <span className="muted small"> · {folder.total} emails</span>
                   </span>
+                  <button
+                    type="button"
+                    className={`icon-btn folder-manage__star${folder.favorite ? ' folder-manage__star--on' : ''}`}
+                    aria-label={folder.favorite ? `Remove ${label} from Favourites` : `Add ${label} to Favourites`}
+                    title={folder.favorite ? 'In Favourites' : 'Add to Favourites'}
+                    aria-pressed={folder.favorite}
+                    disabled={busy}
+                    onClick={() => {
+                      run(
+                        () => api.setFolderFavorite(folder.id, !folder.favorite),
+                        folder.favorite ? `${label} removed from Favourites.` : `${label} added to Favourites.`,
+                      );
+                    }}
+                  >
+                    <Icon name="star" filled={folder.favorite} />
+                  </button>
                   <button
                     type="button"
                     className="btn btn--link"

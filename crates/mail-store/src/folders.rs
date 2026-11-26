@@ -78,6 +78,8 @@ pub struct Folder {
     pub unread: u32,
     /// All messages stored locally.
     pub total: u32,
+    /// Listed under Favourites (kept on this device only).
+    pub favorite: bool,
 }
 
 struct FolderRow {
@@ -103,6 +105,7 @@ impl FolderRow {
                 highest_uid: None,
                 unread: 0,
                 total: 0,
+                favorite: row.get(10)?,
             },
             role: row.get(4)?,
             uidvalidity: row.get(6)?,
@@ -134,7 +137,8 @@ macro_rules! folder_select {
         "SELECT f.id, f.account_id, f.path, f.name, f.role, f.delimiter, f.uidvalidity,
                 f.highest_uid,
                 (SELECT count(*) FROM messages m WHERE m.folder_id = f.id AND m.seen = 0),
-                (SELECT count(*) FROM messages m WHERE m.folder_id = f.id)
+                (SELECT count(*) FROM messages m WHERE m.folder_id = f.id),
+                f.favorite
          FROM folders f "
     };
 }
@@ -272,6 +276,21 @@ impl Store {
         }
         tx.commit()?;
         Ok(reset)
+    }
+
+    /// List a folder under Favourites, or take it off.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] if there is no such folder.
+    pub fn set_folder_favorite(&self, folder_id: &str, favorite: bool) -> Result<()> {
+        let changed = self.conn().execute(
+            "UPDATE folders SET favorite = ?2 WHERE id = ?1",
+            params![folder_id, favorite],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound("folder"));
+        }
+        Ok(())
     }
 
     /// Record the highest UID synced in a folder.
@@ -491,6 +510,29 @@ mod tests {
 
         assert!(matches!(
             store.set_uidvalidity("nope", 1),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn favourites_survive_a_folder_list_refresh() {
+        let store = Store::open_in_memory().unwrap();
+        let account = add_account(&store, "a@example.com");
+        let clients = add_folder(&store, &account, "Clients", FolderRole::Other);
+        assert!(!store.get_folder(&clients).unwrap().favorite);
+        store.set_folder_favorite(&clients, true).unwrap();
+        // The server lists it again (every full sync).
+        assert_eq!(
+            add_folder(&store, &account, "Clients", FolderRole::Other),
+            clients
+        );
+        let folder = store.get_folder(&clients).unwrap();
+        assert!(folder.favorite);
+        assert_eq!(serde_json::to_value(&folder).unwrap()["favorite"], true);
+        store.set_folder_favorite(&clients, false).unwrap();
+        assert!(!store.list_folders(&account).unwrap()[0].favorite);
+        assert!(matches!(
+            store.set_folder_favorite("nope", true),
             Err(StoreError::NotFound(_))
         ));
     }

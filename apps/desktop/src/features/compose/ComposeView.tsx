@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type SyntheticE
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, Draft, DraftAttachment, OutboxEntry, SignatureImage, SignatureSet } from '../../api/types';
+import type { Account, AppError, Draft, DraftAttachment, Importance, OutboxEntry, SignatureImage, SignatureSet } from '../../api/types';
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
 import { Modal } from '../../ui/Modal';
@@ -11,6 +11,12 @@ import { parseRecipients } from './recipients';
 import { link, prefixLines, wrap, type Edit } from './formatting';
 import { signatureBlock, signatureFor, swapSignature, type ComposeKind } from './seed';
 import { SandboxedHtml } from '../reader/SandboxedHtml';
+
+const IMPORTANCE: readonly [Importance, string, string][] = [
+  ['high', 'High', 'High importance'],
+  ['normal', 'Normal', 'Normal importance'],
+  ['low', 'Low', 'Low importance'],
+];
 
 interface Props {
   initial: Draft;
@@ -437,6 +443,24 @@ export function ComposeView({
           <Icon name="paperclip" />
           Attach files
         </button>
+        <div className="compose__importance" role="group" aria-label="Importance">
+          {IMPORTANCE.map(([value, text, title]) => (
+            <button
+              key={value}
+              type="button"
+              className={`compose__importance-btn compose__importance-btn--${value}`}
+              aria-pressed={(draft.importance ?? 'normal') === value}
+              title={title}
+              onClick={() => {
+                if ((draft.importance ?? 'normal') !== value) update({ importance: value });
+              }}
+            >
+              {value === 'high' && <span aria-hidden="true">! </span>}
+              {value === 'low' && <Icon name="arrowDown" size={14} />}
+              {text}
+            </button>
+          ))}
+        </div>
         {signatures && signatures.items.length > 0 && (
           <label className="compose__signature-pick">
             <span>Signature</span>

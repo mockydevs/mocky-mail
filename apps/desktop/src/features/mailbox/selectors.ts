@@ -1,4 +1,4 @@
-import type { Account, Folder, FolderRole, MessageListItem, ReadFilter } from '../../api/types';
+import type { Account, Folder, FolderRole, Importance, MessageListItem, ReadFilter } from '../../api/types';
 import type { PageQuery } from './useMessagePage';
 
 /** What the message list shows. */
@@ -129,10 +129,18 @@ export function neighbourAfterRemoval(items: readonly MessageListItem[], removed
   return items[index + 1]?.id ?? items[index - 1]?.id ?? null;
 }
 
-export interface Override {
+/** What an optimistic change can set on a row until the backend's answer arrives. */
+export interface OverridePatch {
   unread?: boolean;
   flagged?: boolean;
   removed?: boolean;
+  pinned?: boolean;
+  importance?: Importance;
+  categories?: string[];
+  flagDue?: number | null;
+}
+
+export interface Override extends OverridePatch {
   /** Page version when the change was made. */
   version: number;
   /** The backend confirmed it; drop once newer data arrives. */
@@ -152,7 +160,7 @@ function inForce(o: Override, version: number): boolean {
  */
 export function nextOverride(
   previous: Override | undefined,
-  patch: Pick<Override, 'unread' | 'flagged' | 'removed'>,
+  patch: OverridePatch,
   version: number,
 ): Override {
   const pending = previous && inForce(previous, version) ? previous : {};
@@ -180,6 +188,10 @@ export function applyOverrides(
       ...item,
       ...(o.unread !== undefined ? { unread: o.unread } : {}),
       ...(o.flagged !== undefined ? { flagged: o.flagged } : {}),
+      ...(o.pinned !== undefined ? { pinned: o.pinned } : {}),
+      ...(o.importance !== undefined ? { importance: o.importance } : {}),
+      ...(o.categories !== undefined ? { categories: o.categories } : {}),
+      ...(o.flagDue !== undefined ? { flagDue: o.flagDue } : {}),
     });
   }
   return out;

@@ -2,7 +2,7 @@
 //! messages whose body has not been downloaded, and caching a body together
 //! with its list preview.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::messages::MessageFlags;
 use crate::{Result, Store, StoreError};
@@ -29,7 +29,8 @@ impl Store {
     /// Database errors.
     pub fn set_flags_by_uid(&self, folder_id: &str, uid: u32, flags: MessageFlags) -> Result<bool> {
         let changed = self.conn().execute(
-            "UPDATE messages SET seen = ?3, flagged = ?4, answered = ?5
+            "UPDATE messages SET seen = ?3, flagged = ?4, answered = ?5,
+                 flag_due = CASE WHEN ?4 = 0 THEN NULL ELSE flag_due END
              WHERE folder_id = ?1 AND uid = ?2
                AND (seen != ?3 OR flagged != ?4 OR answered != ?5)",
             params![folder_id, uid, flags.seen, flags.flagged, flags.answered],
@@ -59,6 +60,78 @@ impl Store {
             Ok((row.get(0)?, row.get(1)?))
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Like [`Store::messages_missing_raw`], but only among `uids` (the
+    /// messages inside the account's sync window).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn messages_missing_raw_among(
+        &self,
+        folder_id: &str,
+        uids: &[u32],
+        limit: u32,
+        max_size: u64,
+    ) -> Result<Vec<(String, u32)>> {
+        let wanted: std::collections::HashSet<u32> = uids.iter().copied().collect();
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, uid FROM messages
+             WHERE folder_id = ?1 AND raw IS NULL AND uid IS NOT NULL AND size <= ?2
+             ORDER BY date IS NULL, date DESC",
+        )?;
+        let max_size = i64::try_from(max_size).unwrap_or(i64::MAX);
+        let mut out = Vec::new();
+        for row in stmt.query_map(params![folder_id, max_size], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })? {
+            let (id, uid) = row?;
+            if wanted.contains(&uid) {
+                out.push((id, uid));
+                if out.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replace a message's categories, by UID, with the ones the server
+    /// has (Gmail labels, or category keywords). Those it already had keep
+    /// their place. Returns whether anything changed.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn set_categories_by_uid(
+        &self,
+        folder_id: &str,
+        uid: u32,
+        names: &[String],
+    ) -> Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let current: Option<(String, String)> = tx
+            .query_row(
+                "SELECT id, categories FROM messages WHERE folder_id = ?1 AND uid = ?2",
+                params![folder_id, uid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((id, json)) = current else {
+            return Ok(false);
+        };
+        let have: Vec<String> = serde_json::from_str(&json)?;
+        let now = mail_core::categories::merged(&have, names);
+        if now == have {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE messages SET categories = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&now)?],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Cache the full message, its searchable text and a list preview
@@ -178,6 +251,42 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].preview, "hello world");
         assert!(store.set_body("nope", b"x", None, "").is_err());
+    }
+
+    #[test]
+    fn bodies_in_the_sync_window_are_listed_newest_first() {
+        let store = Store::open_in_memory().unwrap();
+        let account = add_account(&store, "a@x.co");
+        let inbox = add_folder(&store, &account, "INBOX", FolderRole::Inbox);
+        let old = add_message(&store, &inbox, 1, &summary("old", 10));
+        let mid = add_message(&store, &inbox, 2, &summary("mid", 20));
+        let new = add_message(&store, &inbox, 3, &summary("new", 30));
+        assert_eq!(
+            store
+                .messages_missing_raw_among(&inbox, &[2, 3], 10, u64::MAX)
+                .unwrap(),
+            vec![(new.clone(), 3), (mid.clone(), 2)]
+        );
+        assert_eq!(
+            store
+                .messages_missing_raw_among(&inbox, &[1, 2, 3], 1, u64::MAX)
+                .unwrap(),
+            vec![(new.clone(), 3)]
+        );
+        store.set_body(&new, b"raw", None, "").unwrap();
+        assert_eq!(
+            store
+                .messages_missing_raw_among(&inbox, &[1, 3], 10, u64::MAX)
+                .unwrap(),
+            vec![(old, 1)]
+        );
+        // Too big for the background.
+        assert!(
+            store
+                .messages_missing_raw_among(&inbox, &[2], 10, 50)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@
 
 mod accounts;
 mod calendar;
+mod categories;
 mod contacts;
 mod error;
 mod folders;
@@ -33,12 +34,13 @@ use rusqlite::Connection;
 
 pub use accounts::{Account, AuthKind, NewAccount, Security, ServerConfig};
 pub use calendar::{Calendar, FoundCalendar, StoredEvent, new_event_uid};
+pub use categories::Category;
 pub use contacts::{Contact, ContactState, ContactSync, MAX_CONTACTS};
 pub use error::{Result, StoreError};
 pub use folders::{Folder, NewFolder};
 pub use messages::{
-    ListFilter, ListQuery, MAX_PAGE_SIZE, MAX_SUGGESTIONS, MAX_THREAD_MESSAGES, MessageFlags,
-    MessageListItem, MessagePage, StoredMessage,
+    ListFilter, ListQuery, ListSort, MAX_PAGE_SIZE, MAX_SUGGESTIONS, MAX_THREAD_MESSAGES,
+    MessageFlags, MessageListItem, MessagePage, StoredMessage,
 };
 pub use ops::{OpKind, PendingOp};
 pub use outbox::{NewOutbox, OutboxEntry, OutboxMessage};

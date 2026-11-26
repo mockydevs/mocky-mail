@@ -2,7 +2,8 @@ import { useId, useRef, useState, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
-import type { Account, AppError, Settings, ThemeSetting, MarkReadSetting } from '../../api/types';
+import type { Account, AppError, Category, Settings, ThemeSetting, MarkReadSetting } from '../../api/types';
+import { CategoryManager } from '../categories/CategoryManager';
 import { ConfirmDialog } from '../../ui/Modal';
 import { Icon } from '../../ui/Icon';
 import { PasswordField } from '../../ui/PasswordField';
@@ -25,6 +26,22 @@ const READ_DELAY = [1, 3, 5, 10] as const;
 /** Same choices as the backend accepts (UNDO_SEND_CHOICES in settings.rs). */
 const UNDO_SEND = [0, 5, 10, 20, 30] as const;
 
+const READING_PANE: readonly [Settings['readingPane'], string][] = [
+  ['right', 'Right of the list'],
+  ['bottom', 'Below the list'],
+  ['off', 'Off: open messages over the list'],
+];
+
+/** How much mail is kept in full on this device; null keeps everything. */
+export const SYNC_WINDOW: readonly [number | null, string][] = [
+  [1, '1 month'],
+  [3, '3 months'],
+  [6, '6 months'],
+  [12, '12 months'],
+  [24, '24 months'],
+  [null, 'All mail'],
+];
+
 interface Props {
   settings: Settings;
   accounts: readonly Account[];
@@ -32,10 +49,41 @@ interface Props {
   onAccountsChanged: () => void;
   onAddAccount: () => void;
   onClose: () => void;
+  /** Colour categories, managed here. */
+  categories?: readonly Category[];
+  onCategoriesChanged?: (categories: Category[]) => void;
+  /** Phones: no reading pane choice (a message always fills the screen). */
+  phone?: boolean;
 }
 
-export function SettingsView({ settings, accounts, onChange, onAccountsChanged, onAddAccount, onClose }: Props) {
+export function SettingsView({
+  settings,
+  accounts,
+  onChange,
+  onAccountsChanged,
+  onAddAccount,
+  onClose,
+  categories,
+  onCategoriesChanged,
+  phone = false,
+}: Props) {
   const id = useId();
+  const api = useMailApi();
+  const [orderError, setOrderError] = useState<AppError | null>(null);
+
+  /** Move an account one place up (-1) or down (1) in the sidebar. */
+  const move = (accountId: string, by: -1 | 1) => {
+    const ids = accounts.map((a) => a.id);
+    const from = ids.indexOf(accountId);
+    const to = from + by;
+    if (from < 0 || to < 0 || to >= ids.length) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, accountId);
+    setOrderError(null);
+    api.reorderAccounts(ids).then(onAccountsChanged, (e: unknown) => {
+      setOrderError(toAppError(e));
+    });
+  };
 
   return (
     <section className="settings" aria-labelledby={`${id}-title`}>
@@ -65,6 +113,24 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
                 {theme === 'system' ? 'Match my system' : theme === 'light' ? 'Light' : 'Dark'}
               </label>
             ))}
+            {!phone && (
+              <fieldset className="settings__sub">
+                <legend className="form-field__label">Reading pane</legend>
+                {READING_PANE.map(([value, label]) => (
+                  <label key={value} className="choice">
+                    <input
+                      type="radio"
+                      name={`${id}-pane`}
+                      checked={settings.readingPane === value}
+                      onChange={() => {
+                        onChange({ ...settings, readingPane: value });
+                      }}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </fieldset>
+            )}
           </fieldset>
 
           <fieldset className="settings__group">
@@ -176,6 +242,21 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
               Most servers tell Mocky Mail about new mail straight away; this is for those that can't. Other folders are
               checked at least every 10 minutes.
             </p>
+            <label className="choice">
+              <input
+                type="checkbox"
+                checked={settings.workOffline}
+                onChange={(e) => {
+                  onChange({ ...settings, workOffline: e.target.checked });
+                }}
+              />
+              Work offline: don't check for mail or send anything until I switch this off
+            </label>
+            {settings.workOffline && (
+              <p className="form-hint" role="status">
+                Working offline. Messages you send wait in the Outbox.
+              </p>
+            )}
           </fieldset>
 
           <fieldset className="settings__group">
@@ -301,15 +382,37 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
 
           {accounts.length > 0 && <OutOfOffice accounts={accounts} />}
 
+          {onCategoriesChanged && <CategoryManager categories={categories ?? []} onChange={onCategoriesChanged} />}
+
           <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`}>
             <h2 id={`${id}-accounts`} className="settings__legend">
               Accounts
             </h2>
             <ul className="account-list">
-              {accounts.map((account) => (
-                <AccountRow key={account.id} account={account} onChanged={onAccountsChanged} />
+              {accounts.map((account, index) => (
+                <AccountRow
+                  key={account.id}
+                  account={account}
+                  onChanged={onAccountsChanged}
+                  {...(accounts.length > 1
+                    ? {
+                        order: {
+                          first: index === 0,
+                          last: index === accounts.length - 1,
+                          onMove: (by: -1 | 1) => {
+                            move(account.id, by);
+                          },
+                        },
+                      }
+                    : {})}
+                />
               ))}
             </ul>
+            {orderError && (
+              <p className="form-error" role="alert">
+                {orderError.message}
+              </p>
+            )}
             <button type="button" className="btn btn--secondary" onClick={onAddAccount}>
               <Icon name="plus" />
               Add account
@@ -321,7 +424,13 @@ export function SettingsView({ settings, accounts, onChange, onAccountsChanged, 
   );
 }
 
-function AccountRow({ account, onChanged }: { account: Account; onChanged: () => void }) {
+interface AccountOrder {
+  first: boolean;
+  last: boolean;
+  onMove: (by: -1 | 1) => void;
+}
+
+function AccountRow({ account, onChanged, order }: { account: Account; onChanged: () => void; order?: AccountOrder }) {
   const api = useMailApi();
   const id = useId();
   const passwordRef = useRef<HTMLInputElement>(null);
@@ -392,6 +501,36 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
             {authLabel}, {account.imap.host}
           </p>
         </div>
+        {order && (
+          <span className="account-row__order">
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={`Move ${account.email} up`}
+              title="Move up"
+              disabled={order.first}
+              onClick={() => {
+                order.onMove(-1);
+              }}
+            >
+              <span className="flip" aria-hidden="true">
+                <Icon name="chevron" />
+              </span>
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={`Move ${account.email} down`}
+              title="Move down"
+              disabled={order.last}
+              onClick={() => {
+                order.onMove(1);
+              }}
+            >
+              <Icon name="chevron" />
+            </button>
+          </span>
+        )}
         <button
           type="button"
           className="btn btn--danger-link"
@@ -420,6 +559,29 @@ function AccountRow({ account, onChanged }: { account: Account; onChanged: () =>
           Save name
         </button>
       </form>
+
+      <label className="form-field account-row__sync">
+        <span className="form-field__label">Keep mail on this device</span>
+        <select
+          className="field"
+          value={account.syncMonths === null ? 'all' : String(account.syncMonths)}
+          disabled={busy}
+          onChange={(e) => {
+            const months = e.target.value === 'all' ? null : Number(e.target.value);
+            run(
+              api.updateAccount(account.id, { syncMonths: months }),
+              months === null ? 'All mail is kept on this device.' : `Mail from the last ${SYNC_WINDOW.find(([m]) => m === months)?.[1] ?? ''} is kept on this device.`,
+            );
+          }}
+        >
+          {SYNC_WINDOW.map(([months, label]) => (
+            <option key={label} value={months === null ? 'all' : String(months)}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="form-hint">Older mail keeps its sender, subject and preview, and opens from the server when you need it.</p>
 
       <SignatureEditor accountId={account.id} />
 

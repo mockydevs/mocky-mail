@@ -9,6 +9,10 @@ export type ShortcutAction =
   | 'delete'
   | 'flag'
   | 'toggleRead'
+  | 'move'
+  | 'selectAll'
+  | 'undo'
+  | 'redo'
   | 'compose'
   | 'search'
   | 'help'
@@ -32,6 +36,10 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: '#', action: 'delete', label: 'Delete' },
   { keys: 's', action: 'flag', label: 'Flag or unflag' },
   { keys: 'u', action: 'toggleRead', label: 'Mark read or unread' },
+  { keys: 'v', action: 'move', label: 'Move to a folder' },
+  { keys: 'Ctrl+A', action: 'selectAll', label: 'Select every message shown' },
+  { keys: 'Ctrl+Z', action: 'undo', label: 'Undo' },
+  { keys: 'Ctrl+Y', action: 'redo', label: 'Redo (also Ctrl+Shift+Z)' },
   { keys: 'c', action: 'compose', label: 'New message' },
   { keys: '/', action: 'search', label: 'Search' },
   { keys: '?', action: 'help', label: 'Show shortcuts' },
@@ -49,6 +57,7 @@ const BY_KEY: ReadonlyMap<string, ShortcutAction> = new Map([
   ['#', 'delete'],
   ['s', 'flag'],
   ['u', 'toggleRead'],
+  ['v', 'move'],
   ['c', 'compose'],
   ['/', 'search'],
   ['?', 'help'],
@@ -60,6 +69,7 @@ export interface KeyInput {
   ctrlKey: boolean;
   metaKey: boolean;
   altKey: boolean;
+  shiftKey?: boolean;
   /** The element that has focus when the key is pressed. */
   target: EventTarget | null;
 }
@@ -74,6 +84,19 @@ function isTyping(target: EventTarget | null): boolean {
   return !['button', 'checkbox', 'radio', 'submit', 'reset'].includes(type);
 }
 
+/**
+ * Ctrl (Cmd on a Mac) shortcuts: select all, undo and redo. Like the rest,
+ * never while typing, where these keys belong to the field.
+ */
+function withModifier(input: KeyInput): ShortcutAction | null {
+  if (isTyping(input.target)) return null;
+  const key = input.key.toLowerCase();
+  if (key === 'a' && !input.shiftKey) return 'selectAll';
+  if (key === 'z') return input.shiftKey ? 'redo' : 'undo';
+  if (key === 'y' && !input.shiftKey) return 'redo';
+  return null;
+}
+
 function isActivatable(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && ['BUTTON', 'A', 'SUMMARY'].includes(target.tagName);
 }
@@ -85,6 +108,7 @@ function isActivatable(target: EventTarget | null): boolean {
  * field it must not close the screen and throw away what was typed there.
  */
 export function shortcutFor(input: KeyInput): ShortcutAction | null {
+  if ((input.ctrlKey || input.metaKey) && !input.altKey) return withModifier(input);
   if (input.ctrlKey || input.metaKey || input.altKey) return null;
   const action = BY_KEY.get(input.key) ?? null;
   if (action === null) return null;
