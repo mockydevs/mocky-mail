@@ -41,6 +41,10 @@ export interface Account {
   imap: ServerConfig;
   smtp: ServerConfig;
   sizeLimitBytes: number | null;
+  /** Place in the sidebar; accounts are listed by it, lowest first. */
+  sortOrder: number;
+  /** Months of mail kept in full on this device; older mail keeps its headers and preview. null: all. */
+  syncMonths: number | null;
 }
 
 export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'archive' | 'junk' | 'trash' | 'all' | 'flagged' | 'other';
@@ -55,6 +59,8 @@ export interface Folder {
   total: number;
   /** Hierarchy separator: nest folders by splitting `path` on it. */
   delimiter: string | null;
+  /** Listed under Favourites at the top of the sidebar. */
+  favorite: boolean;
 }
 
 export interface Mailbox {
@@ -76,6 +82,16 @@ export interface MessageListItem {
   flagged: boolean;
   answered: boolean;
   hasAttachments: boolean;
+  /** Kept at the top of its folder. */
+  pinned: boolean;
+  /** From the Importance / X-Priority headers, or set here. */
+  importance: Importance;
+  /** Category names (see `Category`), in the order they were added. */
+  categories: string[];
+  /** Flagged with a due date: Unix seconds; a reminder comes then. */
+  flagDue: number | null;
+  /** Size of the whole message in bytes. */
+  size: number;
   /** Messages in this conversation shown by the list (1, or missing, when not grouped). */
   threadCount?: number;
   /** Their ids, newest first, when grouped. Actions on the row apply to all of them. */
@@ -161,7 +177,19 @@ export interface InvitationView {
   hasCalendar: boolean;
 }
 
-export type ReadFilter = 'all' | 'unread' | 'flagged';
+export type ReadFilter = 'all' | 'unread' | 'flagged' | 'attachments' | 'toMe' | 'pinned';
+
+/** How the list is ordered. Pinned messages come first in folder views either way. */
+export type ListSort = 'date' | 'from' | 'subject' | 'size';
+
+export type Importance = 'low' | 'normal' | 'high';
+
+/** A colour category. Names are unique (case-insensitive) across all accounts. */
+export interface Category {
+  name: string;
+  /** Hex colour, `#rrggbb`. */
+  color: string;
+}
 
 export interface ListQuery {
   /** null = all accounts (unified). */
@@ -175,6 +203,10 @@ export interface ListQuery {
   limit: number;
   /** Focused Inbox: only this half of inbox folders (other folders ignore it). */
   focus?: Focus | null;
+  /** Default `date`. */
+  sort?: ListSort;
+  /** Default true: newest, Z–A, largest first. */
+  descending?: boolean;
 }
 
 /** What a mailto: link asks to fill in a new message with. */
@@ -354,6 +386,8 @@ export interface Draft {
   attachments: DraftAttachment[];
   /** Marks the original \Answered after sending. */
   replyToMessageId: string | null;
+  /** Sent as the Importance and X-Priority headers; default normal. */
+  importance?: Importance;
   /**
    * Message-ID of the saved draft this replaces: from save_draft, or the
    * message's messageIdHeader when continuing a draft from Drafts.
@@ -414,6 +448,10 @@ export interface Settings {
   closeToTray: boolean;
   /** Computers: open at login, into the tray. */
   startAtLogin: boolean;
+  /** Where the open message shows on computers (phones always use the full screen). */
+  readingPane: 'right' | 'bottom' | 'off';
+  /** Pause all syncing and sending until switched off. */
+  workOffline: boolean;
   /** Read only: what this device offers. */
   device: { tray: boolean; startAtLogin: boolean };
 }
@@ -451,6 +489,8 @@ export interface OAuthAccountInput {
 export interface AccountPatch {
   displayName?: string;
   password?: string;
+  /** null: keep all mail in full. */
+  syncMonths?: number | null;
 }
 
 export type MoveTarget = { role: FolderRole } | { folderId: string };
@@ -458,6 +498,10 @@ export type MoveTarget = { role: FolderRole } | { folderId: string };
 export interface FlagChange {
   seen?: boolean;
   flagged?: boolean;
+  pinned?: boolean;
+  importance?: Importance;
+  /** Unix seconds, or null to clear the due date (a date also sets `flagged`). */
+  flagDue?: number | null;
 }
 
 export interface DraftCheck {
@@ -519,6 +563,21 @@ export interface MailApi {
   getMessage(id: string, allowRemote: boolean): Promise<MessageDetail>;
   setFlags(ids: string[], change: FlagChange): Promise<void>;
   moveMessages(ids: string[], target: MoveTarget): Promise<void>;
+  /** The originals stay; copies go to `target`. */
+  copyMessages(ids: string[], target: MoveTarget): Promise<void>;
+  /** true: to Junk, marked $Junk. false: back to the Inbox, marked $NotJunk. */
+  markJunk(ids: string[], junk: boolean): Promise<void>;
+  listCategories(): Promise<Category[]>;
+  /** Adds or changes one; `previousName` renames it on every message. Returns them all. */
+  saveCategory(category: Category, previousName: string | null): Promise<Category[]>;
+  /** Removes it from every message too. Returns the rest. */
+  deleteCategory(name: string): Promise<Category[]>;
+  setCategories(ids: string[], add: string[], remove: string[]): Promise<void>;
+  setFolderFavorite(folderId: string, favorite: boolean): Promise<void>;
+  /** Every account id, in the new order. */
+  reorderAccounts(ids: string[]): Promise<void>;
+  /** Computers: the message in a window of its own. Phones reject `invalid`. */
+  openMessageWindow(id: string): Promise<void>;
   deleteForever(ids: string[]): Promise<void>;
   /** Where it was saved, or null if the user cancelled. */
   saveAttachment(messageId: string, index: number): Promise<string | null>;
