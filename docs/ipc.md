@@ -19,6 +19,9 @@ type Account = {
   id: string; email: string; displayName: string; auth: AuthKind; createdAt: number;
   color: string;            // hex, assigned by backend from a fixed palette
   imap: ServerConfig; smtp: ServerConfig; sizeLimitBytes: number | null;
+  sortOrder: number;        // place in the sidebar from 0; list_accounts is sorted by it. Until the user
+                            // reorders, oldest first; accounts added after a reorder go last
+  syncMonths: number | null; // months of mail kept in full (bodies downloaded); null: current behaviour
 };
 
 type FolderRole = "inbox" | "sent" | "drafts" | "archive" | "junk" | "trash" | "all" | "flagged" | "other";
@@ -26,15 +29,25 @@ type Folder = {
   id: string; accountId: string; name: string; path: string; role: FolderRole; unread: number; total: number;
   delimiter: string | null;  // hierarchy separator; nest folders by splitting `path` on it. A parent that
                              // isn't itself a folder (server container) is shown as a plain label.
+  favorite: boolean;         // listed under Favourites; this device only (kept while the server lists it)
 };
 
 type Mailbox = { name: string | null; address: string };
+
+type Importance = "low" | "normal" | "high";
+type Category = { name: string; color: string };  // name unique ignoring case, across accounts; color "#rrggbb"
 
 type MessageListItem = {
   id: string; accountId: string; folderId: string;
   from: Mailbox | null; to: Mailbox[]; subject: string; preview: string;
   date: number | null;      // unix seconds
   unread: boolean; flagged: boolean; answered: boolean; hasAttachments: boolean;
+  pinned: boolean;          // this device only; true on a conversation row if any of it is pinned
+  importance: Importance;   // from Importance / X-Priority / X-MSMail-Priority, unless set with set_flags
+                            // (then local only; headers no longer change it)
+  categories: string[];     // category names in the order added (see "Categories" below)
+  flagDue: number | null;   // follow-up date of a flagged message, unix seconds; this device only
+  size: number;             // bytes, as the server reported
   threadCount: number;      // 1 unless grouped
   threadIds?: string[];     // when grouped
 };
@@ -71,9 +84,15 @@ type ListQuery = {
   accountId: string | null;          // null = all accounts (unified)
   folderId: string | null;           // a specific folder, or
   role: FolderRole | null;           // a role across accounts (unified Inbox etc.)
-  filter: "all" | "unread" | "flagged";
+  filter: "all" | "unread" | "flagged" | "attachments" | "toMe" | "pinned";
+                                     // toMe: the account's own address is in To or Cc
   search: string | null;             // full-text over subject, people, body
   offset: number; limit: number;     // limit <= 200
+  focus?: "focused" | "other" | null;
+  sort?: "date" | "from" | "subject" | "size";  // default date; from = sender name, else address
+  descending?: boolean;              // default true (newest, Z-A, largest first); ties newest first
+  // Pinned messages come first, then the sort, in every view except search results
+  // (folder, unified role, Focused/Other, threads).
 };
 type MessagePage = { items: MessageListItem[]; total: number };
 
@@ -86,6 +105,8 @@ type Draft = {
   replyToMessageId: string | null;   // marks original \Answered after send
   draftMessageId: string | null;     // Message-ID of the saved draft this replaces (from save_draft, or
                                      // MessageDetail.messageIdHeader when continuing a draft from Drafts)
+  importance?: Importance;           // high: "Importance: High" + "X-Priority: 1 (Highest)"; low: "Low" +
+                                     // "5 (Lowest)"; normal (default): no headers. outbox_edit returns it.
 };
 
 type OutboxState =
@@ -100,9 +121,28 @@ type OutboxEntry = {
   progress: number | null;            // 0..1 while sending, else null
 };
 
-type Settings = { theme: "system" | "light" | "dark"; remoteImages: "block" | "allow"; notifications: boolean };
+type Settings = { theme: "system" | "light" | "dark"; remoteImages: "block" | "allow"; notifications: boolean;
+  readingPane: "right" | "bottom" | "off";  // default right; stored for the interface
+  workOffline: boolean;                     // default false; see "Work Offline" below
+  /* …and the others in Settings (types.ts) */ };
 type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "error"; lastSyncedAt: number | null; message: string | null };
 ```
+
+**Work Offline** (`Settings.workOffline`): while on, the sync engines and the outbox worker
+make no connections. Every account reports `state: "offline"` with the message "Working
+offline. Turn off Work Offline to sync and send."; changes (flags, moves, copies,
+categories, junk) are queued as they are without a network, and sending waits in the Outbox.
+Opening a message whose body isn't on the device and `save_draft` reject `connect`.
+Switching it off wakes every engine and the outbox.
+
+**Categories** are kept on the server where it can: on Gmail accounts (Google sign-in, or IMAP
+host `imap.gmail.com`) as labels (`X-GM-LABELS`, modified UTF-7), and sync reads labels back as
+categories (system labels such as `\Inbox`, `\Important`, `\Sent`, `\Starred`, `\Draft` are
+skipped; a new label becomes a category with a palette colour). Elsewhere each category is an
+IMAP keyword: `$Cat_` + the name with every character that isn't an ASCII letter or digit
+written as `_` and two upper-case hex digits per UTF-8 byte ("Red team" → `$Cat_Red_20team`,
+"Café" → `$Cat_Caf_C3_A9`); keywords in that form are read back as categories. A folder whose
+`PERMANENTFLAGS` lacks `\*` keeps them on this device only (and sync leaves them alone).
 
 ## Commands
 
@@ -111,14 +151,16 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `suggest_servers` | `{ email }` | `{ imap: ServerConfig; smtp: ServerConfig; auth: AuthKind } \| null` |
 | `add_account` | `{ input: { email, displayName, password, imap, smtp } }` | `Account` (logs in to IMAP and SMTP first; nothing saved on failure) |
 | `add_oauth_account` | `{ input: { email, displayName, provider: "google" \| "microsoft" } }` | `Account` (opens the system browser at the provider's account chooser; `email` may be `""`, and the account picked there is used; may reject `config` until OAuth is configured) |
-| `update_account` | `{ id, patch: { displayName?, password? } }` | `Account` |
+| `update_account` | `{ id, patch: { displayName?, password?, syncMonths?: number \| null } }` | `Account` (`syncMonths` 1–240, or null for the default; with a window, headers are synced for the newest 1000 messages per folder plus every message inside it (IMAP `SEARCH SINCE`) and bodies under 2 MB inside it are downloaded, 500 per folder per pass; changing it wakes that account's sync; bodies already downloaded stay) |
+| `reorder_accounts` | `{ ids }` | `void` (every account id exactly once, in the new sidebar order, else `invalid`; local only; emits `mail://accounts-changed`) |
 | `reconnect_account` | `{ id }` (Google and Microsoft accounts: sign in again, same address) | `Account` |
 | `remove_account` | `{ id }` | `void` (deletes local mail and keyring entry, not server mail) |
-| `list_accounts` | | `Account[]` |
+| `list_accounts` | | `Account[]` (by `sortOrder`) |
 | `list_folders` | `{ accountId }` | `Folder[]` (sorted by role, then name) |
 | `create_folder` | `{ accountId, name, parentId: string \| null }` | `void` (IMAP CREATE now, online only; name encoded as modified UTF-7; top-level folders go under `INBOX.` on servers that keep everything there; the folder list is re-read and `mail://changed` emitted) |
 | `rename_folder` | `{ folderId, name }` | `void` (own folders only; built-in ones are refused with `invalid`) |
 | `delete_folder` | `{ folderId }` | `void` (own folders only, and not while they contain folders; the mail in it is deleted on the server) |
+| `set_folder_favorite` | `{ folderId, favorite }` | `void` (local only; emits `mail://changed` for the folder) |
 | `list_messages` | `{ query: ListQuery, threads?: boolean }` | `MessagePage` (`query.focus` `'focused' \| 'other'` shows one half of inbox folders: the user's rule for the sender wins, then people the user has written to are Focused, then mail with List-Unsubscribe, List-Id, Precedence bulk or Auto-Submitted, or from noreply@, notifications@, newsletter@ and similar, is Other; other folders ignore it. With `threads`, one row per conversation: its newest matching message, `unread` if any is, `threadCount` and `threadIds` (newest first; actions on the row use all of them); `total` counts conversations. A conversation is the first id in References, else In-Reply-To, else the Message-ID) |
 | `set_focus_rule` | `{ sender, focus: 'focused' \| 'other' \| null, wholeDomain }` | `void` (Focused Inbox: always put this address, or with `wholeDomain` its `@domain`, in that half; null removes the rule) |
 | `preview_body` | `{ body }` | `string` (the HTML recipients will see for this compose text: Markdown-style marks such as `**bold**`, `*italic*`, `- ` lists, `1. ` lists, `> ` quotes, `` `code` `` and `[text](url)` rendered, typed HTML escaped. Sending adds this HTML part whenever the body uses such marks; the text part is kept as typed) |
@@ -126,8 +168,15 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `parse_mailto` | `{ url }` | `Mailto \| null` (Android hands its SENDTO/VIEW link to the page through `window.MockyIntents.takeMailto()`; links only fill in a new message, control characters are dropped from fields) |
 | `get_thread` | `{ id }` | `MessageListItem[]` (every message in its conversation in the account, sent ones included, oldest first; Trash and Spam left out unless the message is there) |
 | `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read) |
-| `set_flags` | `{ ids, seen?: boolean, flagged?: boolean }` | `void` (local at once, server when online) |
+| `set_flags` | `{ ids, seen?: boolean, flagged?: boolean, pinned?: boolean, importance?: Importance, flagDue?: number \| null }` | `void` (local at once. `seen`/`flagged` reach the server when online; `pinned`, `importance` and `flagDue` stay on this device. A `flagDue` number (unix seconds) also flags the message; null clears the date; unflagging, here or on another device, clears it too. At the due time the app shows one notification "Follow up: <subject>") |
 | `move_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` (a message moved again before the server gave it a new UID is found by Message-ID) |
+| `copy_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` (same account only; IMAP `UID COPY`, queued like moves so it works offline; nothing changes locally until the target folder syncs, when the copies appear as new messages) |
+| `mark_junk` | `{ ids, junk: boolean }` | `void` (true: moved to the account's Junk folder (role `junk`) and marked `$Junk`, `$NotJunk` removed; false: moved to the Inbox, marked `$NotJunk`, `$Junk` removed. The keyword is set before the move. No Junk folder: `invalid` with a plain message, and nothing changes) |
+| `list_categories` | | `Category[]` (by name) |
+| `save_category` | `{ category: Category, previousName: string \| null }` | `Category[]` (adds one, or sets the colour of the one with that name; with `previousName`, renames it on every message too, queuing the server change: old label/keyword removed, new one added. A name another category has: `invalid`; unknown `previousName`: `not_found`. Names: 1–60 characters, not starting with `\`; colours `#rrggbb`) |
+| `delete_category` | `{ name }` | `Category[]` (removed from every message too, and from the server) |
+| `set_categories` | `{ ids, add: string[], remove: string[] }` | `void` (case is ignored; names not yet known become categories with a palette colour; changed messages get the server change queued) |
+| `open_message_window` | `{ id }` | `void` (computers: a window `message-<id>` (900×700, titled with the subject) loading the app with `?message=<url-encoded id>`, or the existing one focused; same permissions and link rules as the main window; closing it never hides to the tray. Phones: `invalid`) |
 | `suggest_recipients` | `{ query }` | `Mailbox[]` (up to 8 people written to or heard from, best first; own addresses and no-reply senders left out) |
 | `delete_forever` | `{ ids }` | `void` (only allowed for messages in Trash or Junk) |
 | `save_attachment` | `{ messageId, index }` | `string \| null` (shows a save dialog, Android's "Save to" screen on phones; where it was saved, null if cancelled) |
@@ -146,7 +195,7 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `outbox_cancel` | `{ id }` | `void` |
 | `outbox_edit` | `{ id }` | `Draft` (removes it from the outbox) |
 | `sync_now` | `{ accountId: string \| null }` | `void` |
-| `get_settings` / `set_settings` | `{ settings }` | `Settings`. On computers also `closeToTray` (closing the window hides it to the tray icon: Open, New message (emits `mail://compose`), Check for mail, Quit) and `startAtLogin` (applied to the system through tauri-plugin-autostart, launching with `--hidden` into the tray); `device: { tray, startAtLogin }` is read only (start at login is off inside a Store package). |
+| `get_settings` / `set_settings` | `{ settings }` | `Settings`. `readingPane` (`right`, `bottom`, `off`; anything else becomes `right`) is only stored; changing `workOffline` wakes every sync engine and the outbox. On computers also `closeToTray` (closing the window hides it to the tray icon: Open, New message (emits `mail://compose`), Check for mail, Quit) and `startAtLogin` (applied to the system through tauri-plugin-autostart, launching with `--hidden` into the tray); `device: { tray, startAtLogin }` is read only (start at login is off inside a Store package). |
 | `list_contacts` | `{ query }` | `Contact[]` (saved contacts matching name, email, phone or company, by name; `Contact = { id, accountId: string \| null, uid, name, emails, phones, organization, title, notes, state: 'synced' \| 'changed' \| 'deleted' }`) |
 | `get_contact` | `{ id }` | `Contact` |
 | `save_contact` | `{ contact: { id?, accountId: string \| null, name, emails, phones, organization, title, notes } }` | `Contact` (saved here at once; a contact of an account syncs to its server's address book in the background; null `accountId` keeps it on this device) |
@@ -158,7 +207,7 @@ type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "
 | `save_event` | `{ event: { id?, calendarId, title, location, notes, allDay, start, end, repeat: … \| 'keep', timeZone, reminders: number[] \| null } }` | `CalendarEvent`. Saved on the server first (needs a connection; `If-Match` on edits), then here. New events are written in the device's time zone with a `VTIMEZONE`; edits keep everything the app doesn't show (alarms, attendees, other properties). Choosing another calendar moves the event. |
 | `delete_event` | `{ id, occurrence: number \| null }` | `void`. With `occurrence` (a `recurrenceId`), only that date of a series is removed (an `EXDATE`); otherwise the event or whole series is deleted. |
 | `sync_calendars` | | `{ accountId, state: 'synced' \| 'unavailable' \| 'error', message }[]`. Password accounts sync with CalDAV on their IMAP host (`https://<imap host>/.well-known/caldav`, e.g. SOGo), Basic auth over HTTPS only; calendars that hold events are listed, changed events fetched, and events deleted elsewhere removed. Also runs at start-up and every 15 minutes, and emits `mail://calendar-changed` `{ calendars }` (empty after a change made here). Gmail and Microsoft accounts are `unavailable` for now. |
-| (reminders) | | The app checks every 30 s for reminders that came due since its last check (kept in the database, at most a day back) and shows a system notification ("In 15 minutes · 10:00–10:30 · place"), skipping declined and finished events. `reminders` on `save_event` replaces the event's alarms (null keeps them). Settings `eventReminders` (on) and `defaultReminderMins` (15; -1 none) control it. |
+| (reminders) | | The app checks every 30 s for reminders that came due since its last check (kept in the database, at most a day back) and shows a system notification ("In 15 minutes · 10:00–10:30 · place"), skipping declined and finished events. Flagged messages whose `flagDue` came in that time get "Follow up: <subject>" (always, whatever `eventReminders` says). `reminders` on `save_event` replaces the event's alarms (null keeps them). Settings `eventReminders` (on) and `defaultReminderMins` (15; -1 none) control it. |
 | `answer_invitation` | `{ id (message), answer: 'accepted' \| 'tentative' \| 'declined', notify }` | `InvitationView`. For a `METHOD:REQUEST` invitation in the message: the event is saved in the account's calendar with your `PARTSTAT` (into the calendar already holding its `UID`, else the account's personal calendar); a decline removes it. Calendar writes carry `Schedule-Reply: F` so the server doesn't email the organiser as well. With `notify`, a `METHOD:REPLY` email (text note plus `text/calendar; method=REPLY`) to the organiser is queued in the Outbox to send at once. |
 | `remove_cancelled_event` | `{ id }` | `InvitationView` (for a `METHOD:CANCEL`: deletes the event with that `UID` from your calendar) |
 | `apply_invitation_reply` | `{ id }` | `InvitationView` (for a `METHOD:REPLY` to your invitation: the replier's `PARTSTAT` is written into your calendar copy) |

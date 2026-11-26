@@ -24,6 +24,8 @@ mod invitations;
 mod mail;
 mod mailto;
 mod message_tools;
+mod message_window;
+mod organize;
 mod out_of_office;
 mod outbox;
 mod reminders;
@@ -76,9 +78,29 @@ fn open_outside<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &Url) {
     }
 }
 
+/// Every app window: link clicks in email open in the user's own apps,
+/// nothing opens inside the app, and the window never leaves the app.
+pub(crate) fn guarded<'a, R: tauri::Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+    app: &tauri::AppHandle<R>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    let for_popups = app.clone();
+    let for_navigation = app.clone();
+    builder
+        .on_new_window(move |url, _features| {
+            open_outside(&for_popups, &url);
+            NewWindowResponse::Deny
+        })
+        .on_navigation(move |url| {
+            if is_app_url(url) {
+                return true;
+            }
+            open_outside(&for_navigation, url);
+            false
+        })
+}
+
 fn create_window(app: &tauri::App) -> tauri::Result<()> {
-    let for_popups = app.handle().clone();
-    let for_navigation = app.handle().clone();
     let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default());
     // Phones have one full-screen window; sizes and titles are desktop ideas.
     #[cfg(desktop)]
@@ -88,21 +110,7 @@ fn create_window(app: &tauri::App) -> tauri::Result<()> {
         .min_inner_size(900.0, 600.0)
         // Started at login: wait in the tray.
         .visible(!tray::start_hidden());
-    builder
-        // Link clicks in email arrive here; nothing opens inside the app.
-        .on_new_window(move |url, _features| {
-            open_outside(&for_popups, &url);
-            NewWindowResponse::Deny
-        })
-        // The app window never leaves the app.
-        .on_navigation(move |url| {
-            if is_app_url(url) {
-                return true;
-            }
-            open_outside(&for_navigation, url);
-            false
-        })
-        .build()?;
+    guarded(builder, app.handle()).build()?;
     Ok(())
 }
 
@@ -162,6 +170,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 /// Tauri reports a failed start (for example, no display available) by
 /// returning an error; we print it and exit non-zero instead of panicking.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[allow(clippy::too_many_lines, reason = "mostly the list of commands")]
 pub fn run() {
     mailto::remember_launch_link();
     let builder = tauri::Builder::default();
@@ -217,6 +226,15 @@ pub fn run() {
             mail::move_messages,
             mail::suggest_recipients,
             mail::delete_forever,
+            organize::copy_messages,
+            organize::mark_junk,
+            organize::list_categories,
+            organize::save_category,
+            organize::delete_category,
+            organize::set_categories,
+            organize::set_folder_favorite,
+            organize::reorder_accounts,
+            message_window::open_message_window,
             attachments::save_attachment,
             attachments::pick_attachments,
             attachments::preview_attachment,

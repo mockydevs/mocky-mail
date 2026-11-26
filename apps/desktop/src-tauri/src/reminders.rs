@@ -1,6 +1,7 @@
 //! Event reminders: a notification before each calendar event, from the
 //! event's own alarms (`VALARM`, as set here, in webmail or by whoever sent
-//! the invitation).
+//! the invitation), and "Follow up: <subject>" when a flagged message's
+//! follow-up date comes.
 //!
 //! Every half minute the app looks for reminders that fell due since the
 //! last look. That time is kept in the database, so a reminder that came
@@ -57,6 +58,11 @@ fn tick(app: &AppHandle, state: &AppState) -> AppResult<()> {
             t.max(now.saturating_sub(MISSED))
         });
     state.store.set_setting(CHECKED_KEY, &now.to_string())?;
+    // Flagged mail whose follow-up date came: always, it was asked for.
+    for (_, subject) in state.store.flag_due_between(last, now)? {
+        let due = follow_up(&subject);
+        crate::events::notify(app, &due.title, &due.body);
+    }
     if !crate::settings::load(state)?.event_reminders {
         return Ok(());
     }
@@ -64,6 +70,22 @@ fn tick(app: &AppHandle, state: &AppState) -> AppResult<()> {
         crate::events::notify(app, &due.title, &due.body);
     }
     Ok(())
+}
+
+/// The notification for a flagged message whose follow-up date came.
+fn follow_up(subject: &str) -> Due {
+    let subject = subject.trim();
+    Due {
+        title: format!(
+            "Follow up: {}",
+            if subject.is_empty() {
+                "(no subject)"
+            } else {
+                subject
+            }
+        ),
+        body: "This message is flagged for follow-up now.".to_owned(),
+    }
 }
 
 /// Midnight on that day here, for an all-day event (stored as midnight UTC).
@@ -179,6 +201,15 @@ mod tests {
             .single()
             .map(|d| d.format("%H:%M").to_string())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn follow_ups_name_the_message() {
+        assert_eq!(
+            follow_up(" Quote for Kilimani ").title,
+            "Follow up: Quote for Kilimani"
+        );
+        assert_eq!(follow_up("").title, "Follow up: (no subject)");
     }
 
     #[test]

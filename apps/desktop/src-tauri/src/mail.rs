@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use mail_core::folders::FolderRole;
+use mail_core::importance::Importance;
 use mail_core::message::{Mailbox, parse_body};
 use mail_core::preview::PreviewKind;
 use mail_core::sanitize::{RemoteContent, embed_inline_images, sanitize_html};
@@ -20,7 +21,7 @@ use crate::{events, settings};
 /// Most messages one action may touch.
 const MAX_BATCH: usize = 1000;
 
-fn check_batch(ids: &[String]) -> AppResult<()> {
+pub(crate) fn check_batch(ids: &[String]) -> AppResult<()> {
     if ids.is_empty() || ids.len() > MAX_BATCH {
         return Err(AppError::invalid(format!(
             "Select between 1 and {MAX_BATCH} messages."
@@ -178,7 +179,7 @@ pub async fn get_message(
     })
 }
 
-fn notify_changed(app: &AppHandle, folders: &[(String, String)]) {
+pub(crate) fn notify_changed(app: &AppHandle, folders: &[(String, String)]) {
     let mut by_account: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();
     for (account, folder) in folders {
@@ -189,50 +190,109 @@ fn notify_changed(app: &AppHandle, folders: &[(String, String)]) {
     }
 }
 
-/// `set_flags`: changes show at once and reach the server when online.
+/// Queue one server change for messages of one folder: by UID, and by
+/// Message-ID for those moved here a moment ago, whose new UID isn't known
+/// yet (or the change would never leave this device and the next sync
+/// would put the old state back).
+pub(crate) fn enqueue_for(
+    state: &AppState,
+    account_id: &str,
+    messages: &[(String, Option<u32>)],
+    by_uids: impl FnOnce(Vec<u32>) -> Op,
+    by_message_id: impl Fn(String) -> Op,
+) -> AppResult<()> {
+    let uids: Vec<u32> = messages.iter().filter_map(|(_, uid)| *uid).collect();
+    if !uids.is_empty() {
+        sync::enqueue(state, account_id, &by_uids(uids))?;
+    }
+    for (id, _) in messages.iter().filter(|(_, uid)| uid.is_none()) {
+        if let Some(message_id) = state.store.get_message(id)?.message_id_header {
+            let bare = message_id.trim_matches(['<', '>']).to_owned();
+            sync::enqueue(state, account_id, &by_message_id(bare))?;
+        }
+    }
+    Ok(())
+}
+
+/// `set_flags` arguments (`ids` and the interface's `FlagChange`).
+#[allow(
+    clippy::option_option,
+    reason = "a flagDue of null differs from one left out"
+)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlagArgs {
+    ids: Vec<String>,
+    #[serde(default)]
+    seen: Option<bool>,
+    #[serde(default)]
+    flagged: Option<bool>,
+    #[serde(default)]
+    pinned: Option<bool>,
+    #[serde(default)]
+    importance: Option<Importance>,
+    /// Left out: unchanged; null: no date; seconds: a date (and flagged).
+    #[serde(default, deserialize_with = "crate::convert::present")]
+    flag_due: Option<Option<i64>>,
+}
+
+impl FlagArgs {
+    /// The flagged state to set: a follow-up date flags the message.
+    fn flagged(&self) -> Option<bool> {
+        match self.flag_due {
+            Some(Some(_)) => Some(true),
+            _ => self.flagged,
+        }
+    }
+}
+
+/// `set_flags`: read, flagged, pinned, importance and follow-up date.
+/// Changes show at once; read and flagged reach the server when online,
+/// the rest stay on this device. The arguments are read whole, since
+/// Tauri can't tell a `flagDue` of null from one left out.
 #[tauri::command]
 pub fn set_flags(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
-    ids: Vec<String>,
-    seen: Option<bool>,
-    flagged: Option<bool>,
+    request: tauri::ipc::Request<'_>,
 ) -> AppResult<()> {
-    check_batch(&ids)?;
-    let groups = sync::group_by_folder(&state, &ids)?;
-    state.store.set_flags(&ids, seen, flagged, None)?;
-    for ((account_id, folder_id), messages) in &groups {
-        let folder = state.store.get_folder(folder_id)?;
-        let uids: Vec<u32> = messages.iter().filter_map(|(_, uid)| *uid).collect();
-        if !uids.is_empty() {
-            sync::enqueue(
+    let tauri::ipc::InvokeBody::Json(body) = request.body() else {
+        return Err(AppError::invalid("set_flags expects JSON arguments."));
+    };
+    let args =
+        FlagArgs::deserialize(body).map_err(|e| AppError::invalid(format!("set_flags: {e}")))?;
+    check_batch(&args.ids)?;
+    if args.flag_due.flatten().is_some_and(|due| due < 0) {
+        return Err(AppError::invalid("That follow-up date isn't valid."));
+    }
+    let ids = &args.ids;
+    let (seen, flagged) = (args.seen, args.flagged());
+    let groups = sync::group_by_folder(&state, ids)?;
+    state.store.set_flags(ids, seen, flagged, None)?;
+    state
+        .store
+        .set_marks(ids, args.pinned, args.importance, args.flag_due)?;
+    if seen.is_some() || flagged.is_some() {
+        for ((account_id, folder_id), messages) in &groups {
+            let folder = state.store.get_folder(folder_id)?.path;
+            enqueue_for(
                 &state,
                 account_id,
-                &Op::SetFlags {
-                    folder: folder.path.clone(),
+                messages,
+                |uids| Op::SetFlags {
+                    folder: folder.clone(),
                     uids,
                     seen,
                     flagged,
                     answered: None,
                 },
+                |message_id| Op::SetFlagsByMessageId {
+                    folder: folder.clone(),
+                    message_id,
+                    seen,
+                    flagged,
+                },
             )?;
-        }
-        // Moved here a moment ago, so the server's new UID isn't known
-        // yet: find them by Message-ID, or the change never leaves this
-        // device and the next sync puts the old state back.
-        for (id, _) in messages.iter().filter(|(_, uid)| uid.is_none()) {
-            if let Some(message_id) = state.store.get_message(id)?.message_id_header {
-                sync::enqueue(
-                    &state,
-                    account_id,
-                    &Op::SetFlagsByMessageId {
-                        folder: folder.path.clone(),
-                        message_id: message_id.trim_matches(['<', '>']).to_owned(),
-                        seen,
-                        flagged,
-                    },
-                )?;
-            }
         }
     }
     notify_changed(&app, &groups.into_keys().collect::<Vec<_>>());
@@ -266,7 +326,7 @@ fn default_path(role: FolderRole) -> Option<&'static str> {
 }
 
 /// Find (or create locally) the target folder in an account.
-fn resolve_target(
+pub(crate) fn resolve_target(
     state: &AppState,
     account_id: &str,
     target: &MoveTarget,
@@ -331,49 +391,50 @@ pub fn move_messages(
 ) -> AppResult<()> {
     check_batch(&ids)?;
     let groups = sync::group_by_folder(&state, &ids)?;
+    let touched = move_groups(&state, groups, &target)?;
+    notify_changed(&app, &touched);
+    Ok(())
+}
+
+/// Move messages, grouped by folder, locally and (queued) on the server.
+/// Returns the (account, folder) pairs that changed.
+pub(crate) fn move_groups(
+    state: &AppState,
+    groups: sync::FolderGroups,
+    target: &MoveTarget,
+) -> AppResult<Vec<(String, String)>> {
     let mut touched = Vec::new();
     for ((account_id, folder_id), messages) in groups {
-        let (target_folder, create_target) = resolve_target(&state, &account_id, &target)?;
+        let (target_folder, create_target) = resolve_target(state, &account_id, target)?;
         if target_folder.id == folder_id {
             continue;
         }
         let source = state.store.get_folder(&folder_id)?;
-        let uids: Vec<u32> = messages.iter().filter_map(|(_, uid)| *uid).collect();
-        if !uids.is_empty() {
-            sync::enqueue(
-                &state,
-                &account_id,
-                &Op::Move {
-                    from: source.path.clone(),
-                    uids,
-                    to: target_folder.path.clone(),
-                    create_target,
-                },
-            )?;
-        }
         // Moved locally before the server's new UID arrived (moved twice in
-        // a row, or Undo): find them on the server by Message-ID instead.
-        for (id, _) in messages.iter().filter(|(_, uid)| uid.is_none()) {
-            if let Some(message_id) = state.store.get_message(id)?.message_id_header {
-                sync::enqueue(
-                    &state,
-                    &account_id,
-                    &Op::MoveByMessageId {
-                        from: source.path.clone(),
-                        message_id: message_id.trim_matches(['<', '>']).to_owned(),
-                        to: target_folder.path.clone(),
-                        create_target,
-                    },
-                )?;
-            }
-        }
+        // a row, or Undo): found on the server by Message-ID instead.
+        enqueue_for(
+            state,
+            &account_id,
+            &messages,
+            |uids| Op::Move {
+                from: source.path.clone(),
+                uids,
+                to: target_folder.path.clone(),
+                create_target,
+            },
+            |message_id| Op::MoveByMessageId {
+                from: source.path.clone(),
+                message_id,
+                to: target_folder.path.clone(),
+                create_target,
+            },
+        )?;
         let message_ids: Vec<&String> = messages.iter().map(|(id, _)| id).collect();
         state.store.move_local(&message_ids, &target_folder.id)?;
         touched.push((account_id.clone(), folder_id));
         touched.push((account_id, target_folder.id));
     }
-    notify_changed(&app, &touched);
-    Ok(())
+    Ok(touched)
 }
 
 /// `delete_forever`: only from Trash or Junk, so a slip can't destroy mail.
@@ -499,6 +560,27 @@ mod tests {
                 role: FolderRole::Other,
             });
         assert!(matches!(folder, MoveTarget::Folder { ref folder_id } if folder_id == "f1"));
+    }
+
+    #[test]
+    fn a_null_follow_up_date_is_told_from_one_left_out() {
+        let parse = |json: serde_json::Value| FlagArgs::deserialize(&json).ok();
+        let left_out = parse(serde_json::json!({ "ids": ["a"], "pinned": true }));
+        assert!(left_out.as_ref().is_some_and(|a| a.flag_due.is_none()
+            && a.pinned == Some(true)
+            && a.flagged().is_none()));
+        let cleared = parse(serde_json::json!({ "ids": ["a"], "flagDue": null }));
+        assert!(cleared.is_some_and(|a| a.flag_due == Some(None) && a.flagged().is_none()));
+        // A date flags the message too.
+        let dated = parse(
+            serde_json::json!({ "ids": ["a"], "flagDue": 1_800_000_000, "importance": "high" }),
+        );
+        assert!(
+            dated.is_some_and(|a| a.flag_due == Some(Some(1_800_000_000))
+                && a.flagged() == Some(true)
+                && a.importance == Some(Importance::High))
+        );
+        assert!(parse(serde_json::json!({ "ids": ["a"], "importance": "urgent" })).is_none());
     }
 
     #[test]

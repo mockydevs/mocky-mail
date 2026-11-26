@@ -15,6 +15,21 @@ pub fn to_sync(server: &StoreServer) -> ServerConfig {
     }
 }
 
+/// For `#[serde(deserialize_with)]` on an `Option<Option<T>>` field with
+/// `#[serde(default)]`: left out is `None`, null is `Some(None)`, a value
+/// `Some(Some(v))`. The interface uses null to mean "clear it".
+///
+/// # Errors
+/// When the value isn't a `T` or null.
+#[allow(clippy::option_option, reason = "the three cases are the point")]
+pub fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 /// Network settings → database server settings.
 pub fn to_store(server: &ServerConfig) -> StoreServer {
     StoreServer {

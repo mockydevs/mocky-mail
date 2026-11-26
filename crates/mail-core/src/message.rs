@@ -90,6 +90,9 @@ pub struct MessageSummary {
     /// Precedence: bulk, Auto-Submitted): goes to Other in a Focused Inbox.
     #[serde(default)]
     pub bulk: bool,
+    /// From the `Importance`, `X-Priority` or `X-MSMail-Priority` header.
+    #[serde(default)]
+    pub importance: crate::importance::Importance,
 }
 
 /// An image embedded in an HTML body and referenced as `cid:`.
@@ -418,6 +421,11 @@ pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
             message.header_raw("Precedence"),
             message.header_raw("Auto-Submitted"),
         ),
+        importance: crate::importance::Importance::from_headers(
+            message.header_raw("Importance"),
+            message.header_raw("X-Priority"),
+            message.header_raw("X-MSMail-Priority"),
+        ),
     })
 }
 
@@ -574,5 +582,15 @@ SGVsbG8=\r\n\
         assert!(parse_summary(news).unwrap().bulk);
         let person = b"From: peter@client.example\r\nTo: me@x.example\r\nSubject: Quote\r\n\r\nHi";
         assert!(!parse_summary(person).unwrap().bulk);
+    }
+
+    #[test]
+    fn importance_comes_from_the_headers() {
+        use crate::importance::Importance;
+        let urgent = b"From: a@x.example\r\nSubject: Now\r\nX-Priority: 1 (Highest)\r\n\r\nHi";
+        assert_eq!(parse_summary(urgent).unwrap().importance, Importance::High);
+        let low = b"From: a@x.example\r\nSubject: Later\r\nImportance: low\r\n\r\nHi";
+        assert_eq!(parse_summary(low).unwrap().importance, Importance::Low);
+        assert_eq!(parse_summary(PLAIN).unwrap().importance, Importance::Normal);
     }
 }

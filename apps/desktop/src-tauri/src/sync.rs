@@ -14,8 +14,11 @@ use futures::FutureExt as _;
 
 use mail_core::folders::{FolderRole, decode_folder_name, detect_role_unclaimed, special_use_role};
 use mail_core::message::{parse_body, parse_summary};
+use mail_core::sync_window::imap_since;
 use mail_store::{Account, Folder, MessageFlags, NewFolder, OpKind};
-use mail_sync::imap::{FlagChange, IdleEnd, ImapConnection, MAX_BACKGROUND_BODY_BYTES, uid_set};
+use mail_sync::imap::{
+    FlagChange, IdleEnd, ImapConnection, MAX_BACKGROUND_BODY_BYTES, Tags, uid_set,
+};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::Notify;
@@ -36,6 +39,10 @@ const FLAG_CHUNK: usize = 500;
 const BODY_PREFETCH: u32 = 40;
 /// The inbox is read most, so more of it is kept offline.
 const INBOX_BODY_PREFETCH: u32 = 200;
+/// With a sync window (`Account::sync_months`), every body inside it is
+/// downloaded instead of the counts above, this many per folder per pass so
+/// new mail isn't held up behind a long first download.
+const WINDOW_BODY_BATCH: u32 = 500;
 /// How often every folder is checked, not just the inbox.
 const FULL_SYNC_EVERY: Duration = Duration::from_mins(10);
 /// First retry delay after a network error; doubles up to `MAX_BACKOFF`.
@@ -112,7 +119,82 @@ pub enum Op {
         /// Message UIDs.
         uids: Vec<u32>,
     },
+    /// Copy messages to another folder; the originals stay. The copies
+    /// arrive as new messages when the target is synced.
+    Copy {
+        /// Source folder path.
+        from: String,
+        /// Message UIDs in the source.
+        uids: Vec<u32>,
+        /// Target folder path.
+        to: String,
+        /// Create the target first (it was made locally, e.g. Archive).
+        #[serde(default)]
+        create_target: bool,
+    },
+    /// Copy the messages with this Message-ID (moved here locally, new UID
+    /// not known yet).
+    CopyByMessageId {
+        /// Source folder path.
+        from: String,
+        /// Message-ID without angle brackets.
+        message_id: String,
+        /// Target folder path.
+        to: String,
+        /// Create the target first.
+        #[serde(default)]
+        create_target: bool,
+    },
+    /// Add and remove IMAP keywords (`$Junk`, `$NotJunk`, category
+    /// keywords). Skipped in folders that don't keep keywords.
+    SetKeywords {
+        /// Folder path.
+        folder: String,
+        /// Message UIDs.
+        uids: Vec<u32>,
+        /// Keywords to add.
+        add: Vec<String>,
+        /// Keywords to remove.
+        remove: Vec<String>,
+    },
+    /// [`Op::SetKeywords`] on the messages with this Message-ID.
+    SetKeywordsByMessageId {
+        /// Folder path.
+        folder: String,
+        /// Message-ID without angle brackets.
+        message_id: String,
+        /// Keywords to add.
+        add: Vec<String>,
+        /// Keywords to remove.
+        remove: Vec<String>,
+    },
+    /// Add and remove Gmail labels: the categories of a Gmail account, by
+    /// name (encoded when sent).
+    SetLabels {
+        /// Folder path.
+        folder: String,
+        /// Message UIDs.
+        uids: Vec<u32>,
+        /// Labels to add.
+        add: Vec<String>,
+        /// Labels to remove.
+        remove: Vec<String>,
+    },
+    /// [`Op::SetLabels`] on the messages with this Message-ID.
+    SetLabelsByMessageId {
+        /// Folder path.
+        folder: String,
+        /// Message-ID without angle brackets.
+        message_id: String,
+        /// Labels to add.
+        add: Vec<String>,
+        /// Labels to remove.
+        remove: Vec<String>,
+    },
 }
+
+/// What the sync status says while Work Offline is on.
+pub const WORKING_OFFLINE: &str = "Working offline. Turn off Work Offline to sync and send.";
 
 /// Queue a server change for an account and wake its engine.
 ///
@@ -120,9 +202,15 @@ pub enum Op {
 /// Database errors.
 pub fn enqueue(state: &AppState, account_id: &str, op: &Op) -> AppResult<()> {
     let kind = match op {
-        Op::SetFlags { .. } | Op::SetFlagsByMessageId { .. } => OpKind::SetFlags,
+        Op::SetFlags { .. }
+        | Op::SetFlagsByMessageId { .. }
+        | Op::SetKeywords { .. }
+        | Op::SetKeywordsByMessageId { .. }
+        | Op::SetLabels { .. }
+        | Op::SetLabelsByMessageId { .. } => OpKind::SetFlags,
         Op::Move { .. } | Op::MoveByMessageId { .. } => OpKind::Move,
         Op::Delete { .. } | Op::DeleteByMessageId { .. } => OpKind::Delete,
+        Op::Copy { .. } | Op::CopyByMessageId { .. } => OpKind::Copy,
     };
     let payload = serde_json::to_value(op).map_err(|e| AppError::internal(e.to_string()))?;
     state.store.enqueue_op(account_id, kind, &payload, now())?;
@@ -152,6 +240,14 @@ async fn run(app: AppHandle, state: Arc<AppState>, account_id: String, wake: Arc
     // one since the last session that worked.
     let mut fresh_token_tried = false;
     loop {
+        // Work Offline: no connection at all until it is switched off
+        // (which wakes every engine). Changes made meanwhile wait in the
+        // queue as they do without a network.
+        if crate::settings::working_offline(&state) {
+            events::sync_status(&app, &account_id, "offline", Some(WORKING_OFFLINE));
+            wake.notified().await;
+            continue;
+        }
         let account = match state.store.get_account(&account_id) {
             Ok(account) => account,
             // The account was removed: this engine is done.
@@ -269,8 +365,15 @@ fn op_folders(op: &Op) -> [Option<&str>; 2] {
         Op::SetFlags { folder, .. }
         | Op::SetFlagsByMessageId { folder, .. }
         | Op::Delete { folder, .. }
-        | Op::DeleteByMessageId { folder, .. } => [Some(folder), None],
-        Op::Move { from, to, .. } | Op::MoveByMessageId { from, to, .. } => [Some(from), Some(to)],
+        | Op::DeleteByMessageId { folder, .. }
+        | Op::SetKeywords { folder, .. }
+        | Op::SetKeywordsByMessageId { folder, .. }
+        | Op::SetLabels { folder, .. }
+        | Op::SetLabelsByMessageId { folder, .. } => [Some(folder), None],
+        Op::Move { from, to, .. }
+        | Op::MoveByMessageId { from, to, .. }
+        | Op::Copy { from, to, .. }
+        | Op::CopyByMessageId { from, to, .. } => [Some(from), Some(to)],
     }
 }
 
@@ -301,6 +404,11 @@ async fn session(
     let started = Instant::now();
     let mut trigger = Trigger::Connected;
     loop {
+        // Work Offline was switched on (it wakes the engine): hang up.
+        if crate::settings::working_offline(state) {
+            conn.logout().await;
+            return Ok(());
+        }
         // Anything that goes wrong here is reported after the pass, not
         // instead of it: new mail must still arrive. Only a lost connection
         // ends the pass early.
@@ -326,7 +434,7 @@ async fn session(
             .collect();
         due.sort_by_key(|f| f.role != FolderRole::Inbox);
         for folder in due {
-            let report = match sync_folder(state, &mut conn, folder).await {
+            let report = match sync_folder(state, account, &mut conn, folder).await {
                 Ok(report) => report,
                 Err(error) => {
                     // One folder the server or the database chokes on must
@@ -535,7 +643,113 @@ async fn apply(conn: &mut ImapConnection, op: &Op) -> Result<(), mail_sync::Sync
             let uids = conn.uids_with_message_id(folder, message_id).await?;
             conn.delete_forever(folder, &uids).await
         }
+        Op::Copy { .. }
+        | Op::CopyByMessageId { .. }
+        | Op::SetKeywords { .. }
+        | Op::SetKeywordsByMessageId { .. }
+        | Op::SetLabels { .. }
+        | Op::SetLabelsByMessageId { .. } => apply_copy_or_tags(conn, op).await,
     }
+}
+
+/// Copies, keywords and labels (the 0.5.0 changes).
+async fn apply_copy_or_tags(
+    conn: &mut ImapConnection,
+    op: &Op,
+) -> Result<(), mail_sync::SyncError> {
+    match op {
+        Op::Copy {
+            from,
+            uids,
+            to,
+            create_target,
+        } => {
+            if *create_target {
+                // Fails harmlessly when the folder already exists.
+                let _ = conn.create_folder(to).await;
+            }
+            conn.copy_messages(from, uids, to).await
+        }
+        Op::CopyByMessageId {
+            from,
+            message_id,
+            to,
+            create_target,
+        } => {
+            let uids = conn.uids_with_message_id(from, message_id).await?;
+            if uids.is_empty() {
+                return Ok(());
+            }
+            if *create_target {
+                let _ = conn.create_folder(to).await;
+            }
+            conn.copy_messages(from, &uids, to).await
+        }
+        Op::SetKeywords {
+            folder,
+            uids,
+            add,
+            remove,
+        } => store_keywords(conn, folder, uids, add, remove).await,
+        Op::SetKeywordsByMessageId {
+            folder,
+            message_id,
+            add,
+            remove,
+        } => {
+            let uids = conn.uids_with_message_id(folder, message_id).await?;
+            store_keywords(conn, folder, &uids, add, remove).await
+        }
+        Op::SetLabels {
+            folder,
+            uids,
+            add,
+            remove,
+        } => {
+            conn.store_labels(folder, uids, &labels(add), &labels(remove))
+                .await
+        }
+        Op::SetLabelsByMessageId {
+            folder,
+            message_id,
+            add,
+            remove,
+        } => {
+            let uids = conn.uids_with_message_id(folder, message_id).await?;
+            conn.store_labels(folder, &uids, &labels(add), &labels(remove))
+                .await
+        }
+        // Handled by `apply`.
+        Op::SetFlags { .. }
+        | Op::SetFlagsByMessageId { .. }
+        | Op::Move { .. }
+        | Op::MoveByMessageId { .. }
+        | Op::Delete { .. }
+        | Op::DeleteByMessageId { .. } => Ok(()),
+    }
+}
+
+/// Gmail labels for category names.
+fn labels(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .map(|name| mail_core::categories::label_for(name))
+        .collect()
+}
+
+/// Keywords are kept only where the folder allows them; elsewhere the
+/// change stays on this device, which is not an error.
+async fn store_keywords(
+    conn: &mut ImapConnection,
+    folder: &str,
+    uids: &[u32],
+    add: &[String],
+    remove: &[String],
+) -> Result<(), mail_sync::SyncError> {
+    if !conn.store_keywords(folder, uids, add, remove).await? {
+        eprintln!("mail sync: this folder doesn't keep keywords; categories stay on this device");
+    }
+    Ok(())
 }
 
 /// Send the changes queued in the app, oldest first. The folders they touch
@@ -698,8 +912,63 @@ async fn select_or_skip(
     }
 }
 
+/// The categories a message has on the server: its Gmail labels, or its
+/// category keywords where the folder keeps keywords. `None` when the
+/// server can't hold them, so the ones set here are left alone.
+fn server_categories(tags: &Tags, keywords_kept: bool) -> Option<Vec<String>> {
+    if let Some(labels) = &tags.labels {
+        return Some(
+            labels
+                .iter()
+                .filter_map(|label| mail_core::categories::name_from_label(label))
+                .collect(),
+        );
+    }
+    keywords_kept.then(|| {
+        tags.keywords
+            .iter()
+            .filter_map(|keyword| mail_core::categories::name_from_keyword(keyword))
+            .collect()
+    })
+}
+
+/// Record a message's categories as the server has them. Returns whether
+/// anything changed.
+fn apply_categories(
+    state: &AppState,
+    folder: &Folder,
+    uid: u32,
+    tags: &Tags,
+    keywords_kept: bool,
+) -> AppResult<bool> {
+    let Some(names) = server_categories(tags, keywords_kept) else {
+        return Ok(false);
+    };
+    state.store.ensure_categories(&names)?;
+    Ok(state.store.set_categories_by_uid(&folder.id, uid, &names)?)
+}
+
+/// With a sync window (the account's `sync_months`), the UIDs of the
+/// folder's messages inside it (IMAP `SEARCH SINCE`); `None` without one.
+async fn window_uids(
+    conn: &mut ImapConnection,
+    account: &Account,
+    folder: &Folder,
+    empty: bool,
+) -> AppResult<Option<HashSet<u32>>> {
+    let since = account
+        .sync_months
+        .and_then(|months| imap_since(i64::try_from(now()).unwrap_or(0), months));
+    Ok(match since {
+        Some(since) if !empty => Some(conn.uids_since(&folder.path, &since).await?),
+        Some(_) => Some(HashSet::new()),
+        None => None,
+    })
+}
+
 async fn sync_folder(
     state: &AppState,
+    account: &Account,
     conn: &mut ImapConnection,
     folder: &Folder,
 ) -> AppResult<Report> {
@@ -719,6 +988,7 @@ async fn sync_folder(
     } else {
         conn.all_uids(&folder.path).await?
     };
+    let window = window_uids(conn, account, folder, server.is_empty()).await?;
 
     // With no local changes waiting, anything recent on the server that is
     // missing here is a gap (a move the server refused) and is fetched again.
@@ -732,7 +1002,7 @@ async fn sync_folder(
     } else {
         HashSet::new()
     };
-    let fresh = uids_to_fetch(&server, &local_before, highest, settled);
+    let fresh = uids_to_fetch(&server, &local_before, highest, settled, window.as_ref());
     let mut new_unseen: u32 = 0;
     // Only UIDs actually stored move the high-water mark, so a message the
     // server didn't return this time is asked for again next time.
@@ -747,6 +1017,13 @@ async fn sync_folder(
                 &message.summary,
                 flags(message.flags),
                 u64::from(message.size),
+            )?;
+            apply_categories(
+                state,
+                folder,
+                message.uid,
+                &message.tags,
+                status.accepts_keywords,
             )?;
             if !initial
                 && message.uid > highest
@@ -782,14 +1059,15 @@ async fn sync_folder(
         .collect();
     for chunk in known.chunks(FLAG_CHUNK) {
         let Some(set) = uid_set(chunk) else { continue };
-        for (uid, server_flags) in conn.fetch_flags(&folder.path, &set).await? {
+        for (uid, server_flags, tags) in conn.fetch_flags_and_tags(&folder.path, &set).await? {
             changed |= state
                 .store
                 .set_flags_by_uid(&folder.id, uid, flags(server_flags))?;
+            changed |= apply_categories(state, folder, uid, &tags, status.accepts_keywords)?;
         }
     }
 
-    changed |= prefetch_bodies(state, conn, folder).await?;
+    changed |= prefetch_bodies(state, conn, folder, window.as_ref()).await?;
     Ok(Report {
         changed,
         new_unseen,
@@ -798,28 +1076,35 @@ async fn sync_folder(
 
 /// UIDs to download, ascending: those above `highest` (new since the last
 /// sync) and, when `fill_gaps`, any not in `local`, both limited to the
-/// newest `INITIAL_MESSAGES` on the server.
+/// newest `INITIAL_MESSAGES` on the server and, with a sync window, the
+/// messages inside it.
 fn uids_to_fetch(
     server: &HashSet<u32>,
     local: &HashSet<u32>,
     highest: u32,
     fill_gaps: bool,
+    window: Option<&HashSet<u32>>,
 ) -> Vec<u32> {
     let mut newest: Vec<u32> = server.iter().copied().collect();
     newest.sort_unstable();
     let skip = newest.len().saturating_sub(INITIAL_MESSAGES);
     newest
         .into_iter()
-        .skip(skip)
+        .enumerate()
+        .filter(|(index, uid)| *index >= skip || window.is_some_and(|w| w.contains(uid)))
+        .map(|(_, uid)| uid)
         .filter(|uid| *uid > highest || (fill_gaps && !local.contains(uid)))
         .collect()
 }
 
-/// Download recent small bodies so they open offline. Returns whether any did.
+/// Download small bodies so they open offline: every message inside the
+/// account's sync window (a batch per pass), or without one the most
+/// recent few. Returns whether any were downloaded.
 async fn prefetch_bodies(
     state: &AppState,
     conn: &mut ImapConnection,
     folder: &Folder,
+    window: Option<&HashSet<u32>>,
 ) -> AppResult<bool> {
     let mut fetched = false;
     let prefetch = if folder.role == FolderRole::Inbox {
@@ -827,11 +1112,23 @@ async fn prefetch_bodies(
     } else {
         BODY_PREFETCH
     };
-    for (id, uid) in state.store.messages_missing_raw(
-        &folder.id,
-        prefetch,
-        u64::from(MAX_BACKGROUND_BODY_BYTES),
-    )? {
+    let missing = match window {
+        Some(window) => {
+            let uids: Vec<u32> = window.iter().copied().collect();
+            state.store.messages_missing_raw_among(
+                &folder.id,
+                &uids,
+                WINDOW_BODY_BATCH,
+                u64::from(MAX_BACKGROUND_BODY_BYTES),
+            )?
+        }
+        None => state.store.messages_missing_raw(
+            &folder.id,
+            prefetch,
+            u64::from(MAX_BACKGROUND_BODY_BYTES),
+        )?,
+    };
+    for (id, uid) in missing {
         if let Some(raw) = conn
             .fetch_raw(&folder.path, uid, u64::from(MAX_BACKGROUND_BODY_BYTES))
             .await?
@@ -848,12 +1145,20 @@ async fn prefetch_bodies(
 /// # Errors
 /// Database errors.
 pub fn cache_body(state: &AppState, id: &str, raw: &[u8]) -> AppResult<()> {
-    let preview = parse_summary(raw).map(|s| s.preview).unwrap_or_default();
+    let summary = parse_summary(raw).ok();
+    let preview = summary
+        .as_ref()
+        .map(|s| s.preview.clone())
+        .unwrap_or_default();
     let text = parse_body(raw)
         .ok()
         .and_then(|b| b.text)
         .unwrap_or_else(|| preview.clone());
     state.store.set_body(id, raw, Some(&text), &preview)?;
+    // Mail synced before importance was read gets it now.
+    if let Some(summary) = summary {
+        state.store.set_header_importance(id, summary.importance)?;
+    }
     Ok(())
 }
 
@@ -864,6 +1169,12 @@ pub fn cache_body(state: &AppState, id: &str, raw: &[u8]) -> AppResult<()> {
 pub async fn body_now(state: &AppState, id: &str) -> AppResult<Vec<u8>> {
     if let Some(raw) = state.store.get_raw(id)? {
         return Ok(raw);
+    }
+    if crate::settings::working_offline(state) {
+        return Err(AppError::new(
+            "connect",
+            "You're working offline, and this message isn't on this device yet. Turn off Work Offline to download it.",
+        ));
     }
     let message = state.store.get_message(id)?;
     let uid = message.uid.ok_or_else(|| {
@@ -953,17 +1264,92 @@ mod tests {
         let server: HashSet<u32> = (1..=10).collect();
         let local: HashSet<u32> = [1, 2, 3, 5, 6, 7, 8].into_iter().collect();
         // Changes still waiting: only what is new.
-        assert_eq!(uids_to_fetch(&server, &local, 8, false), vec![9, 10]);
+        assert_eq!(uids_to_fetch(&server, &local, 8, false, None), vec![9, 10]);
         // Settled: the message missing at UID 4 comes back too.
-        assert_eq!(uids_to_fetch(&server, &local, 8, true), vec![4, 9, 10]);
+        assert_eq!(
+            uids_to_fetch(&server, &local, 8, true, None),
+            vec![4, 9, 10]
+        );
         // First sync of a huge folder: only the newest INITIAL_MESSAGES.
         let big: HashSet<u32> = (1..=5000).collect();
-        let first = uids_to_fetch(&big, &HashSet::new(), 0, true);
+        let first = uids_to_fetch(&big, &HashSet::new(), 0, true, None);
         assert_eq!(first.len(), INITIAL_MESSAGES);
         assert_eq!(first.first(), Some(&4001));
         // Older mail that was never downloaded is not treated as a gap.
         let local: HashSet<u32> = (4001..=5000).collect();
-        assert!(uids_to_fetch(&big, &local, 5000, true).is_empty());
+        assert!(uids_to_fetch(&big, &local, 5000, true, None).is_empty());
+    }
+
+    #[test]
+    fn a_sync_window_reaches_past_the_newest_thousand() {
+        let big: HashSet<u32> = (1..=5000).collect();
+        // A year of mail: UIDs 2001 on.
+        let window: HashSet<u32> = (2001..=5000).collect();
+        let first = uids_to_fetch(&big, &HashSet::new(), 0, true, Some(&window));
+        assert_eq!(first.len(), 3000);
+        assert_eq!(first.first(), Some(&2001));
+        // A short window still gets the newest INITIAL_MESSAGES headers.
+        let week: HashSet<u32> = (4990..=5000).collect();
+        let first = uids_to_fetch(&big, &HashSet::new(), 0, true, Some(&week));
+        assert_eq!(first.len(), INITIAL_MESSAGES);
+        // Widened later: the older ones inside it come in as gaps.
+        let local: HashSet<u32> = (4001..=5000).collect();
+        let widened = uids_to_fetch(&big, &local, 5000, true, Some(&window));
+        assert_eq!(widened.len(), 2000);
+        assert!(uids_to_fetch(&big, &local, 5000, false, Some(&window)).is_empty());
+    }
+
+    #[test]
+    fn categories_come_from_labels_or_kept_keywords() {
+        let gmail = Tags {
+            keywords: vec!["$Cat_Ignored".into()],
+            labels: Some(vec![
+                "\\Inbox".into(),
+                "\\Important".into(),
+                "Clients".into(),
+                "Entw&APw-rfe".into(),
+            ]),
+        };
+        assert_eq!(
+            server_categories(&gmail, false),
+            Some(vec!["Clients".to_owned(), "Entwürfe".to_owned()])
+        );
+        let imap = Tags {
+            keywords: vec!["$Junk".into(), "$Cat_Red_20team".into(), "$label1".into()],
+            labels: None,
+        };
+        assert_eq!(
+            server_categories(&imap, true),
+            Some(vec!["Red team".to_owned()])
+        );
+        // A folder that can't keep keywords: the ones set here stay.
+        assert_eq!(server_categories(&imap, false), None);
+    }
+
+    #[test]
+    fn new_changes_round_trip_and_touch_their_folders() {
+        let copy = Op::Copy {
+            from: "INBOX".into(),
+            uids: vec![4],
+            to: "Clients".into(),
+            create_target: false,
+        };
+        assert_eq!(op_folders(&copy), [Some("INBOX"), Some("Clients")]);
+        let keywords = Op::SetKeywordsByMessageId {
+            folder: "Junk".into(),
+            message_id: "a@b.c".into(),
+            add: vec!["$Junk".into()],
+            remove: vec!["$NotJunk".into()],
+        };
+        assert_eq!(op_folders(&keywords), [Some("Junk"), None]);
+        for op in [copy, keywords] {
+            let value = serde_json::to_value(&op).unwrap_or_default();
+            assert_eq!(serde_json::from_value::<Op>(value).ok(), Some(op));
+        }
+        assert_eq!(
+            labels(&["Entwürfe".to_owned()]),
+            vec!["Entw&APw-rfe".to_owned()]
+        );
     }
 
     #[test]

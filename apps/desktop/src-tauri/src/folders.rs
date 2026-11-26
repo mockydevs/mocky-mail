@@ -199,6 +199,7 @@ mod tests {
             highest_uid: None,
             unread: 0,
             total: 0,
+            favorite: false,
         }
     }
 

@@ -1,8 +1,9 @@
 //! Building the RFC 5322 bytes for a message the user wrote.
 
 use base64::Engine as _;
-use lettre::message::header::{ContentType, InReplyTo, References};
+use lettre::message::header::{ContentType, HeaderName, HeaderValue, InReplyTo, References};
 use lettre::message::{Attachment, Mailbox as LettreMailbox, MultiPart, SinglePart};
+use mail_core::importance::Importance;
 use mail_core::message::{Mailbox, display_safe};
 
 use crate::SyncError;
@@ -56,7 +57,12 @@ pub struct OutgoingMessage {
     pub attachments: Vec<OutgoingAttachment>,
     /// Pictures the HTML body refers to by `cid:`. Ignored without HTML.
     pub inline_images: Vec<InlineImage>,
+    /// High and low importance are sent as `Importance` and `X-Priority`.
+    pub importance: Importance,
 }
+
+const IMPORTANCE: HeaderName = HeaderName::new_from_ascii_str("Importance");
+const X_PRIORITY: HeaderName = HeaderName::new_from_ascii_str("X-Priority");
 
 /// The built message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +201,11 @@ pub fn build(message: &OutgoingMessage) -> Result<BuiltMessage, SyncError> {
         .collect();
     if !references.is_empty() {
         builder = builder.header(References::from(angle(&references)));
+    }
+    if let Some((importance, priority)) = message.importance.outgoing_headers() {
+        builder = builder
+            .raw_header(HeaderValue::new(IMPORTANCE, importance.to_owned()))
+            .raw_header(HeaderValue::new(X_PRIORITY, priority.to_owned()));
     }
 
     let text = SinglePart::plain(message.body_text.clone());
@@ -347,6 +358,36 @@ mod tests {
                 data: b"%PDF-1.4".to_vec(),
             }],
             inline_images: vec![],
+            importance: Importance::Normal,
+        }
+    }
+
+    #[test]
+    fn importance_is_sent_as_two_headers_and_normal_as_none() {
+        let normal = String::from_utf8_lossy(&build(&base()).unwrap().raw).into_owned();
+        assert!(!normal.contains("Importance:") && !normal.contains("X-Priority:"));
+        for (importance, header, priority) in [
+            (
+                Importance::High,
+                "Importance: High",
+                "X-Priority: 1 (Highest)",
+            ),
+            (Importance::Low, "Importance: Low", "X-Priority: 5 (Lowest)"),
+        ] {
+            let built = build(&OutgoingMessage {
+                importance,
+                ..base()
+            })
+            .unwrap();
+            let raw = String::from_utf8_lossy(&built.raw).into_owned();
+            assert!(raw.contains(header), "{raw}");
+            assert!(raw.contains(priority), "{raw}");
+            assert_eq!(
+                mail_core::message::parse_summary(&built.raw)
+                    .unwrap()
+                    .importance,
+                importance
+            );
         }
     }
 

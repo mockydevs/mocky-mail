@@ -45,6 +45,12 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Open at login, into the tray (computers). Read from the system.
     pub start_at_login: bool,
+    /// Where the open message shows on computers: "right", "bottom" or
+    /// "off" (stored for the interface).
+    pub reading_pane: String,
+    /// Work Offline: no syncing or sending until switched off. Changes
+    /// made meanwhile wait in the queue.
+    pub work_offline: bool,
     /// Read only: what this device offers, for the Settings screen.
     pub device: Device,
 }
@@ -88,6 +94,8 @@ impl Default for Settings {
             default_reminder_mins: 15,
             close_to_tray: true,
             start_at_login: false,
+            reading_pane: "right".into(),
+            work_offline: false,
             device: Device::default(),
         }
     }
@@ -116,6 +124,9 @@ impl Settings {
         if !REMINDER_CHOICES.contains(&self.default_reminder_mins) {
             self.default_reminder_mins = 15;
         }
+        if !matches!(self.reading_pane.as_str(), "right" | "bottom" | "off") {
+            self.reading_pane = "right".into();
+        }
         self
     }
 }
@@ -131,6 +142,12 @@ pub fn load(state: &AppState) -> AppResult<Settings> {
         .and_then(|json| serde_json::from_str::<Settings>(&json).ok())
         .unwrap_or_default()
         .normalized())
+}
+
+/// Whether Work Offline is on. A settings read that fails counts as off:
+/// mail must not stop for good over a database hiccup.
+pub fn working_offline(state: &AppState) -> bool {
+    load(state).is_ok_and(|s| s.work_offline)
 }
 
 fn device() -> Device {
@@ -189,9 +206,16 @@ pub fn set_settings(
             })?;
         }
     }
+    let was_offline = working_offline(&state);
     let json = serde_json::to_string(&settings)
         .map_err(|e| crate::error::AppError::internal(e.to_string()))?;
     state.store.set_setting(KEY, &json)?;
+    if was_offline != settings.work_offline {
+        // Switched on: the engines hang up; off: they connect and send what
+        // waited, and the outbox sends.
+        state.wake_sync(None);
+        state.outbox_wake.notify_one();
+    }
     Ok(as_shown(&app, settings))
 }
 
@@ -216,9 +240,13 @@ mod tests {
             default_reminder_mins: 7,
             close_to_tray: false,
             start_at_login: false,
+            reading_pane: "sideways".into(),
+            work_offline: true,
             device: Device::default(),
         }
         .normalized();
+        assert_eq!(s.reading_pane, "right");
+        assert!(s.work_offline);
         assert_eq!(s.theme, "system");
         assert_eq!(s.remote_images, "block");
         assert!(!s.notifications);
@@ -248,5 +276,11 @@ mod tests {
         )
         .unwrap_or_default();
         assert!(s.sound);
+        // Older settings: reading pane on the right, online.
+        assert_eq!(s.reading_pane, "right");
+        assert!(!s.work_offline);
+        let json = serde_json::to_value(Settings::default()).unwrap_or_default();
+        assert_eq!(json["readingPane"], "right");
+        assert_eq!(json["workOffline"], false);
     }
 }

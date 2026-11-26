@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use mail_core::compose::parse_address_list;
 use mail_core::folders::FolderRole;
+use mail_core::importance::Importance;
 use mail_core::limits::estimate_message_size;
 use mail_core::message::{
     Mailbox, attachment_bytes, make_preview, parse_body, parse_summary, safe_file_name,
@@ -59,6 +60,9 @@ pub struct Draft {
     /// Message-ID of the saved draft this replaces.
     #[serde(default)]
     draft_message_id: Option<String>,
+    /// High or low importance, sent as headers; normal sends none.
+    #[serde(default)]
+    importance: Importance,
 }
 
 /// An outbox row for the interface (`OutboxEntry` in `docs/ipc.md`).
@@ -202,6 +206,7 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
         references: draft.references.clone(),
         attachments,
         inline_images,
+        importance: draft.importance,
     };
     Ok((account, message))
 }
@@ -326,6 +331,13 @@ pub async fn save_draft(
     state: State<'_, Arc<AppState>>,
     draft: Draft,
 ) -> AppResult<DraftSaved> {
+    if crate::settings::working_offline(&state) {
+        // The same answer as without a network, so compose keeps the draft.
+        return Err(AppError::new(
+            "connect",
+            "You're working offline. Drafts are saved to the server once Work Offline is off.",
+        ));
+    }
     let (account, mut message) = prepare(&state, &draft).await?;
     let bcc: Vec<String> = message.bcc.iter().map(|m| m.address.clone()).collect();
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
@@ -506,6 +518,8 @@ pub async fn outbox_edit(
         attachments,
         reply_to_message_id: message.entry.reply_to_message_id,
         draft_message_id: None,
+        // Editing a queued message keeps the importance it was sent with.
+        importance: summary.importance,
     })
 }
 
@@ -552,7 +566,8 @@ pub async fn attachments_for_draft(
 /// The worker: runs for the life of the app.
 pub async fn run(app: AppHandle, state: Arc<AppState>) {
     loop {
-        let wait = match Box::pin(process(&app, &state)).await {
+        let offline = crate::settings::working_offline(&state);
+        let wait = match Box::pin(process(&app, &state, offline)).await {
             Ok(wait) => wait,
             Err(error) => {
                 eprintln!("outbox: {error}");
@@ -566,10 +581,20 @@ pub async fn run(app: AppHandle, state: Arc<AppState>) {
     }
 }
 
-async fn process(app: &AppHandle, state: &AppState) -> AppResult<Duration> {
+/// One pass over the Outbox. With Work Offline on, nothing goes out (no
+/// network at all); only cancelled messages are cleared away.
+async fn process(app: &AppHandle, state: &AppState, offline: bool) -> AppResult<Duration> {
     let mut wait = MAX_IDLE;
     for entry in state.store.list_outbox()? {
         let t = now();
+        if offline {
+            if matches!(entry.item.state, OutboxState::Cancelled)
+                && let Err(error) = forget(app, state, &entry.id)
+            {
+                eprintln!("outbox: {error}");
+            }
+            continue;
+        }
         let result = match entry.item.state {
             OutboxState::Queued {
                 next_attempt_at, ..

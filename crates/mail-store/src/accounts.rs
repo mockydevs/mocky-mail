@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Store;
 use crate::error::{Result, StoreError};
-use crate::ids::{new_id, to_i64, to_u64};
+use crate::ids::{new_id, to_i64, to_u32, to_u64};
 
 /// How the account signs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -121,13 +121,43 @@ pub struct Account {
     pub size_limit_bytes: Option<u64>,
     /// When the account was added.
     pub created_at: UnixSeconds,
+    /// Place in the sidebar, from 0: accounts are listed by it.
+    pub sort_order: u32,
+    /// Months of mail kept in full on this device; `None` for all.
+    pub sync_months: Option<u32>,
 }
 
-/// Column list shared by the account queries (a literal, so the SQL stays static).
+impl Account {
+    /// A Gmail account (Google sign-in, or Gmail's IMAP server), whose
+    /// categories are Gmail labels.
+    #[must_use]
+    pub fn is_gmail(&self) -> bool {
+        let host = self.imap.host.trim_end_matches('.');
+        self.auth == AuthKind::Google
+            || host.eq_ignore_ascii_case("imap.gmail.com")
+            || host.eq_ignore_ascii_case("imap.googlemail.com")
+    }
+}
+
+/// The sidebar order: the user's, then accounts never placed (added since,
+/// or before any reorder) oldest first.
+macro_rules! account_order {
+    () => {
+        "sort_order IS NULL, sort_order, created_at, rowid"
+    };
+}
+
+/// Column list shared by the account queries (a literal, so the SQL stays
+/// static). The last one is the account's place in the sidebar.
 macro_rules! account_columns {
     () => {
-        "id, email, display_name, auth, color, imap_host, imap_port, imap_security, \
-         smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at"
+        concat!(
+            "id, email, display_name, auth, color, imap_host, imap_port, imap_security, \
+             smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at, sync_months, \
+             row_number() OVER (ORDER BY ",
+            account_order!(),
+            ") - 1"
+        )
     };
 }
 
@@ -141,6 +171,8 @@ struct AccountRow {
     smtp: (String, u16, String),
     size_limit_bytes: Option<i64>,
     created_at: i64,
+    sync_months: Option<i64>,
+    position: i64,
 }
 
 impl AccountRow {
@@ -155,6 +187,8 @@ impl AccountRow {
             smtp: (row.get(8)?, row.get(9)?, row.get(10)?),
             size_limit_bytes: row.get(11)?,
             created_at: row.get(12)?,
+            sync_months: row.get(13)?,
+            position: row.get(14)?,
         })
     }
 
@@ -180,6 +214,11 @@ impl AccountRow {
                 .map(|v| to_u64(v, "size limit"))
                 .transpose()?,
             created_at: to_u64(self.created_at, "account created_at")?,
+            sort_order: to_u32(self.position, "account order")?,
+            sync_months: self
+                .sync_months
+                .map(|v| to_u32(v, "sync window"))
+                .transpose()?,
         })
     }
 }
@@ -219,7 +258,8 @@ impl Store {
         self.get_account(&id)
     }
 
-    /// All accounts, oldest first.
+    /// All accounts in the sidebar's order: as the user arranged them,
+    /// then (before any rearranging, or added since) oldest first.
     ///
     /// # Errors
     /// Fails on a database error or an unreadable row.
@@ -228,7 +268,8 @@ impl Store {
         let mut stmt = conn.prepare_cached(concat!(
             "SELECT ",
             account_columns!(),
-            " FROM accounts ORDER BY created_at, rowid"
+            " FROM accounts ORDER BY ",
+            account_order!()
         ))?;
         let rows = stmt.query_map([], AccountRow::read)?;
         rows.map(|row| row?.into_account()).collect()
@@ -242,9 +283,9 @@ impl Store {
         self.conn()
             .query_row(
                 concat!(
-                    "SELECT ",
+                    "SELECT * FROM (SELECT ",
                     account_columns!(),
-                    " FROM accounts WHERE id = ?1"
+                    " FROM accounts) WHERE id = ?1"
                 ),
                 params![id],
                 AccountRow::read,
@@ -252,6 +293,55 @@ impl Store {
             .optional()?
             .ok_or(StoreError::NotFound("account"))?
             .into_account()
+    }
+
+    /// Put the accounts in this order in the sidebar. `ids` must name every
+    /// account exactly once.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] when `ids` leaves one out, repeats one or
+    /// names one that doesn't exist.
+    pub fn reorder_accounts<S: AsRef<str>>(&self, ids: &[S]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let existing: Vec<String> = tx
+            .prepare("SELECT id FROM accounts")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut seen: Vec<&str> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = id.as_ref();
+            if seen.contains(&id) || !existing.iter().any(|e| e == id) {
+                return Err(StoreError::Invalid("account order"));
+            }
+            seen.push(id);
+        }
+        if seen.len() != existing.len() {
+            return Err(StoreError::Invalid("account order"));
+        }
+        {
+            let mut stmt = tx.prepare("UPDATE accounts SET sort_order = ?2 WHERE id = ?1")?;
+            for (position, id) in seen.iter().enumerate() {
+                stmt.execute(params![id, i64::try_from(position).unwrap_or(i64::MAX)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keep `months` months of mail in full (`None`: all of it).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] if there is no such account.
+    pub fn set_account_sync_months(&self, id: &str, months: Option<u32>) -> Result<()> {
+        let changed = self.conn().execute(
+            "UPDATE accounts SET sync_months = ?2 WHERE id = ?1",
+            params![id, months],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound("account"));
+        }
+        Ok(())
     }
 
     /// Change the name shown on sent mail.
@@ -359,6 +449,85 @@ mod tests {
         ));
     }
 
+    fn emails(store: &Store) -> Vec<(String, u32)> {
+        store
+            .list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.email, a.sort_order))
+            .collect()
+    }
+
+    #[test]
+    fn accounts_keep_the_order_they_are_put_in_and_new_ones_go_last() {
+        let store = Store::open_in_memory().unwrap();
+        let a = add_account(&store, "a@example.com");
+        let b = add_account(&store, "b@example.com");
+        let c = add_account(&store, "c@example.com");
+        assert_eq!(
+            emails(&store),
+            [
+                ("a@example.com".to_owned(), 0),
+                ("b@example.com".to_owned(), 1),
+                ("c@example.com".to_owned(), 2)
+            ]
+        );
+        store.reorder_accounts(&[&c, &a, &b]).unwrap();
+        let d = add_account(&store, "d@example.com");
+        assert_eq!(
+            emails(&store),
+            [
+                ("c@example.com".to_owned(), 0),
+                ("a@example.com".to_owned(), 1),
+                ("b@example.com".to_owned(), 2),
+                ("d@example.com".to_owned(), 3)
+            ]
+        );
+        assert_eq!(store.get_account(&b).unwrap().sort_order, 2);
+        assert_eq!(store.get_account(&d).unwrap().sort_order, 3);
+        // Every account exactly once, or nothing changes.
+        for bad in [
+            vec![c.clone(), a.clone(), b.clone()],
+            vec![c.clone(), a.clone(), b.clone(), d.clone(), d.clone()],
+            vec![c.clone(), a.clone(), b.clone(), "nope".to_owned()],
+            vec![a.clone(), a.clone(), b.clone(), c.clone()],
+        ] {
+            assert!(matches!(
+                store.reorder_accounts(&bad),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+        assert_eq!(store.get_account(&c).unwrap().sort_order, 0);
+    }
+
+    #[test]
+    fn sync_window_is_saved_per_account() {
+        let store = Store::open_in_memory().unwrap();
+        let id = add_account(&store, "a@example.com");
+        assert_eq!(store.get_account(&id).unwrap().sync_months, None);
+        store.set_account_sync_months(&id, Some(6)).unwrap();
+        assert_eq!(store.get_account(&id).unwrap().sync_months, Some(6));
+        store.set_account_sync_months(&id, None).unwrap();
+        assert_eq!(store.get_account(&id).unwrap().sync_months, None);
+        assert!(matches!(
+            store.set_account_sync_months("nope", Some(1)),
+            Err(StoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn gmail_accounts_are_recognised() {
+        let store = Store::open_in_memory().unwrap();
+        let id = add_account(&store, "a@example.com");
+        let mut account = store.get_account(&id).unwrap();
+        assert!(!account.is_gmail());
+        account.imap.host = "imap.gmail.com".into();
+        assert!(account.is_gmail());
+        account.imap.host = "imap.example.com".into();
+        account.auth = AuthKind::Google;
+        assert!(account.is_gmail());
+    }
+
     #[test]
     fn account_serializes_like_the_ipc_contract() {
         let store = Store::open_in_memory().unwrap();
@@ -368,6 +537,8 @@ mod tests {
         assert_eq!(json["auth"], "password");
         assert_eq!(json["imap"]["security"], "tls");
         assert!(json["sizeLimitBytes"].is_null());
+        assert_eq!(json["sortOrder"], 0);
+        assert!(json["syncMonths"].is_null());
     }
 
     #[test]
