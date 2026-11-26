@@ -6,7 +6,10 @@ import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import java.util.Locale
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,6 +41,27 @@ class MainActivity : TauriActivity() {
     // The page asks for an email link the app was opened with; the link is
     // only ever read (parsed by Rust) to fill in a new message.
     webView.addJavascriptInterface(Intents(), "MockyIntents")
+    // The app draws under the status and navigation bars (edge to edge), and
+    // the WebView reports CSS env(safe-area-inset-*) as 0, so the page gets
+    // the bars' sizes from here: as --safe-* CSS variables, pushed on every
+    // change and read once at start-up through MockyInsets.
+    webView.addJavascriptInterface(Insets(), "MockyInsets")
+    ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+      val density = view.resources.displayMetrics.density
+      fun css(px: Int) = String.format(Locale.US, "\"%.1fpx\"", px / density)
+      insetsJson = "{\"top\":${css(bars.top)},\"right\":${css(bars.right)},\"bottom\":${css(bars.bottom)},\"left\":${css(bars.left)}}"
+      (view as WebView).evaluateJavascript("window.__mockyInsets && window.__mockyInsets($insetsJson)", null)
+      insets
+    }
+  }
+
+  /** The system bars' sizes in CSS pixels, as JSON (see onWebViewCreate). */
+  @Volatile private var insetsJson = "{}"
+
+  private inner class Insets {
+    @JavascriptInterface
+    fun get(): String = insetsJson
   }
 
   private inner class Intents {

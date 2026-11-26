@@ -3,6 +3,12 @@
 :root,
 :root[data-theme='light'] {
   color-scheme: light;
+  /* Space taken by the phone's status and navigation bars. Android sets these
+     itself (see useTheme.ts); elsewhere env() is right. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
   --surface: #ffffff;
   --list: #fafaf9;
   --chrome: #f3f3f1;
