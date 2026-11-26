@@ -82,7 +82,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
+      # One cache per image: Ubuntu 22.04 and 24.04 would otherwise share
+      # one, and build scripts and proc-macros compiled against 24.04's
+      # newer glibc then fail to load on 22.04.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
