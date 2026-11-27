@@ -7,7 +7,9 @@ import { App } from '../app/App';
 
 export function renderApp(options: MockOptions = {}, api: MockMailApi = createMockMailApi(options)) {
   const user = userEvent.setup();
-  render(<App api={api} now={() => MOCK_NOW} />);
+  // The interface reads the same clock as the mock backend: a test that
+  // moves time (options.now) moves both, whatever the machine's time zone.
+  render(<App api={api} now={options.now ?? (() => MOCK_NOW)} />);
   return { user, api };
 }
 
