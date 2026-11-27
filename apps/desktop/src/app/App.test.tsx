@@ -280,7 +280,7 @@ describe('sync status and notifications', () => {
 
     cleanup();
     chime.mockClear();
-    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15, closeToTray: true, startAtLogin: false, readingPane: 'right', workOffline: false, readReceipts: 'ask', device: { tray: true, startAtLogin: true } } });
+    const quiet = renderApp({ settings: { theme: 'system', remoteImages: 'block', notifications: true, sound: false, undoSendSecs: 5, markRead: 'open', threads: true, focusedInbox: false, checkEveryMins: 2, markReadDelaySecs: 3, eventReminders: true, defaultReminderMins: 15, closeToTray: true, startAtLogin: false, readingPane: 'right', workOffline: false, readReceipts: 'ask', signByDefault: false, encryptWhenPossible: false, device: { tray: true, startAtLogin: true } } });
     await rows();
     act(() => {
       quiet.api.emit('mail://new-mail', { accountId: 'work', count: 1 });

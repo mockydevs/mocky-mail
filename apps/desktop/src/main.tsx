@@ -9,7 +9,9 @@ import './app/app.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { MOCK_MESSAGES } from './api/mock/mockData';
 import { createMockMailApi } from './api/mock/mockMailApi';
+import { MOCK_SECURITY_MESSAGES } from './api/mock/mockSecurity';
 import { createTauriMailApi } from './api/tauriMailApi';
 import { App } from './app/App';
 import { composeWindowKey } from './features/compose/ComposeWindow';
@@ -20,7 +22,15 @@ if (!root) throw new Error('Missing #root element');
 
 // Inside the desktop app talk to the Rust backend; in a plain browser
 // (vite dev) use the in-memory mock so the interface can be worked on alone.
-const api = '__TAURI_INTERNALS__' in window ? createTauriMailApi() : createMockMailApi({ now: () => Math.floor(Date.now() / 1000), simulateDelivery: true });
+const api =
+  '__TAURI_INTERNALS__' in window
+    ? createTauriMailApi()
+    : createMockMailApi({
+        now: () => Math.floor(Date.now() / 1000),
+        simulateDelivery: true,
+        // Signed and encrypted samples, so every security state can be seen.
+        messages: [...MOCK_MESSAGES, ...MOCK_SECURITY_MESSAGES],
+      });
 
 createRoot(root).render(
   <StrictMode>

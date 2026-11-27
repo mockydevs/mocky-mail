@@ -34,6 +34,7 @@ import { SandboxedHtml } from './SandboxedHtml';
 import { InvitationCard } from '../calendar/InvitationCard';
 import { ThreadHistory } from './ThreadHistory';
 import { ReadReceiptBar } from './ReadReceiptBar';
+import { MessageSecurity } from './MessageSecurity';
 
 export interface ReaderActions {
   onReply: (message: MessageDetail, all: boolean) => void;
@@ -91,6 +92,8 @@ interface Props extends ReaderActions {
   workOffline?: boolean;
   /** Settings › Reading: what to do when a message asks for a read receipt. Default: ask. */
   readReceipts?: 'ask' | 'always' | 'never';
+  /** Open Settings › Security (a locked message needs a key added there). */
+  onOpenSecurity?: (() => void) | undefined;
 }
 
 /** Free mail services: trusting the whole domain would trust everyone on it. */
@@ -533,6 +536,17 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
     </>
   );
 
+  // Signature and encryption: what checking them found, above the message.
+  const security = (
+    <MessageSecurity
+      message={message}
+      onChanged={() => {
+        setTrustRevision((r) => r + 1);
+      }}
+      onOpenSecurity={props.onOpenSecurity}
+    />
+  );
+
   const textBody = (
     <div className="reader__text">
       {linkify(message.text ?? '').map((part, i) =>
@@ -733,6 +747,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
                 </div>
               </div>
             )}
+            {security}
             {blocked && (
               <div className="images-strip" role="status">
                 <Icon name="image" size={16} />
@@ -1050,6 +1065,8 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
             )}
           </div>
         </header>
+
+        {security}
 
         {message.html !== null && message.blockedRemoteImages > 0 && !remoteShown && (
           <div className="images-bar" role="status">

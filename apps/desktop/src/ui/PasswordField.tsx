@@ -5,7 +5,8 @@ import { Icon } from './Icon';
 interface Props {
   id: string;
   inputRef: Ref<HTMLInputElement>;
-  autoComplete: 'current-password' | 'new-password';
+  /** `off`: a password used once (a key file's), which nothing should offer to save. */
+  autoComplete: 'current-password' | 'new-password' | 'off';
   describedBy?: string;
   invalid?: boolean;
 }

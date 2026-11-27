@@ -15,6 +15,8 @@ interface Props {
   invalid: boolean;
   describedBy: string | undefined;
   autoFocus: boolean;
+  /** Addresses (lower case) that can't get encrypted mail: their chips show in red. */
+  unencryptable?: ReadonlySet<string>;
 }
 
 const join = (entries: readonly string[]) => entries.join(', ');
@@ -47,7 +49,7 @@ const SUGGEST_DELAY_MS = 120;
  * Backspace on an empty box takes the last chip back for editing. While
  * typing, people you have written to or heard from are suggested below.
  */
-export function RecipientField({ id, label, value, onChange, invalid, describedBy, autoFocus }: Props) {
+export function RecipientField({ id, label, value, onChange, invalid, describedBy, autoFocus, unencryptable }: Props) {
   const api = useMailApi();
   const [text, setText] = useState('');
   const all = splitRecipients(value);
@@ -151,10 +153,16 @@ export function RecipientField({ id, label, value, onChange, invalid, describedB
           {chips.map((entry, index) => {
             const address = addressOf(entry);
             const ok = address !== null && isPlausibleAddress(address);
+            const noKey = ok && unencryptable?.has(address.toLowerCase()) === true;
             return (
               // Entries are de-duplicated on send, not here, so the index keeps keys unique.
-              <li key={`${index}-${entry}`} className={ok ? 'chip' : 'chip chip--bad'} title={entry}>
+              <li
+                key={`${index}-${entry}`}
+                className={ok && !noKey ? 'chip' : 'chip chip--bad'}
+                title={noKey ? `${entry}: can’t encrypt to this recipient` : entry}
+              >
                 <span className="chip__text">{chipLabel(entry)}</span>
+                {noKey && <span className="visually-hidden"> (can’t encrypt to them)</span>}
                 <button
                   type="button"
                   className="chip__remove"

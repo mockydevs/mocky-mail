@@ -15,6 +15,7 @@ import { OutOfOffice } from './OutOfOffice';
 import { playChime } from '../notifications/chime';
 import { accountErrorCopy } from '../accounts/providers';
 import { SignatureEditor } from './SignatureEditor';
+import { SecuritySection } from '../security/SecuritySection';
 
 const MARK_READ: readonly [MarkReadSetting, string][] = [
   ['open', 'Mark as read as soon as I open a message'],
@@ -67,6 +68,8 @@ interface Props {
   folders?: Readonly<Record<string, Folder[]>>;
   /** A toast (rules run now say what they did). */
   onNotice?: (notice: Notice) => void;
+  /** Open at a section: `security` scrolls to Settings › Security. */
+  section?: 'security' | undefined;
 }
 
 export function SettingsView({
@@ -81,6 +84,7 @@ export function SettingsView({
   phone = false,
   folders,
   onNotice,
+  section,
 }: Props) {
   const id = useId();
   const api = useMailApi();
@@ -413,6 +417,8 @@ export function SettingsView({
               </p>
             </fieldset>
           )}
+
+          <SecuritySection settings={settings} onChange={onChange} accounts={accounts} focus={section === 'security'} />
 
           {accounts.length > 0 && <OutOfOffice accounts={accounts} />}
 

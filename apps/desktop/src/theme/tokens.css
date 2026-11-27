@@ -43,6 +43,10 @@
   --error-bg: #fef0ee;
   --error-text: #8f1d14;
   --error-border: #f5c2bc;
+  /* A signature that checks out. */
+  --ok-bg: #e8f5ec;
+  --ok-text: #14532d;
+  --ok-border: #b7dfc4;
   --tab-on-bg: #1c1c1a;
   --tab-on-text: #ffffff;
   --focus: #2450c8;
@@ -97,6 +101,9 @@
   --error-bg: #3b1715;
   --error-text: #ffb4ab;
   --error-border: #5e2420;
+  --ok-bg: #12301d;
+  --ok-text: #9be0b3;
+  --ok-border: #23502f;
   --tab-on-bg: #ececea;
   --tab-on-text: #17181b;
   --focus: #8fb0ff;

@@ -31,6 +31,8 @@ import type {
   RecipientCheck,
   Rule,
   RuleAction,
+  SecurityKey,
+  SecurityKind,
   ServerSuggestion,
   Settings,
 } from '../types';
@@ -46,6 +48,7 @@ import {
   MOCK_SETTINGS,
 } from './mockData';
 import { ruleMatches, serverStatusOf, validateRule } from './mockRules';
+import { MOCK_ACCOUNT_KEYS, MOCK_IMPORTABLE, MOCK_KEYS, type MockAccountKeys, type MockImportable } from './mockSecurity';
 import { matchesSearch, namesFolder, parseSearchQuery } from './mockSearch';
 
 /** A stored message; `remoteHtml` is what get_message returns when remote images are allowed. */
@@ -92,6 +95,14 @@ export interface MockOptions {
   rules?: Rule[];
   /** Senders whose pictures always load; default: none. */
   imageSenders?: ImageSender[];
+  /** Keys and certificates on the device; default: samples (yours and some contacts'). */
+  keys?: SecurityKey[];
+  /** Each account's chosen keys, by account id; missing: none, S/MIME preferred. */
+  accountKeys?: Record<string, MockAccountKeys>;
+  /** What importKey's file picker returns; null: the user cancels it. Default: a password-protected .p12. */
+  importable?: MockImportable | null;
+  /** exportPublicKey's save dialog is cancelled. */
+  exportCancelled?: boolean;
 }
 
 export interface MockMailApi extends MailApi {
@@ -115,7 +126,12 @@ export interface MockMailApi extends MailApi {
   launchWith(url: string): void;
   /** A new message arrives, as a sync would bring it in. */
   receive(message: MockMessage): void;
+  /** Public keys saved with exportPublicKey (key ids), for assertions. */
+  readonly exportedKeys: string[];
 }
+
+const SECURITY_KINDS: readonly SecurityKind[] = ['smime', 'openpgp'];
+const sameFingerprint = (a: string | null, b: string) => a !== null && a.replace(/\s+/g, '').toUpperCase() === b.replace(/\s+/g, '').toUpperCase();
 
 /** 1x1 PNG, a one-line PDF and some text: what the dev preview shows. */
 const MOCK_PNG_BASE64 =
@@ -237,6 +253,8 @@ function listItem(m: MockMessage): MessageListItem {
     categories: m.categories,
     flagDue: m.flagDue,
     size: m.size,
+    ...(m.signed ? { signed: true } : {}),
+    ...(m.encrypted ? { encrypted: true } : {}),
     threadCount: 1,
   };
 }
@@ -351,6 +369,40 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const renumber = (list: Rule[]) => list.map((r, order) => ({ ...r, order }));
   let rules: Rule[] = renumber(clone(options.rules ?? []));
   let imageSenders: ImageSender[] = clone(options.imageSenders ?? []);
+  let keys: SecurityKey[] = clone(options.keys ?? MOCK_KEYS);
+  const accountKeys = new Map<string, MockAccountKeys>(Object.entries(clone(options.accountKeys ?? MOCK_ACCOUNT_KEYS)));
+  const importable = options.importable === undefined ? MOCK_IMPORTABLE : options.importable;
+  const exportedKeys: string[] = [];
+  const keysOf = (accountId: string): MockAccountKeys =>
+    accountKeys.get(accountId) ?? { smime: null, openpgp: null, preferred: 'smime' };
+  const usable = (k: SecurityKey) => k.expires === null || k.expires > now();
+  /** Whether a message of this kind can be encrypted to the address (a known, current key). */
+  const canEncryptTo = (address: string, kind: SecurityKind) => {
+    const a = address.toLowerCase();
+    return keys.some((k) => k.kind === kind && k.canEncrypt && usable(k) && k.addresses.some((x) => x.toLowerCase() === a));
+  };
+  /** The account's own key of this kind, if it still exists and works. */
+  const ownKey = (accountId: string, kind: SecurityKind) => {
+    const keyId = keysOf(accountId)[kind];
+    return keys.find((k) => k.id === keyId && k.isOwn && usable(k)) ?? null;
+  };
+  /**
+   * An OpenPGP signature is verified once you say the key is really the
+   * signer's, as the backend decides when the message is opened.
+   */
+  const withTrust = (m: MockMessage): MockMessage => {
+    const sig = m.signature;
+    if (sig?.kind !== 'openpgp' || (sig.result !== 'verified' && sig.result !== 'unverifiedSigner')) return m;
+    const signer = keys.find((k) => k.kind === 'openpgp' && sameFingerprint(sig.signer?.fingerprint ?? null, k.fingerprint));
+    if (!signer) return m;
+    const who = signer.owner;
+    return {
+      ...m,
+      signature: signer.trusted || signer.isOwn
+        ? { ...sig, result: 'verified', detail: `You’ve said this key belongs to ${who}, and the message is unchanged.` }
+        : { ...sig, result: 'unverifiedSigner', detail: `The message is unchanged, but you haven’t said that this key really belongs to ${who}.` },
+    };
+  };
   /** The latest server write started for each rule. */
   const serverWrites = new Map<string, number>();
   /** Whether pictures from this sender always load. */
@@ -519,6 +571,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     openedWindows,
     openedComposeWindows,
     answeredReceipts,
+    exportedKeys,
     launchWith: (url) => {
       launchLink = url;
     },
@@ -880,6 +933,106 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         return draft;
       }),
 
+    listKeys: () => run('listKeys', () => keys),
+
+    importKey: (password) =>
+      run('importKey', () => {
+        if (importable === null) return null;
+        if (importable.password !== null && password !== importable.password) {
+          throw appError(
+            'auth',
+            password === null || password === ''
+              ? 'This file is protected with a password. Enter it and try again.'
+              : 'That password didn’t open the file. Check it and try again.',
+          );
+        }
+        const added = new Set(importable.keys.map((k) => k.id));
+        keys = [...keys.filter((k) => !added.has(k.id)), ...clone(importable.keys)];
+        return keys;
+      }),
+
+    exportPublicKey: (id) =>
+      run('exportPublicKey', () => {
+        const found = keys.find((k) => k.id === id);
+        if (!found) throw appError('not_found', 'That key or certificate is no longer on this device.');
+        if (options.exportCancelled) return null;
+        exportedKeys.push(id);
+        const name = found.owner.replace(/[\\/:*?"<>|]/g, '_');
+        return `/home/you/Documents/${name}${found.kind === 'smime' ? '.cer' : '.asc'}`;
+      }),
+
+    removeKey: (id) =>
+      run('removeKey', () => {
+        const found = keys.find((k) => k.id === id);
+        if (!found) throw appError('not_found', 'That key or certificate is no longer on this device.');
+        // Keys in a system store (Windows, the keychain, a smart card, GnuPG) are removed there.
+        if (found.source !== 'mocky') throw appError('invalid', 'This one is kept outside Mocky Mail. Remove it where it is kept.');
+        keys = keys.filter((k) => k.id !== id);
+        for (const [accountId, chosen] of accountKeys) {
+          accountKeys.set(accountId, {
+            ...chosen,
+            smime: chosen.smime === id ? null : chosen.smime,
+            openpgp: chosen.openpgp === id ? null : chosen.openpgp,
+          });
+        }
+        return keys;
+      }),
+
+    setKeyTrusted: (id, trusted) =>
+      run('setKeyTrusted', () => {
+        const found = keys.find((k) => k.id === id);
+        if (!found) throw appError('not_found', 'That key or certificate is no longer on this device.');
+        if (found.isOwn) throw appError('invalid', 'Your own keys are always trusted.');
+        keys = keys.map((k) => (k.id === id ? { ...k, trusted } : k));
+        return keys;
+      }),
+
+    setAccountKey: (accountId, kind, keyId) =>
+      run('setAccountKey', () => {
+        const acc = account(accountId);
+        if (keyId !== null) {
+          const found = keys.find((k) => k.id === keyId);
+          if (!found?.isOwn) throw appError('not_found', 'That key or certificate is no longer on this device.');
+          if (found.kind !== kind) throw appError('invalid', 'That is not the right kind of key.');
+          if (found.source !== 'mocky') {
+            throw appError('invalid', 'Keys kept outside Mocky Mail can’t be used to sign yet. Export it and import the file here.');
+          }
+          if (!found.addresses.some((a) => a.toLowerCase() === acc.email.toLowerCase())) {
+            throw appError('invalid', `That ${kind === 'smime' ? 'certificate' : 'key'} isn't for ${acc.email}.`);
+          }
+        }
+        accountKeys.set(accountId, { ...keysOf(accountId), [kind]: keyId });
+      }),
+
+    getAccountKeys: (accountId) =>
+      run('getAccountKeys', () => {
+        account(accountId);
+        return keysOf(accountId);
+      }),
+
+    setPreferredKind: (accountId, kind) =>
+      run('setPreferredKind', () => {
+        account(accountId);
+        if (!SECURITY_KINDS.includes(kind)) throw appError('invalid', 'Unknown kind.');
+        accountKeys.set(accountId, { ...keysOf(accountId), preferred: kind });
+      }),
+
+    checkEncryption: (accountId, addresses, kind) =>
+      run('checkEncryption', () => {
+        account(accountId);
+        const seen = new Set<string>();
+        const recipients = addresses
+          .map((a) => a.trim())
+          .filter((a) => {
+            const key = a.toLowerCase();
+            if (a === '' || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .map((address) => ({ address, canEncrypt: canEncryptTo(address, kind) }));
+        return { kind, recipients, ownKey: ownKey(accountId, kind) !== null };
+      }),
+
     takeMailto: () =>
       run('takeMailto', () => {
         const url = launchLink;
@@ -917,7 +1070,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           messages = messages.map((x) => (x.id === id && x.readReceipt ? { ...x, readReceipt: { ...x.readReceipt, answered: true } } : x));
           answeredReceipts.push({ messageId: id, send: true });
         }
-        const { remoteHtml, ...detail } = stored(id);
+        const { remoteHtml, ...detail } = withTrust(stored(id));
         const trusted = remoteHtml !== undefined && trustsImages(detail.from?.address);
         if (!remoteHtml || !(allowRemote || trusted)) return detail;
         return { ...detail, html: remoteHtml, blockedRemoteImages: 0, ...(trusted ? { imagesTrusted: true } : {}) };
@@ -1177,6 +1330,20 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     sendMessage: (draft) =>
       run('sendMessage', () => {
         check(draft);
+        if (draft.sign === true || draft.encrypt === true) {
+          const kind = draft.securityKind ?? keysOf(draft.accountId).preferred;
+          const label = kind === 'smime' ? 'certificate' : 'key';
+          if (!ownKey(draft.accountId, kind)) {
+            throw appError('config', `This account has no ${label} to sign or encrypt with. Add one in Settings › Security.`);
+          }
+          if (draft.encrypt === true) {
+            const all = [draft.to, draft.cc, draft.bcc].flatMap((field) => parseRecipients(field).valid);
+            const missing = all.filter((address) => !canEncryptTo(address, kind));
+            if (missing.length > 0) {
+              throw appError('invalid', `Can't encrypt to ${missing.join(', ')}: there's no ${label} for them.`);
+            }
+          }
+        }
         const entry: OutboxEntry = {
           id: `q${String(seq++)}`,
           accountId: draft.accountId,
