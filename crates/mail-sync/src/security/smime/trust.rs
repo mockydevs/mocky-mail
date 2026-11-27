@@ -141,6 +141,15 @@ fn pem_certificates(bytes: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
+#[cfg(not(any(windows, target_os = "android")))]
+fn system_roots() -> Vec<Vec<u8>> {
+    rustls_native_certs::load_native_certs()
+        .certs
+        .into_iter()
+        .map(|cert| cert.as_ref().to_vec())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use der::{Decode as _, EncodePem as _, pem::LineEnding};
@@ -171,13 +180,4 @@ mod tests {
         );
         assert!(pem_certificates(CA).is_empty());
     }
-}
-
-#[cfg(not(any(windows, target_os = "android")))]
-fn system_roots() -> Vec<Vec<u8>> {
-    rustls_native_certs::load_native_certs()
-        .certs
-        .into_iter()
-        .map(|cert| cert.as_ref().to_vec())
-        .collect()
 }
