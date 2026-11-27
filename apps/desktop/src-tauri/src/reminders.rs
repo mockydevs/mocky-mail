@@ -1,22 +1,31 @@
-//! Event reminders: a notification before each calendar event, from the
-//! event's own alarms (`VALARM`, as set here, in webmail or by whoever sent
-//! the invitation), and "Follow up: <subject>" when a flagged message's
-//! follow-up date comes.
+//! Reminders: the due list (event alarms, task reminders and flagged
+//! messages' follow-up dates that have come), with dismiss and snooze, and
+//! a desktop notification for each as it comes due.
 //!
-//! Every half minute the app looks for reminders that fell due since the
-//! last look. That time is kept in the database, so a reminder that came
-//! due while the app was closed still shows when it opens, as long as the
-//! event hasn't ended; and nothing shows twice.
+//! Event reminders come from the event's own alarms (`VALARM`, as set
+//! here, in webmail or by whoever sent the invitation). Every half minute
+//! the app looks for reminders that went off since the last look. That
+//! time is kept in the database, so a reminder that came due while the app
+//! was closed still shows when it opens, as long as the event hasn't
+//! ended; and nothing shows twice. Dismissed and snoozed reminders are
+//! kept in the database too, so they stay that way after a restart.
+//!
+//! The due list's logic is `mail_core::reminders`; this gathers what may
+//! be due and shows it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Local, NaiveTime, TimeZone, Utc};
 use mail_core::ical;
-use tauri::AppHandle;
+use mail_core::reminders::{
+    self as due_logic, Candidate, DueReminder, MAX_SNOOZE_MINS, ReminderKind, ReminderState,
+};
+use serde_json::json;
+use tauri::{AppHandle, Emitter, State};
 
-use crate::error::AppResult;
-use crate::state::{AppState, now};
+use crate::error::{AppError, AppResult};
+use crate::state::{AppState, lock, now};
 
 const TICK: Duration = Duration::from_secs(30);
 /// When reminders were last looked for (Unix seconds).
@@ -25,6 +34,8 @@ const CHECKED_KEY: &str = "reminders:checked";
 const AHEAD: i64 = 29 * 86_400;
 /// Reminders missed while the app was closed: at most a day back.
 const MISSED: i64 = 86_400;
+/// Flags whose date passed this long ago drop off the due list.
+const FLAGS_BACK: i64 = 30 * 86_400;
 
 /// A notification to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +58,138 @@ pub fn start(app: AppHandle, state: Arc<AppState>) {
     });
 }
 
+fn unix_now() -> i64 {
+    i64::try_from(now()).unwrap_or(0)
+}
+
+/// Everything that may be due around `now`, with when it goes off.
+fn candidates(state: &AppState, now: i64) -> AppResult<Vec<Candidate>> {
+    let mut out = Vec::new();
+    if crate::settings::load(state)?.event_reminders {
+        let calendars = state.store.list_calendars()?;
+        let accounts = state.store.list_accounts()?;
+        let from = now.saturating_sub(MISSED);
+        let to = now.saturating_add(AHEAD);
+        for stored in state.store.calendar_events_between(from, to)? {
+            let me = calendars
+                .iter()
+                .find(|c| c.id == stored.calendar_id)
+                .and_then(|c| accounts.iter().find(|a| a.id == c.account_id))
+                .map(|a| a.email.clone());
+            for o in ical::occurrences(&stored.ics, from, to) {
+                if o.reminders.is_empty() {
+                    continue;
+                }
+                let declined = o.attendees.iter().any(|p| {
+                    me.as_deref()
+                        .is_some_and(|me| p.email.eq_ignore_ascii_case(me))
+                        && p.status.as_deref() == Some("declined")
+                });
+                if declined {
+                    continue;
+                }
+                let (start, end) = if o.all_day {
+                    (local_midnight(o.start), local_midnight(o.end))
+                } else {
+                    (o.start, o.end)
+                };
+                out.push(Candidate {
+                    reminder: DueReminder {
+                        key: due_logic::event_key(&stored.id, o.start),
+                        kind: ReminderKind::Event,
+                        title: o.title.clone(),
+                        at: start,
+                        location: Some(o.location.trim().to_owned()).filter(|l| !l.is_empty()),
+                        event_id: Some(stored.id.clone()),
+                        recurrence_id: o.recurrence_id,
+                        task_id: None,
+                        message_id: None,
+                    },
+                    fires: o
+                        .reminders
+                        .iter()
+                        .map(|m| start.saturating_sub(i64::from(*m).saturating_mul(60)))
+                        .collect(),
+                    until: Some(end.max(start).max(start.saturating_add(1))),
+                });
+            }
+        }
+    }
+    for task in state.store.tasks_reminding_before(now)? {
+        let Some(reminder) = task.fields.reminder else {
+            continue;
+        };
+        out.push(Candidate {
+            reminder: DueReminder {
+                key: due_logic::task_key(&task.id, reminder),
+                kind: ReminderKind::Task,
+                title: task.fields.title.clone(),
+                at: task.fields.due.unwrap_or(reminder),
+                location: None,
+                event_id: None,
+                recurrence_id: None,
+                task_id: Some(task.id.clone()),
+                message_id: task.message_id.clone(),
+            },
+            fires: vec![reminder],
+            until: None,
+        });
+    }
+    for (id, subject, due) in state
+        .store
+        .flags_due_between(now.saturating_sub(FLAGS_BACK), now)?
+    {
+        out.push(Candidate {
+            reminder: DueReminder {
+                key: due_logic::flag_key(&id, due),
+                kind: ReminderKind::Flag,
+                title: follow_up(&subject).title,
+                at: due,
+                location: None,
+                event_id: None,
+                recurrence_id: None,
+                task_id: None,
+                message_id: Some(id),
+            },
+            fires: vec![due],
+            until: None,
+        });
+    }
+    Ok(out)
+}
+
+/// The due list now.
+fn due_now(state: &AppState) -> AppResult<Vec<DueReminder>> {
+    let now = unix_now();
+    let states = state.store.reminder_states()?;
+    Ok(due_logic::due_list(&candidates(state, now)?, &states, now))
+}
+
+/// Tell the interface the due list, if it changed since it was last told.
+fn publish(app: &AppHandle, state: &AppState, due: &[DueReminder], force: bool) {
+    let keys: Vec<String> = due.iter().map(|d| d.key.clone()).collect();
+    {
+        let mut last = lock(&state.due_reminders);
+        if !force && *last == keys {
+            return;
+        }
+        *last = keys;
+    }
+    if let Err(error) = app.emit("mail://reminders", json!({ "reminders": due })) {
+        eprintln!("couldn't emit reminders: {error}");
+    }
+}
+
+/// Work the due list out again now (after tasks or events changed).
+pub fn refresh(app: &AppHandle, state: &AppState) {
+    match due_now(state) {
+        Ok(due) => publish(app, state, &due, false),
+        Err(error) => eprintln!("reminders: {error}"),
+    }
+}
+
 fn tick(app: &AppHandle, state: &AppState) -> AppResult<()> {
-    let now = i64::try_from(now()).unwrap_or(0);
+    let now = unix_now();
     let last = state
         .store
         .get_setting(CHECKED_KEY)?
@@ -58,18 +199,104 @@ fn tick(app: &AppHandle, state: &AppState) -> AppResult<()> {
             t.max(now.saturating_sub(MISSED))
         });
     state.store.set_setting(CHECKED_KEY, &now.to_string())?;
-    // Flagged mail whose follow-up date came: always, it was asked for.
-    for (_, subject) in state.store.flag_due_between(last, now)? {
-        let due = follow_up(&subject);
-        crate::events::notify(app, &due.title, &due.body);
+    let all = candidates(state, now)?;
+    let states = state.store.reminder_states()?;
+    for candidate in due_logic::to_notify(&all, &states, last, now) {
+        let shown = notification(candidate, now);
+        crate::events::notify(app, &shown.title, &shown.body);
     }
-    if !crate::settings::load(state)?.event_reminders {
-        return Ok(());
-    }
-    for due in due(state, last, now)? {
-        crate::events::notify(app, &due.title, &due.body);
-    }
+    publish(app, state, &due_logic::due_list(&all, &states, now), false);
     Ok(())
+}
+
+/// The notification for a reminder.
+fn notification(candidate: &Candidate, now: i64) -> Due {
+    let r = &candidate.reminder;
+    match r.kind {
+        ReminderKind::Event => describe(
+            &r.title,
+            r.location.as_deref().unwrap_or_default(),
+            candidate
+                .until
+                .is_some_and(|u| u.saturating_sub(r.at) % 86_400 == 0)
+                && Utc
+                    .timestamp_opt(r.at, 0)
+                    .single()
+                    .is_some_and(|d| d.with_timezone(&Local).time() == NaiveTime::MIN),
+            (r.at, candidate.until.unwrap_or(r.at)),
+            now,
+            local_time,
+        ),
+        ReminderKind::Task => Due {
+            title: if r.title.trim().is_empty() {
+                "(No title)".to_owned()
+            } else {
+                r.title.trim().to_owned()
+            },
+            body: "Task reminder".to_owned(),
+        },
+        ReminderKind::Flag => Due {
+            title: r.title.clone(),
+            body: "This message is flagged for follow-up now.".to_owned(),
+        },
+    }
+}
+
+/// `list_due_reminders`: what is due now, soonest first.
+#[tauri::command]
+pub fn list_due_reminders(state: State<'_, Arc<AppState>>) -> AppResult<Vec<DueReminder>> {
+    due_now(&state)
+}
+
+/// `dismiss_reminder`: never list it again.
+#[tauri::command]
+pub fn dismiss_reminder(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    key: String,
+) -> AppResult<Vec<DueReminder>> {
+    if key.is_empty() || key.len() > 500 {
+        return Err(AppError::invalid("That reminder is gone."));
+    }
+    state.store.set_reminder_state(
+        &key,
+        ReminderState {
+            dismissed: true,
+            snoozed_until: None,
+        },
+        unix_now(),
+    )?;
+    let due = due_now(&state)?;
+    publish(&app, &state, &due, true);
+    Ok(due)
+}
+
+/// `snooze_reminder`: list it again in `minutes`.
+#[tauri::command]
+pub fn snooze_reminder(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    key: String,
+    minutes: u32,
+) -> AppResult<Vec<DueReminder>> {
+    if key.is_empty() || key.len() > 500 {
+        return Err(AppError::invalid("That reminder is gone."));
+    }
+    if !(1..=MAX_SNOOZE_MINS).contains(&minutes) {
+        return Err(AppError::invalid("Snooze for a minute to a week."));
+    }
+    let now = unix_now();
+    state.store.set_reminder_state(
+        &key,
+        ReminderState {
+            dismissed: false,
+            snoozed_until: Some(now.saturating_add(i64::from(minutes).saturating_mul(60))),
+        },
+        now,
+    )?;
+    let due = due_now(&state)?;
+    publish(&app, &state, &due, true);
+    Ok(due)
 }
 
 /// The notification for a flagged message whose follow-up date came.
@@ -103,52 +330,6 @@ fn local_time(seconds: i64) -> String {
         .single()
         .map(|d| d.format("%H:%M").to_string())
         .unwrap_or_default()
-}
-
-/// Reminders that came due after `last`, up to `now`: one per occurrence.
-fn due(state: &AppState, last: i64, now: i64) -> AppResult<Vec<Due>> {
-    let calendars = state.store.list_calendars()?;
-    let accounts = state.store.list_accounts()?;
-    let from = now.saturating_sub(MISSED);
-    let to = now.saturating_add(AHEAD);
-    let mut out = Vec::new();
-    for stored in state.store.calendar_events_between(from, to)? {
-        let me = calendars
-            .iter()
-            .find(|c| c.id == stored.calendar_id)
-            .and_then(|c| accounts.iter().find(|a| a.id == c.account_id))
-            .map(|a| a.email.clone());
-        for o in ical::occurrences(&stored.ics, from, to) {
-            let declined = o.attendees.iter().any(|p| {
-                me.as_deref()
-                    .is_some_and(|me| p.email.eq_ignore_ascii_case(me))
-                    && p.status.as_deref() == Some("declined")
-            });
-            let (start, end) = if o.all_day {
-                (local_midnight(o.start), local_midnight(o.end))
-            } else {
-                (o.start, o.end)
-            };
-            if declined || end.max(start) <= now {
-                continue;
-            }
-            let fired = o.reminders.iter().any(|m| {
-                let at = start.saturating_sub(i64::from(*m).saturating_mul(60));
-                at > last && at <= now
-            });
-            if fired {
-                out.push(describe(
-                    &o.title,
-                    &o.location,
-                    o.all_day,
-                    (start, end),
-                    now,
-                    local_time,
-                ));
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// The notification for an event: its title, and when and where.

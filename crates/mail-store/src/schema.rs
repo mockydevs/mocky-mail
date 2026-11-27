@@ -421,8 +421,92 @@ CREATE TABLE read_receipts (
 );
 ";
 
+/// Version 10: calendar, tasks and people (0.8.0).
+///
+/// - `calendars`: `provider` (`caldav`, `google` or `microsoft`),
+///   `visible` (the user's choice, this device only), `writable` (the
+///   server lets events be added and changed) and `remote_id` (the
+///   provider's own id: Google calendar id, Microsoft Graph calendar id).
+/// - `contact_groups`: named lists of contacts. `members` is a JSON array
+///   of contact ids; `account_id` NULL keeps the group on this device.
+///   `href`/`etag`/`vcard` are the server copy (a `CardDAV` group card, or
+///   the Google `contactGroups/…` name in `href`).
+/// - `task_lists` and `tasks`: to-dos. The device's own list (`device`)
+///   always exists. `fields` is the task as JSON
+///   (`mail_core::tasks::TaskFields`); `raw` the server copy (`VTODO` text
+///   or the provider's JSON); `state` as for contacts; `message_id` the
+///   flagged message a task was made from (kept here only).
+/// - `reminder_states`: reminders dismissed or snoozed, by key, so they
+///   stay that way after a restart.
+/// - `account_connections`: Gmail and Microsoft accounts connected for
+///   calendar, contacts, tasks and automatic replies, with the extra
+///   permissions (scopes) the provider granted.
+const V10: &str = r"
+ALTER TABLE calendars ADD COLUMN provider TEXT NOT NULL DEFAULT 'caldav'
+    CHECK (provider IN ('caldav', 'google', 'microsoft'));
+ALTER TABLE calendars ADD COLUMN visible INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE calendars ADD COLUMN writable INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE calendars ADD COLUMN remote_id TEXT;
+
+CREATE TABLE contact_groups (
+    id         TEXT PRIMARY KEY NOT NULL,
+    account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+    uid        TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    members    TEXT NOT NULL DEFAULT '[]',
+    href       TEXT,
+    etag       TEXT,
+    vcard      TEXT,
+    state      TEXT NOT NULL DEFAULT 'synced' CHECK (state IN ('synced', 'changed', 'deleted')),
+    updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX contact_groups_href ON contact_groups (account_id, href) WHERE href IS NOT NULL;
+
+CREATE TABLE task_lists (
+    id         TEXT PRIMARY KEY NOT NULL,
+    account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+    provider   TEXT NOT NULL CHECK (provider IN ('device', 'caldav', 'google', 'microsoft')),
+    remote_id  TEXT,
+    name       TEXT NOT NULL,
+    UNIQUE (account_id, remote_id)
+);
+INSERT INTO task_lists (id, account_id, provider, remote_id, name)
+    VALUES ('device', NULL, 'device', NULL, 'Tasks');
+
+CREATE TABLE tasks (
+    id          TEXT PRIMARY KEY NOT NULL,
+    list_id     TEXT NOT NULL REFERENCES task_lists(id) ON DELETE CASCADE,
+    uid         TEXT NOT NULL,
+    remote_id   TEXT,
+    etag        TEXT,
+    raw         TEXT,
+    fields      TEXT NOT NULL,
+    state       TEXT NOT NULL CHECK (state IN ('synced', 'changed', 'deleted')),
+    message_id  TEXT,
+    due_at      INTEGER,
+    reminder_at INTEGER,
+    completed   INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX tasks_remote ON tasks (list_id, remote_id) WHERE remote_id IS NOT NULL;
+CREATE INDEX tasks_reminder ON tasks (reminder_at) WHERE reminder_at IS NOT NULL;
+
+CREATE TABLE reminder_states (
+    key           TEXT PRIMARY KEY NOT NULL,
+    dismissed     INTEGER NOT NULL DEFAULT 0,
+    snoozed_until INTEGER,
+    updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE account_connections (
+    account_id   TEXT PRIMARY KEY NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    scopes       TEXT NOT NULL,
+    connected_at INTEGER NOT NULL
+);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -659,6 +743,78 @@ mod tests {
             .query_row("SELECT count(*) FROM read_receipts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_version_nine_database_keeps_its_calendars_and_gains_tasks() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(9) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        conn.execute_batch(
+            r"INSERT INTO accounts (id, email, display_name, auth, color, imap_host, imap_port,
+                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at)
+                 VALUES ('a', 'a@x.co', 'A', 'password', '#000',
+                 'imap.x.co', 993, 'tls', 'smtp.x.co', 465, 'tls', NULL, 0);
+              INSERT INTO calendars (id, account_id, url, name, color)
+                 VALUES ('c', 'a', 'https://x.co/cal/', 'Personal', NULL);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        // Calendars from before are CalDAV ones, shown and writable.
+        let (provider, visible, writable): (String, i64, i64) = conn
+            .query_row(
+                "SELECT provider, visible, writable FROM calendars WHERE id = 'c'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((provider.as_str(), visible, writable), ("caldav", 1, 1));
+        // The device's task list is there.
+        let lists: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM task_lists WHERE id = 'device' AND provider = 'device'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lists, 1);
+        conn.execute_batch(
+            "INSERT INTO task_lists (id, account_id, provider, remote_id, name) VALUES ('l', 'a', 'caldav', 'https://x.co/tasks/', 'Tasks');
+             INSERT INTO tasks (id, list_id, uid, fields, state, updated_at) VALUES ('t', 'l', 'u', '{}', 'synced', 0);
+             INSERT INTO contact_groups (id, account_id, uid, name, updated_at) VALUES ('g', 'a', 'u', 'Team', 0);
+             INSERT INTO account_connections (account_id, scopes, connected_at) VALUES ('a', 'x', 0);
+             INSERT INTO reminder_states (key, dismissed, updated_at) VALUES ('event:e:1', 1, 0);",
+        )
+        .unwrap();
+        assert!(
+            conn.execute_batch(
+                "INSERT INTO task_lists (id, account_id, provider, remote_id, name) VALUES ('l2', 'a', 'other', 'r', 'X');"
+            )
+            .is_err()
+        );
+        // An account's lists, tasks, groups and connection go with it.
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM accounts;")
+            .unwrap();
+        for table in [
+            "tasks",
+            "contact_groups",
+            "account_connections",
+            "calendars",
+        ] {
+            let left: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(left, 0, "{table}");
+        }
+        let lists: i64 = conn
+            .query_row("SELECT count(*) FROM task_lists", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(lists, 1);
     }
 
     #[test]

@@ -117,6 +117,85 @@ pub struct OAuthTokens {
     pub expires_at_unix: u64,
     /// Verified identity if available. A login hint alone never proves identity.
     pub granted_email: Option<String>,
+    /// The permissions granted, as the provider listed them (`scope`).
+    pub granted_scopes: Vec<String>,
+}
+
+/// What Gmail accounts are asked for on top of mail to connect calendar,
+/// contacts, tasks and automatic replies.
+pub const GOOGLE_EXTRA_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/carddav",
+    "https://www.googleapis.com/auth/contacts",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+];
+
+/// The Microsoft Graph permissions asked for to connect calendar,
+/// contacts, tasks and automatic replies. Microsoft issues a token per
+/// resource, so this is a separate grant from the mail (IMAP/SMTP) one.
+pub const GRAPH_SCOPES: &[&str] = &[
+    "https://graph.microsoft.com/Calendars.ReadWrite",
+    "https://graph.microsoft.com/Contacts.ReadWrite",
+    "https://graph.microsoft.com/Tasks.ReadWrite",
+    "https://graph.microsoft.com/MailboxSettings.ReadWrite",
+];
+
+/// The scope string for connecting calendar and contacts.
+fn extra_scope(provider: Provider, mail_scope: &str) -> String {
+    match provider {
+        // Incremental: mail stays granted, the rest is added.
+        Provider::Google => format!("{mail_scope} {}", GOOGLE_EXTRA_SCOPES.join(" ")),
+        Provider::Microsoft => format!("openid email offline_access {}", GRAPH_SCOPES.join(" ")),
+    }
+}
+
+/// Sign in again in the browser, asking for calendar, contacts, tasks and
+/// automatic replies as well (Google: incrementally, with
+/// `include_granted_scopes`, so mail access stays; Microsoft: a Graph grant
+/// beside the mail one).
+///
+/// # Errors
+/// As [`authorize`]; [`AuthError::NotEnabled`] when the provider refuses
+/// the permissions (not set up for the app).
+pub async fn authorize_calendar_and_contacts(
+    provider: Provider,
+    login_hint: &str,
+    open_browser: impl FnOnce(&str) -> bool,
+) -> Result<OAuthTokens, AuthError> {
+    let base = provider.config()?;
+    let scope = extra_scope(provider, base.scope);
+    let cfg = Config {
+        id: base.id,
+        secret: base.secret,
+        authority: base.authority,
+        token: base.token,
+        scope: &scope,
+        host: base.host,
+    };
+    authorize_with_options(provider, &cfg, login_hint, true, open_browser).await
+}
+
+/// Refresh the Microsoft Graph grant (stored apart from the mail one).
+///
+/// # Errors
+/// As [`refresh`].
+pub async fn refresh_graph(refresh_token: &str) -> Result<OAuthTokens, AuthError> {
+    let base = Provider::Microsoft.config()?;
+    let scope = extra_scope(Provider::Microsoft, base.scope);
+    let cfg = Config {
+        scope: &scope,
+        ..base
+    };
+    exchange(
+        &cfg,
+        vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("scope", &scope),
+        ],
+    )
+    .await
 }
 /// User-safe errors. Never include raw HTTP responses, callback URLs or tokens.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -142,6 +221,10 @@ pub enum AuthError {
     /// Token endpoint unreachable or temporarily unavailable.
     #[error("The sign-in service is unavailable")]
     Network,
+    /// The provider hasn't allowed what was asked (an API or permission
+    /// not set up for the app yet).
+    #[error("The provider hasn't allowed this access for Mocky Mail yet")]
+    NotEnabled,
     /// Malformed response.
     #[error("The sign-in service returned an invalid response")]
     Protocol,
@@ -181,6 +264,9 @@ fn callback(line: &str, expected: &str) -> Option<Result<String, AuthError>> {
     Some(match (code, error.as_deref()) {
         (Some(c), None) if !c.is_empty() => Ok(c),
         (None, Some("access_denied")) => Err(AuthError::Denied),
+        (None, Some("invalid_scope" | "unauthorized_client" | "consent_required")) => {
+            Err(AuthError::NotEnabled)
+        }
         _ => Err(AuthError::Protocol),
     })
 }
@@ -232,6 +318,16 @@ async fn authorize_with(
     login_hint: &str,
     open_browser: impl FnOnce(&str) -> bool,
 ) -> Result<OAuthTokens, AuthError> {
+    authorize_with_options(provider, cfg, login_hint, false, open_browser).await
+}
+
+async fn authorize_with_options(
+    provider: Provider,
+    cfg: &Config<'_>,
+    login_hint: &str,
+    incremental: bool,
+    open_browser: impl FnOnce(&str) -> bool,
+) -> Result<OAuthTokens, AuthError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .map_err(|_| AuthError::Local)?;
@@ -262,6 +358,9 @@ async fn authorize_with(
         if provider == Provider::Google {
             q.append_pair("access_type", "offline")
                 .append_pair("prompt", "select_account consent");
+            if incremental {
+                q.append_pair("include_granted_scopes", "true");
+            }
         } else {
             q.append_pair("prompt", "select_account");
         }
@@ -305,6 +404,8 @@ struct TokenResponse {
     token_type: String,
     #[serde(default)]
     id_token: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 #[derive(Deserialize)]
 struct IdClaims {
@@ -371,6 +472,9 @@ async fn exchange(
             {
                 Some("invalid_grant") => AuthError::Reauthorize,
                 Some("access_denied") => AuthError::Denied,
+                Some("invalid_scope" | "unauthorized_client" | "consent_required") => {
+                    AuthError::NotEnabled
+                }
                 _ => AuthError::Protocol,
             },
         );
@@ -391,6 +495,13 @@ async fn exchange(
         refresh_token: token.refresh_token.filter(|v| !v.is_empty()),
         expires_at_unix: expires(now, token.expires_in)?,
         granted_email: token.id_token.as_deref().and_then(email_from_id_token),
+        granted_scopes: token
+            .scope
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
     })
 }
 /// Base64-encoded SASL XOAUTH2 initial response, ready for a wire protocol.
@@ -484,6 +595,49 @@ mod tests {
         assert_eq!(
             email_from_id_token(&id_token(r#"{"email":"no at sign"}"#)),
             None
+        );
+    }
+
+    #[test]
+    fn connecting_asks_for_calendar_contacts_and_tasks() {
+        let google = extra_scope(Provider::Google, "openid email https://mail.google.com/");
+        assert!(google.starts_with("openid email https://mail.google.com/ "));
+        for scope in GOOGLE_EXTRA_SCOPES {
+            assert!(google.contains(scope), "{scope}");
+        }
+        let microsoft = extra_scope(Provider::Microsoft, "ignored");
+        assert!(microsoft.contains("offline_access"));
+        assert!(microsoft.contains("https://graph.microsoft.com/Calendars.ReadWrite"));
+        // Graph and Outlook mail can't share one token.
+        assert!(!microsoft.contains("outlook.office.com"));
+        // Permissions the provider won't give the app are a setup problem.
+        assert_eq!(
+            callback("GET /?state=x&error=invalid_scope HTTP/1.1", "x"),
+            Some(Err(AuthError::NotEnabled))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_incremental_page_keeps_mail_access() {
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen = std::sync::Arc::clone(&opened);
+        let result = authorize_with_options(
+            Provider::Google,
+            &test_config(),
+            "a@x.co",
+            true,
+            move |url| {
+                *seen.lock().unwrap() = url.to_owned();
+                false
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(AuthError::Browser)));
+        assert!(
+            opened
+                .lock()
+                .unwrap()
+                .contains("include_granted_scopes=true")
         );
     }
 

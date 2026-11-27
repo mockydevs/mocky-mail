@@ -11,6 +11,7 @@ mod accounts;
 mod attachments;
 mod calendar;
 mod compose;
+mod connections;
 mod contacts;
 mod convert;
 mod credentials;
@@ -37,6 +38,7 @@ mod settings;
 mod signatures;
 mod state;
 mod sync;
+mod tasks;
 #[cfg(desktop)]
 mod tray;
 mod updates;
@@ -264,12 +266,26 @@ pub fn run() {
             contacts::save_contact,
             contacts::delete_contact,
             contacts::sync_contacts,
+            contacts::list_contact_groups,
+            contacts::save_contact_group,
+            contacts::delete_contact_group,
+            connections::connect_calendar_and_contacts,
             calendar::list_calendars,
             calendar::list_events,
             calendar::get_event,
             calendar::save_event,
             calendar::delete_event,
             calendar::sync_calendars,
+            calendar::set_calendar_visible,
+            calendar::get_free_busy,
+            reminders::list_due_reminders,
+            reminders::dismiss_reminder,
+            reminders::snooze_reminder,
+            tasks::list_task_lists,
+            tasks::list_tasks,
+            tasks::save_task,
+            tasks::delete_task,
+            tasks::sync_tasks,
             invitations::answer_invitation,
             out_of_office::get_out_of_office,
             out_of_office::set_out_of_office,

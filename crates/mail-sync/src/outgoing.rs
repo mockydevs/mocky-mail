@@ -308,6 +308,65 @@ pub fn build(message: &OutgoingMessage) -> Result<BuiltMessage, SyncError> {
     })
 }
 
+/// An invitation, update or cancellation to attendees (iMIP, RFC 6047): a
+/// short note and the calendar part (`method` `REQUEST` or `CANCEL`), to
+/// everyone in `to`.
+///
+/// # Errors
+/// [`SyncError::Invalid`] for bad addresses, an unknown method or no
+/// recipients.
+pub fn build_calendar_message(
+    from: &Mailbox,
+    to: &[Mailbox],
+    subject: &str,
+    note: &str,
+    ics: &str,
+    method: &str,
+) -> Result<BuiltMessage, SyncError> {
+    if !matches!(method, "REQUEST" | "CANCEL" | "REPLY") {
+        return Err(SyncError::Invalid(format!(
+            "unknown calendar method {method}"
+        )));
+    }
+    if to.is_empty() {
+        return Err(SyncError::Invalid(
+            "no one to send the invitation to".to_owned(),
+        ));
+    }
+    let domain = from
+        .address
+        .rsplit_once('@')
+        .map_or("localhost", |(_, d)| d);
+    let message_id = format!("{}@{domain}", random_token()?);
+    let calendar = SinglePart::builder()
+        .header(
+            ContentType::parse(&format!("text/calendar; charset=utf-8; method={method}"))
+                .map_err(|e| SyncError::Invalid(e.to_string()))?,
+        )
+        .body(ics.to_owned());
+    let mut builder = lettre::Message::builder()
+        .from(to_lettre(from)?)
+        .subject(display_safe(subject))
+        .message_id(Some(format!("<{message_id}>")))
+        .user_agent("Mocky Mail".to_owned());
+    for person in to {
+        builder = builder.to(to_lettre(person)?);
+    }
+    let email = builder
+        .multipart(
+            MultiPart::alternative()
+                .singlepart(SinglePart::plain(note.to_owned()))
+                .singlepart(calendar),
+        )
+        .map_err(|e| SyncError::Invalid(e.to_string()))?;
+    Ok(BuiltMessage {
+        raw: email.formatted(),
+        message_id,
+        envelope_from: from.address.clone(),
+        recipients: to.iter().map(|m| m.address.clone()).collect(),
+    })
+}
+
 /// An answer to an invitation (iMIP, RFC 6047): a short note, and the
 /// `METHOD:REPLY` calendar part calendar apps act on.
 ///
@@ -442,6 +501,42 @@ mod tests {
         assert_eq!(built.recipients, ["peter@client.example"]);
         let body = mail_core::message::parse_body(&built.raw).unwrap_or_else(|e| panic!("{e}"));
         assert!(body.calendar.unwrap_or_default().contains("METHOD:REPLY"));
+    }
+
+    #[test]
+    fn invitations_go_to_every_attendee() {
+        let built = build_calendar_message(
+            &mb("info@mocky.co.ke", Some("Mocky Digital")),
+            &[
+                mb("peter@client.example", Some("Peter Mwangi")),
+                mb("amina@studio.example", None),
+            ],
+            "Invitation: Site visit",
+            "Mocky Digital invites you: Site visit",
+            "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n",
+            "REQUEST",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let raw = String::from_utf8_lossy(&built.raw);
+        assert!(raw.contains("text/calendar; charset=utf-8; method=REQUEST"));
+        assert_eq!(
+            built.recipients,
+            ["peter@client.example", "amina@studio.example"]
+        );
+        assert!(
+            build_calendar_message(&mb("a@b.co", None), &[], "s", "n", "x", "REQUEST").is_err()
+        );
+        assert!(
+            build_calendar_message(
+                &mb("a@b.co", None),
+                &[mb("c@d.co", None)],
+                "s",
+                "n",
+                "x",
+                "ADD"
+            )
+            .is_err()
+        );
     }
 
     fn base() -> OutgoingMessage {

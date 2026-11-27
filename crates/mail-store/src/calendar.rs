@@ -1,19 +1,54 @@
-//! Calendars: each account's calendars on its server (`CalDAV`), and a
-//! copy of their events so the calendar shows without a connection.
+//! Calendars: each account's calendars on its server (`CalDAV`, Google's
+//! `CalDAV`, or Microsoft Graph), and a copy of their events so the
+//! calendar shows without a connection.
 //!
-//! Events are kept as the server's iCalendar text; occurrences are worked
-//! out when shown (`mail_core::ical`). `starts_at` and `ends_at` let a
-//! month be read without opening every event; `ends_at` is `NULL` for a
-//! series that repeats forever.
+//! Events are kept as iCalendar text (the server's own, or for Microsoft
+//! made from Graph's JSON); occurrences are worked out when shown
+//! (`mail_core::ical`). `starts_at` and `ends_at` let a month be read
+//! without opening every event; `ends_at` is `NULL` for a series that
+//! repeats forever.
 
 use std::collections::HashMap;
 
 use rusqlite::{OptionalExtension, Row, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Store;
 use crate::error::{Result, StoreError};
 use crate::ids::new_id;
+
+/// Which service keeps a calendar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CalendarProvider {
+    /// A `CalDAV` server (the account's mail server).
+    #[default]
+    Caldav,
+    /// Google Calendar (over Google's `CalDAV`).
+    Google,
+    /// Microsoft 365 or Outlook.com (Microsoft Graph).
+    Microsoft,
+}
+
+impl CalendarProvider {
+    /// The stored name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Caldav => "caldav",
+            Self::Google => "google",
+            Self::Microsoft => "microsoft",
+        }
+    }
+
+    fn parse(text: &str) -> Self {
+        match text {
+            "google" => Self::Google,
+            "microsoft" => Self::Microsoft,
+            _ => Self::Caldav,
+        }
+    }
+}
 
 /// A calendar on an account's server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -30,10 +65,19 @@ pub struct Calendar {
     pub name: String,
     /// Its colour from the server (`#RRGGBB` or `#RRGGBBAA`), if any.
     pub color: Option<String>,
+    /// Shown in the calendar views (this device's choice).
+    pub visible: bool,
+    /// Events can be added and changed.
+    pub writable: bool,
+    /// Which service keeps it.
+    pub provider: CalendarProvider,
+    /// The provider's own id for it (Google, Microsoft).
+    #[serde(skip)]
+    pub remote_id: Option<String>,
 }
 
-/// A calendar found on the server: address, name, colour.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A calendar found on the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FoundCalendar {
     /// Its address.
     pub url: String,
@@ -41,6 +85,12 @@ pub struct FoundCalendar {
     pub name: String,
     /// Its colour.
     pub color: Option<String>,
+    /// Events can be added and changed.
+    pub writable: bool,
+    /// Which service keeps it.
+    pub provider: CalendarProvider,
+    /// The provider's own id.
+    pub remote_id: Option<String>,
 }
 
 /// One calendar item (an event or series) as stored.
@@ -65,6 +115,10 @@ fn calendar_row(row: &Row<'_>) -> rusqlite::Result<Calendar> {
         url: row.get(2)?,
         name: row.get(3)?,
         color: row.get(4)?,
+        visible: row.get(5)?,
+        writable: row.get(6)?,
+        provider: CalendarProvider::parse(&row.get::<_, String>(7)?),
+        remote_id: row.get(8)?,
     })
 }
 
@@ -78,7 +132,8 @@ fn event_row(row: &Row<'_>) -> rusqlite::Result<StoredEvent> {
     })
 }
 
-const CALENDAR_COLUMNS: &str = "id, account_id, url, name, color";
+const CALENDAR_COLUMNS: &str =
+    "id, account_id, url, name, color, visible, writable, provider, remote_id";
 const EVENT_COLUMNS: &str = "id, calendar_id, href, etag, ics";
 
 /// A new event's `UID`: random, and unique everywhere.
@@ -104,9 +159,21 @@ impl Store {
         let tx = conn.transaction()?;
         for calendar in found {
             tx.execute(
-                "INSERT INTO calendars (id, account_id, url, name, color) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (account_id, url) DO UPDATE SET name = excluded.name, color = excluded.color",
-                params![new_id()?, account_id, calendar.url, calendar.name, calendar.color],
+                "INSERT INTO calendars (id, account_id, url, name, color, writable, provider, remote_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (account_id, url) DO UPDATE SET name = excluded.name,
+                     color = excluded.color, writable = excluded.writable,
+                     provider = excluded.provider, remote_id = excluded.remote_id",
+                params![
+                    new_id()?,
+                    account_id,
+                    calendar.url,
+                    calendar.name,
+                    calendar.color,
+                    calendar.writable,
+                    calendar.provider.as_str(),
+                    calendar.remote_id
+                ],
             )?;
         }
         let keep: Vec<&str> = found.iter().map(|c| c.url.as_str()).collect();
@@ -155,6 +222,38 @@ impl Store {
             )
             .optional()?
             .ok_or(StoreError::NotFound("calendar"))
+    }
+
+    /// Show or hide a calendar in the calendar views (this device only).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when there is no such calendar.
+    pub fn set_calendar_visible(&self, id: &str, visible: bool) -> Result<()> {
+        let changed = self.conn().execute(
+            "UPDATE calendars SET visible = ?2 WHERE id = ?1",
+            params![id, visible],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound("calendar"));
+        }
+        Ok(())
+    }
+
+    /// The event stored at `href` in a calendar, if any.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn calendar_event_at(&self, calendar_id: &str, href: &str) -> Result<Option<StoredEvent>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events WHERE calendar_id = ?1 AND href = ?2"
+                ),
+                params![calendar_id, href],
+                event_row,
+            )
+            .optional()?)
     }
 
     /// The events known in a calendar: path to version tag.
@@ -286,7 +385,53 @@ mod tests {
             url: url.into(),
             name: name.into(),
             color: Some("#3A87ADFF".into()),
+            writable: true,
+            ..FoundCalendar::default()
         }
+    }
+
+    #[test]
+    fn visibility_is_kept_across_syncs() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_support::add_account(&store, "me@work.example");
+        let cal = store
+            .set_calendars(&account, &[found("https://x/c/", "Personal")])
+            .unwrap()[0]
+            .clone();
+        assert!(cal.visible && cal.writable);
+        assert_eq!(cal.provider, CalendarProvider::Caldav);
+        store.set_calendar_visible(&cal.id, false).unwrap();
+        let read_only = FoundCalendar {
+            writable: false,
+            provider: CalendarProvider::Google,
+            remote_id: Some("me@gmail.example".into()),
+            ..found("https://x/c/", "Personal")
+        };
+        let again = store.set_calendars(&account, &[read_only]).unwrap();
+        assert!(!again[0].visible);
+        assert!(!again[0].writable);
+        assert_eq!(again[0].provider, CalendarProvider::Google);
+        assert_eq!(again[0].remote_id.as_deref(), Some("me@gmail.example"));
+        assert!(store.set_calendar_visible("nope", true).is_err());
+        let json = serde_json::to_value(&again[0]).unwrap();
+        assert_eq!(json["provider"], "google");
+        assert_eq!(json["visible"], false);
+        assert!(json.get("url").is_none());
+        store
+            .put_calendar_event(&cal.id, "/c/a.ics", None, ONE)
+            .unwrap();
+        assert!(
+            store
+                .calendar_event_at(&cal.id, "/c/a.ics")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .calendar_event_at(&cal.id, "/c/b.ics")
+                .unwrap()
+                .is_none()
+        );
     }
 
     const ONE: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261118T060000Z\r\nDTEND:20261118T070000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";

@@ -428,12 +428,17 @@ pub fn remove_account(
         engine.task.abort();
     }
     lock(&state.access_tokens).remove(&id);
+    lock(&state.access_tokens).remove(&crate::connections::graph_key(&id));
     // The account's row goes first. If that fails, nothing is lost and the
     // account still works; had its password been deleted first, it would
     // be left listed but unable to sign in. A secret that can't be removed
     // afterwards is harmless without its account.
     state.store.delete_account(&id)?;
-    for key in [password_key(&id), oauth_key(&id)] {
+    for key in [
+        password_key(&id),
+        oauth_key(&id),
+        crate::connections::graph_key(&id),
+    ] {
         if let Err(error) = state.secrets.delete(&key) {
             eprintln!("couldn't remove a saved sign-in of a removed account: {error}");
         }
