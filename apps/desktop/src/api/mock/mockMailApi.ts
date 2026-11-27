@@ -7,6 +7,10 @@ import type {
   CalendarStatus,
   OutOfOffice,
   Contact,
+  ContactGroup,
+  ShowAs,
+  Task,
+  TaskList,
   AttachmentMeta,
   Category,
   Focus,
@@ -35,6 +39,7 @@ import type {
   Settings,
 } from '../types';
 import { MOCK_CALENDARS, MOCK_EVENTS, mockOccurrences, mockSave, type MockEvent } from './mockCalendar';
+import { dueReminders, MOCK_TASK_LISTS, MOCK_TASKS, mockFreeBusy, sortTasks } from './mockPlanner';
 import {
   foldersFor,
   MOCK_ACCOUNTS,
@@ -92,6 +97,19 @@ export interface MockOptions {
   rules?: Rule[];
   /** Senders whose pictures always load; default: none. */
   imageSenders?: ImageSender[];
+  /** Contact groups; default: none. */
+  groups?: ContactGroup[];
+  /** To-do lists; default: a device list and a work list. */
+  taskLists?: TaskList[];
+  /** Tasks; default: a few samples. */
+  tasks?: Task[];
+  /**
+   * Work out due reminders from events, tasks and flagged messages at `now()`
+   * (the reminder clock); default off, so nothing pops up unasked.
+   */
+  reminders?: boolean;
+  /** Find a Time: busy times by lower-case address (others are unknown); default: made-up times for everyone. */
+  freeBusy?: Record<string, { start: number; end: number; showAs: ShowAs }[]>;
 }
 
 export interface MockMailApi extends MailApi {
@@ -115,6 +133,10 @@ export interface MockMailApi extends MailApi {
   launchWith(url: string): void;
   /** A new message arrives, as a sync would bring it in. */
   receive(message: MockMessage): void;
+  /** Events deleted with notify (cancellations sent), for assertions. */
+  readonly cancellations: { eventId: string; occurrence: number | null }[];
+  /** The reminder clock ticks: emit mail://reminders with what is due at now(). */
+  tickReminders(): void;
 }
 
 /** 1x1 PNG, a one-line PDF and some text: what the dev preview shows. */
@@ -310,8 +332,16 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
       .join('\n');
   };
   let contacts: Contact[] = clone(options.contacts ?? []);
-  const calendars: CalendarInfo[] = clone(options.calendars ?? MOCK_CALENDARS);
+  let calendars: CalendarInfo[] = clone(options.calendars ?? MOCK_CALENDARS);
   let events: MockEvent[] = clone(options.events ?? MOCK_EVENTS);
+  let groups: ContactGroup[] = clone(options.groups ?? []);
+  let taskLists: TaskList[] = clone(options.taskLists ?? MOCK_TASK_LISTS);
+  let tasks: Task[] = clone(options.tasks ?? MOCK_TASKS);
+  const dismissedReminders = new Set<string>();
+  const cancellations: { eventId: string; occurrence: number | null }[] = [];
+  const snoozedReminders = new Map<string, number>();
+  let calendarStatus: CalendarStatus[] | null = clone(options.calendarStatus ?? null);
+  let bookStatus: AddressBookStatus[] | null = clone(options.books ?? null);
   const outOfOffice = new Map<string, OutOfOffice>(Object.entries(clone(options.outOfOffice ?? {})));
   const outboxDrafts = new Map<string, Draft>();
   /** Attachments of drafts saved in this session, by message id. */
@@ -464,6 +494,32 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     return roleFolder(m.accountId, target.role);
   };
   const sortedAccounts = () => [...accounts].sort((a, b) => a.sortOrder - b.sortOrder);
+  const calendarStatuses = (): CalendarStatus[] =>
+    calendarStatus ?? accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null }));
+  const books = (): AddressBookStatus[] =>
+    bookStatus ?? accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null }));
+  const shownCalendars = () => calendars.filter((c) => accounts.some((a) => a.id === c.accountId));
+  const tasksChanged = () => {
+    emit('mail://tasks-changed', {});
+  };
+  /** What the reminder clock says is due at now(). */
+  const due = () => {
+    if (!options.reminders) return [];
+    const t = now();
+    const shown = new Set(shownCalendars().map((c) => c.id));
+    return dueReminders({
+      now: t,
+      events: mockOccurrences(
+        events.filter((e) => shown.has(e.event.calendarId)),
+        t - 86_400,
+        t + 8 * 86_400,
+      ),
+      tasks,
+      flags: messages,
+      dismissed: dismissedReminders,
+      snoozed: snoozedReminders,
+    });
+  };
   const ruleWorld = () => ({ accounts, folders, categories });
 
   /** Do what a rule says to one message. */
@@ -519,12 +575,16 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     openedWindows,
     openedComposeWindows,
     answeredReceipts,
+    cancellations,
     launchWith: (url) => {
       launchLink = url;
     },
     receive: (message) => {
       messages = [...messages, clone(message)];
       changed(message.accountId, [message.folderId]);
+    },
+    tickReminders: () => {
+      emit('mail://reminders', { reminders: due() });
     },
     emit,
     failNext(method, error) {
@@ -878,6 +938,153 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         const draft = composeDrafts.get(key) ?? null;
         composeDrafts.delete(key);
         return draft;
+      }),
+
+    connectCalendarAndContacts: (accountId) =>
+      run('connectCalendarAndContacts', () => {
+        const acc = account(accountId);
+        if (acc.auth !== 'google' && acc.auth !== 'microsoft') {
+          throw appError('invalid', 'Only Gmail and Microsoft accounts connect this way.');
+        }
+        const name = acc.auth === 'google' ? 'Google' : 'Microsoft';
+        if (!options.oauthConfigured) {
+          throw appError('config', `${name} calendar and contacts access is not set up in this build yet.`);
+        }
+        const fixed = (list: (CalendarStatus | AddressBookStatus)[]) =>
+          list.map((s) => (s.accountId === accountId ? { accountId, state: 'synced' as const, message: null } : s));
+        calendarStatus = fixed(calendarStatuses());
+        bookStatus = fixed(books());
+        if (!calendars.some((c) => c.accountId === accountId)) {
+          calendars = [
+            ...calendars,
+            {
+              id: `${accountId}:primary`,
+              accountId,
+              name: acc.email,
+              color: acc.color,
+              visible: true,
+              writable: true,
+              provider: acc.auth,
+            },
+          ];
+        }
+        if (!taskLists.some((l) => l.accountId === accountId)) {
+          taskLists = [
+            ...taskLists,
+            { id: `${accountId}:tasks`, accountId, name: acc.auth === 'google' ? 'My Tasks' : 'Tasks', provider: acc.auth },
+          ];
+        }
+        emit('mail://calendar-changed', { calendars: calendarStatus });
+        emit('mail://contacts-changed', { books: bookStatus });
+        tasksChanged();
+      }),
+
+    setCalendarVisible: (calendarId, visible) =>
+      run('setCalendarVisible', () => {
+        if (!calendars.some((c) => c.id === calendarId)) throw appError('not_found', 'That calendar no longer exists.');
+        calendars = calendars.map((c) => (c.id === calendarId ? { ...c, visible } : c));
+        return shownCalendars();
+      }),
+
+    getFreeBusy: (accountId, emails, from, to) =>
+      run('getFreeBusy', () => {
+        account(accountId);
+        if (to <= from || to - from > 42 * 86_400) throw appError('invalid', 'That date range is too long.');
+        const around = mockOccurrences(events, from, to);
+        return emails.map((email) => mockFreeBusy(email, from, to, around, options.freeBusy));
+      }),
+
+    listDueReminders: () => run('listDueReminders', due),
+
+    dismissReminder: (key) =>
+      run('dismissReminder', () => {
+        dismissedReminders.add(key);
+        snoozedReminders.delete(key);
+        return due();
+      }),
+
+    snoozeReminder: (key, minutes) =>
+      run('snoozeReminder', () => {
+        if (!Number.isFinite(minutes) || minutes <= 0) throw appError('invalid', 'Snooze for at least a minute.');
+        snoozedReminders.set(key, now() + Math.round(minutes * 60));
+        return due();
+      }),
+
+    listTaskLists: () =>
+      run('listTaskLists', () => taskLists.filter((l) => l.accountId === null || accounts.some((a) => a.id === l.accountId))),
+
+    listTasks: (listId, includeCompleted) =>
+      run('listTasks', () => {
+        if (listId !== null && !taskLists.some((l) => l.id === listId)) throw appError('not_found', 'That list no longer exists.');
+        return sortTasks(
+          tasks.filter(
+            (t) =>
+              t.state !== 'deleted' &&
+              (listId === null || t.listId === listId) &&
+              (includeCompleted || !t.completed) &&
+              taskLists.some((l) => l.id === t.listId),
+          ),
+        );
+      }),
+
+    saveTask: (input) =>
+      run('saveTask', () => {
+        const title = input.title.trim();
+        if (!title) throw appError('invalid', 'Give the task a title.');
+        const list = taskLists.find((l) => l.id === input.listId);
+        if (!list) throw appError('not_found', 'That list no longer exists.');
+        const old = input.id ? tasks.find((t) => t.id === input.id) : undefined;
+        if (input.id && !old) throw appError('not_found', 'That task no longer exists.');
+        const saved: Task = {
+          ...input,
+          id: old?.id ?? `t${String(seq++)}`,
+          title,
+          notes: input.notes.trim(),
+          completedAt: input.completed ? (old?.completed ? old.completedAt : now()) : null,
+          state: list.provider === 'device' ? 'synced' : 'changed',
+        };
+        tasks = old ? tasks.map((t) => (t === old ? saved : t)) : [...tasks, saved];
+        tasksChanged();
+        return saved;
+      }),
+
+    deleteTask: (id) =>
+      run('deleteTask', () => {
+        if (!tasks.some((t) => t.id === id)) throw appError('not_found', 'That task no longer exists.');
+        tasks = tasks.filter((t) => t.id !== id);
+        tasksChanged();
+      }),
+
+    syncTasks: () =>
+      run('syncTasks', () => {
+        if (settings.workOffline) throw appError('invalid', 'Work Offline is on.');
+        tasks = tasks.map((t) => ({ ...t, state: 'synced' as const }));
+        tasksChanged();
+      }),
+
+    listContactGroups: () =>
+      run('listContactGroups', () => [...groups].sort((a, b) => a.name.localeCompare(b.name))),
+
+    saveContactGroup: (input) =>
+      run('saveContactGroup', () => {
+        const name = input.name.trim();
+        if (!name) throw appError('invalid', 'Give the group a name.');
+        if (groups.some((g) => g.id !== input.id && sameName(g.name, name))) {
+          throw appError('invalid', `There is already a group called ${name}.`);
+        }
+        const old = input.id ? groups.find((g) => g.id === input.id) : undefined;
+        if (input.id && !old) throw appError('not_found', 'That group no longer exists.');
+        const memberIds = [...new Set(input.memberIds)].filter((id) => contacts.some((c) => c.id === id));
+        const saved: ContactGroup = { id: old?.id ?? `g${String(seq++)}`, accountId: input.accountId, name, memberIds };
+        groups = old ? groups.map((g) => (g === old ? saved : g)) : [...groups, saved];
+        return [...groups].sort((a, b) => a.name.localeCompare(b.name));
+      }),
+
+    deleteContactGroup: (id) =>
+      run('deleteContactGroup', () => {
+        if (!groups.some((g) => g.id === id)) throw appError('not_found', 'That group no longer exists.');
+        groups = groups.filter((g) => g.id !== id);
+        return [...groups].sort((a, b) => a.name.localeCompare(b.name));
       }),
 
     takeMailto: () =>
@@ -1368,8 +1575,14 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           organization: input.organization.trim(),
           title: input.title.trim(),
           notes: input.notes.trim(),
+          favorite: input.favorite ?? old?.favorite ?? false,
+          categories: [...new Set((input.categories ?? old?.categories ?? []).map((c) => c.trim()).filter(Boolean))],
+          photo: input.photo === undefined ? (old?.photo ?? null) : input.photo,
           state: input.accountId ? 'changed' : 'synced',
         };
+        if (saved.photo !== null && !/^data:image\/(png|jpeg|gif|webp);base64,/.test(saved.photo)) {
+          throw appError('invalid', 'That picture could not be used.');
+        }
         contacts = [...contacts.filter((c) => c.id !== saved.id), saved];
         return saved;
       }),
@@ -1378,16 +1591,17 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
       run('deleteContact', () => {
         if (!contacts.some((c) => c.id === id)) throw appError('not_found', 'That contact no longer exists.');
         contacts = contacts.filter((c) => c.id !== id);
+        groups = groups.map((g) => ({ ...g, memberIds: g.memberIds.filter((m) => m !== id) }));
       }),
 
     syncContacts: () =>
       run('syncContacts', () => {
         contacts = contacts.map((c) => ({ ...c, state: 'synced' as const }));
-        return options.books ?? accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null }));
+        return books();
       }),
 
     listCalendars: () =>
-      run('listCalendars', () => calendars.filter((c) => accounts.some((a) => a.id === c.accountId))),
+      run('listCalendars', shownCalendars),
 
     listEvents: (from, to) =>
       run('listEvents', () => {
@@ -1411,9 +1625,45 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
       run('saveEvent', () => {
         if (input.end < input.start) throw appError('invalid', 'The event ends before it starts.');
         if (!calendars.some((c) => c.id === input.calendarId)) throw appError('not_found', 'That calendar no longer exists.');
+        const calendar = calendars.find((c) => c.id === input.calendarId);
         const old = input.id ? events.find((e) => e.event.id === input.id) : undefined;
         if (input.id && !old) throw appError('not_found', 'That event no longer exists.');
-        const saved = mockSave(old?.event, input, old?.event.id ?? `e${String(seq++)}`);
+        const own = accounts.find((a) => a.id === calendar?.accountId)?.email;
+        if (calendar && !calendar.writable) {
+          // Only your own reminders change on a calendar you can't write to.
+          if (!old) throw appError('invalid', `${calendar.name} is read-only.`);
+          const kept = { ...old.event, reminders: input.reminders ?? old.event.reminders };
+          events = events.map((e) => (e === old ? { ...e, event: kept } : e));
+          emit('mail://calendar-changed', { calendars: [] });
+          return kept;
+        }
+        if (old && input.occurrence != null && input.scope === 'this') {
+          // One date of a series: it leaves the series as an event of its own.
+          if (!old.event.recurring) throw appError('invalid', "That event doesn't repeat.");
+          const single = mockSave(
+            undefined,
+            { ...input, repeat: 'none', repeatRule: null },
+            `e${String(seq++)}`,
+            calendars,
+            own,
+          );
+          const exception = {
+            ...single,
+            uid: old.event.uid,
+            recurrenceId: input.occurrence,
+            attendees: input.attendees ? single.attendees : old.event.attendees,
+            organizer: input.attendees ? single.organizer : old.event.organizer,
+            showAs: input.showAs ?? old.event.showAs,
+            private: input.private ?? old.event.private,
+          };
+          events = [
+            ...events.map((e) => (e === old ? { ...e, skipped: [...e.skipped, input.occurrence ?? 0] } : e)),
+            { event: exception, skipped: [] },
+          ];
+          emit('mail://calendar-changed', { calendars: [] });
+          return exception;
+        }
+        const saved = mockSave(old?.event, input, old?.event.id ?? `e${String(seq++)}`, calendars, own);
         events = old
           ? events.map((e) => (e === old ? { event: saved, skipped: e.skipped } : e))
           : [...events, { event: saved, skipped: [] }];
@@ -1421,14 +1671,18 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         return saved;
       }),
 
-    deleteEvent: (id, occurrence) =>
+    deleteEvent: (id, occurrence, notify) =>
       run('deleteEvent', () => {
         const found = events.find((e) => e.event.id === id);
         if (!found) throw appError('not_found', 'That event no longer exists.');
+        if (calendars.find((c) => c.id === found.event.calendarId)?.writable === false) {
+          throw appError('invalid', 'That calendar is read-only.');
+        }
         events =
           occurrence !== null && found.event.recurring
             ? events.map((e) => (e === found ? { ...e, skipped: [...e.skipped, occurrence] } : e))
             : events.filter((e) => e !== found);
+        if (notify) cancellations.push({ eventId: id, occurrence });
         emit('mail://calendar-changed', { calendars: [] });
       }),
 
@@ -1492,7 +1746,15 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
             available: true,
             message: null,
             active: false,
-            settings: { enabled: false, subject: 'Out of office', message: '', start: null, end: null, days: 1 },
+            settings: {
+              enabled: false,
+              subject: 'Out of office',
+              message: '',
+              start: null,
+              end: null,
+              days: 1,
+              ...(account(accountId).auth === 'microsoft' ? { externalMessage: null, externalAudience: 'all' as const } : {}),
+            },
           }
         );
       }),
@@ -1510,7 +1772,12 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           available: true,
           message: null,
           active: settings.enabled,
-          settings: { ...settings, subject: settings.subject.trim() || 'Out of office', message: settings.message.trim() },
+          settings: {
+            ...settings,
+            subject: settings.subject.trim() || 'Out of office',
+            message: settings.message.trim(),
+            ...(settings.externalMessage !== undefined ? { externalMessage: settings.externalMessage?.trim() ? settings.externalMessage.trim() : null } : {}),
+          },
         };
         outOfOffice.set(accountId, saved);
         return saved;
@@ -1519,9 +1786,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     syncCalendars: () =>
       run(
         'syncCalendars',
-        () =>
-          options.calendarStatus ??
-          accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null })),
+        calendarStatuses,
       ),
 
     getSignature: (accountId, reply) =>

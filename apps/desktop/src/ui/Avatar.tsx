@@ -1,6 +1,20 @@
 import { avatarColour, initials } from '../features/mailbox/selectors';
 
-export function Avatar({ name, address, size = 36 }: { name: string; address: string; size?: number }) {
+export function Avatar({
+  name,
+  address,
+  size = 36,
+  photo = null,
+}: {
+  name: string;
+  address: string;
+  size?: number;
+  /** A contact's picture (`data:` URL); initials when missing. */
+  photo?: string | null;
+}) {
+  if (photo) {
+    return <img className="avatar avatar--photo" src={photo} alt="" aria-hidden="true" width={size} height={size} />;
+  }
   return (
     <span
       className="avatar"

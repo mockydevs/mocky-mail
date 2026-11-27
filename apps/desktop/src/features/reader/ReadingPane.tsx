@@ -56,6 +56,8 @@ export interface ReaderActions {
   onOpenWindow?: (() => void) | undefined;
   /** "Create rule…": a new rule started from this message. */
   onCreateRule?: ((message: MessageDetail) => void) | undefined;
+  /** "Create task": a task for this message (its subject as the title). */
+  onCreateTask?: ((message: MessageDetail) => void) | undefined;
 }
 
 interface Props extends ReaderActions {
@@ -437,6 +439,18 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
           },
         ]
       : []),
+    ...(props.onCreateTask && role !== 'drafts'
+      ? [
+          {
+            key: 'task',
+            label: 'Create task',
+            icon: 'check' as const,
+            run: () => {
+              props.onCreateTask?.(message);
+            },
+          },
+        ]
+      : []),
     ...(props.onImportance && role !== 'drafts'
       ? IMPORTANCE_ACTIONS.filter(([value]) => value !== item.importance).map(([value, label]) => ({
           key: `importance-${value}`,
@@ -483,7 +497,19 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
     />
   );
   const flagMenu = props.onFlagDue && actions.includes('flag') && (
-    <FlagMenu flagged={item.flagged} due={item.flagDue} now={now} onFlag={props.onFlagDue} />
+    <FlagMenu
+      flagged={item.flagged}
+      due={item.flagDue}
+      now={now}
+      onFlag={props.onFlagDue}
+      {...(props.onCreateTask && role !== 'drafts'
+        ? {
+            onAddTask: () => {
+              props.onCreateTask?.(message);
+            },
+          }
+        : {})}
+    />
   );
 
   const sourceDialog = source !== null && (

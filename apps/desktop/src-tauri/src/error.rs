@@ -85,7 +85,7 @@ impl From<mail_auth::AuthError> for AppError {
     fn from(error: mail_auth::AuthError) -> Self {
         use mail_auth::AuthError as E;
         let kind = match error {
-            E::NotConfigured(_) => "config",
+            E::NotConfigured(_) | E::NotEnabled => "config",
             E::Denied | E::Reauthorize => "auth",
             E::Timeout | E::Network => "connect",
             E::Local | E::Browser | E::Protocol => "internal",

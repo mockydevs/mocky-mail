@@ -60,8 +60,13 @@ pub fn resolve_recipients(
     let search = |query: &str| {
         crate::contacts::suggestions(&state, query, mail_store::MAX_SUGGESTIONS).unwrap_or_default()
     };
-    Ok(mail_core::compose::resolve_recipients(
-        &text, name_for, search,
+    let group = |name: &str| {
+        crate::contacts::group_recipients(&state, name)
+            .ok()
+            .flatten()
+    };
+    Ok(mail_core::compose::resolve_recipients_with_groups(
+        &text, group, name_for, search,
     ))
 }
 

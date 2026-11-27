@@ -16,6 +16,8 @@ use chrono::{
 use rrule::{RRule, RRuleSet, Tz, Unvalidated};
 use serde::{Deserialize, Serialize};
 
+use crate::importance::Importance;
+use crate::tasks::TaskFields;
 use crate::vcard::{escape, fold, split_line, unescape, unfold};
 
 /// Most occurrences one event lists in one window.
@@ -30,10 +32,11 @@ const DAY: i64 = 86_400;
 const PRODID: &str = "PRODID:-//Mocky Digital//Mocky Mail//EN";
 
 /// How an event repeats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Repeat {
     /// Once.
+    #[default]
     None,
     /// Every day.
     Daily,
@@ -49,8 +52,101 @@ pub enum Repeat {
     Keep,
 }
 
+/// How often a custom rule repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Freq {
+    /// Every N days.
+    Daily,
+    /// Every N weeks.
+    Weekly,
+    /// Every N months.
+    Monthly,
+    /// Every N years.
+    Yearly,
+}
+
+impl Freq {
+    const fn rule_name(self) -> &'static str {
+        match self {
+            Self::Daily => "DAILY",
+            Self::Weekly => "WEEKLY",
+            Self::Monthly => "MONTHLY",
+            Self::Yearly => "YEARLY",
+        }
+    }
+}
+
+/// A repeat rule (`RRULE`) in the terms of the repeat dialog. Rules it
+/// can't hold (hourly, several days of the month, week numbers, ...) are
+/// not turned into one; those series show as `custom` and keep their rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepeatRule {
+    /// Days, weeks, months or years.
+    pub freq: Freq,
+    /// Every N of them (1 or more).
+    pub interval: u32,
+    /// Weekdays (`MO`..`SU`): for weekly, or one with `set_pos`.
+    #[serde(default)]
+    pub by_day: Vec<String>,
+    /// Day of the month (1 to 31, or -1 for the last).
+    #[serde(default)]
+    pub month_day: Option<i32>,
+    /// Month (1 to 12), for yearly.
+    #[serde(default)]
+    pub month: Option<u32>,
+    /// Which one of `by_day` in the month: 1 to 4, or -1 (the last).
+    #[serde(default)]
+    pub set_pos: Option<i32>,
+    /// Ends after this many times.
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Ends on this day (Unix seconds: midnight UTC of the day).
+    #[serde(default)]
+    pub until: Option<i64>,
+}
+
+/// How an event shows you in free/busy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShowAs {
+    /// Busy.
+    #[default]
+    Busy,
+    /// Free (`TRANSP:TRANSPARENT`).
+    Free,
+    /// Tentative.
+    Tentative,
+    /// Away (out of office).
+    Away,
+}
+
+impl ShowAs {
+    /// The `X-MICROSOFT-CDO-BUSYSTATUS` value.
+    const fn cdo(self) -> &'static str {
+        match self {
+            Self::Busy => "BUSY",
+            Self::Free => "FREE",
+            Self::Tentative => "TENTATIVE",
+            Self::Away => "OOF",
+        }
+    }
+}
+
+/// Which dates of a series an edit is for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// Only the date named by `occurrence`.
+    This,
+    /// The whole series.
+    #[default]
+    All,
+}
+
 /// Someone on an event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Person {
     /// Email address.
@@ -64,6 +160,10 @@ pub struct Person {
 /// One occurrence of an event: a single event, or one date of a series.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the event's own yes/no fields"
+)]
 pub struct Occurrence {
     /// The event's `UID`.
     pub uid: String,
@@ -94,10 +194,31 @@ pub struct Occurrence {
     pub tentative: bool,
     /// Reminders: minutes before the start (0: at the start), soonest last.
     pub reminders: Vec<u32>,
+    /// How it shows you in free/busy.
+    pub show_as: ShowAs,
+    /// `CLASS:PRIVATE` (or `CONFIDENTIAL`).
+    pub private: bool,
+    /// The series' rule as the repeat dialog shows it; `None` when not
+    /// repeating or when the rule is one it can't show.
+    pub repeat_rule: Option<RepeatRule>,
+    /// You organise it: there is no organiser, or it is you. Read without
+    /// knowing who "you" are, this is `organizer.is_none()`; see
+    /// [`Occurrence::mark_organizer`].
+    pub is_organizer: bool,
+}
+
+impl Occurrence {
+    /// Set `is_organizer` for the account `me`.
+    pub fn mark_organizer(&mut self, me: &str) {
+        self.is_organizer = self
+            .organizer
+            .as_ref()
+            .is_none_or(|p| same_address(&p.email, me));
+    }
 }
 
 /// An event as typed in the editor.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventInput {
     /// Title.
@@ -121,6 +242,31 @@ pub struct EventInput {
     /// reminders as they are.
     #[serde(default)]
     pub reminders: Option<Vec<u32>>,
+    /// A custom rule, used instead of `repeat` when set.
+    #[serde(default)]
+    pub repeat_rule: Option<RepeatRule>,
+    /// Free/busy; `None` leaves an edited event's as it is.
+    #[serde(default)]
+    pub show_as: Option<ShowAs>,
+    /// Private; `None` leaves an edited event's as it is.
+    #[serde(default)]
+    pub private: Option<bool>,
+    /// Invite these addresses; `None` leaves the attendees as they are.
+    #[serde(default)]
+    pub attendees: Option<Vec<String>>,
+    /// Send invitations, updates or cancellations to the attendees.
+    #[serde(default)]
+    pub notify_attendees: bool,
+    /// Editing one date of a series: its `recurrence_id`.
+    #[serde(default)]
+    pub occurrence: Option<i64>,
+    /// With `occurrence`: only that date, or the whole series.
+    #[serde(default)]
+    pub scope: Scope,
+    /// Who you are, for the `ORGANIZER` line added when inviting people.
+    /// Set by the app, never by the interface.
+    #[serde(skip)]
+    pub organizer: Option<Person>,
 }
 
 // ---------------------------------------------------------------- reading
@@ -518,82 +664,105 @@ fn fixed_zone(offset: i32, at: NaiveDateTime) -> Option<chrono_tz::Tz> {
     })
 }
 
+/// Common Windows zone names (Exchange and Outlook write them) and the
+/// IANA zones they stand for.
+const WINDOWS_ZONES: &[(&str, &str)] = &[
+    // Africa.
+    ("E. Africa Standard Time", "Africa/Nairobi"),
+    ("South Africa Standard Time", "Africa/Johannesburg"),
+    ("W. Central Africa Standard Time", "Africa/Lagos"),
+    ("Egypt Standard Time", "Africa/Cairo"),
+    ("Morocco Standard Time", "Africa/Casablanca"),
+    ("Libya Standard Time", "Africa/Tripoli"),
+    ("Namibia Standard Time", "Africa/Windhoek"),
+    ("Sudan Standard Time", "Africa/Khartoum"),
+    ("South Sudan Standard Time", "Africa/Juba"),
+    ("Mauritius Standard Time", "Indian/Mauritius"),
+    // Europe.
+    ("GMT Standard Time", "Europe/London"),
+    ("W. Europe Standard Time", "Europe/Berlin"),
+    ("Romance Standard Time", "Europe/Paris"),
+    ("Central Europe Standard Time", "Europe/Budapest"),
+    ("Central European Standard Time", "Europe/Warsaw"),
+    ("E. Europe Standard Time", "Europe/Chisinau"),
+    ("FLE Standard Time", "Europe/Kyiv"),
+    ("GTB Standard Time", "Europe/Bucharest"),
+    ("Turkey Standard Time", "Europe/Istanbul"),
+    ("Russian Standard Time", "Europe/Moscow"),
+    ("Belarus Standard Time", "Europe/Minsk"),
+    // Middle East and Asia.
+    ("Israel Standard Time", "Asia/Jerusalem"),
+    ("Jordan Standard Time", "Asia/Amman"),
+    ("Middle East Standard Time", "Asia/Beirut"),
+    ("Arab Standard Time", "Asia/Riyadh"),
+    ("Arabic Standard Time", "Asia/Baghdad"),
+    ("Arabian Standard Time", "Asia/Dubai"),
+    ("Iran Standard Time", "Asia/Tehran"),
+    ("Pakistan Standard Time", "Asia/Karachi"),
+    ("India Standard Time", "Asia/Kolkata"),
+    ("Sri Lanka Standard Time", "Asia/Colombo"),
+    ("Nepal Standard Time", "Asia/Kathmandu"),
+    ("Bangladesh Standard Time", "Asia/Dhaka"),
+    ("SE Asia Standard Time", "Asia/Bangkok"),
+    ("China Standard Time", "Asia/Shanghai"),
+    ("Singapore Standard Time", "Asia/Singapore"),
+    ("Taipei Standard Time", "Asia/Taipei"),
+    ("W. Australia Standard Time", "Australia/Perth"),
+    ("Tokyo Standard Time", "Asia/Tokyo"),
+    ("Korea Standard Time", "Asia/Seoul"),
+    // Australia and the Pacific.
+    ("Cen. Australia Standard Time", "Australia/Adelaide"),
+    ("AUS Central Standard Time", "Australia/Darwin"),
+    ("E. Australia Standard Time", "Australia/Brisbane"),
+    ("AUS Eastern Standard Time", "Australia/Sydney"),
+    ("Tasmania Standard Time", "Australia/Hobart"),
+    ("New Zealand Standard Time", "Pacific/Auckland"),
+    ("Hawaiian Standard Time", "Pacific/Honolulu"),
+    // The Americas.
+    ("Alaskan Standard Time", "America/Anchorage"),
+    ("Pacific Standard Time", "America/Los_Angeles"),
+    ("US Mountain Standard Time", "America/Phoenix"),
+    ("Mountain Standard Time", "America/Denver"),
+    ("Central Standard Time", "America/Chicago"),
+    ("Canada Central Standard Time", "America/Regina"),
+    ("Central Standard Time (Mexico)", "America/Mexico_City"),
+    ("Eastern Standard Time", "America/New_York"),
+    ("US Eastern Standard Time", "America/Indiana/Indianapolis"),
+    ("SA Pacific Standard Time", "America/Bogota"),
+    ("Atlantic Standard Time", "America/Halifax"),
+    ("Venezuela Standard Time", "America/Caracas"),
+    ("Pacific SA Standard Time", "America/Santiago"),
+    ("Newfoundland Standard Time", "America/St_Johns"),
+    ("E. South America Standard Time", "America/Sao_Paulo"),
+    ("Argentina Standard Time", "America/Argentina/Buenos_Aires"),
+    ("UTC", "UTC"),
+    ("Coordinated Universal Time", "UTC"),
+    ("Greenwich Standard Time", "UTC"),
+];
+
 /// The IANA zone for a Windows time zone name, as Outlook and Exchange
 /// write them in a `TZID`.
 fn windows_zone(id: &str) -> Option<&'static str> {
-    let name = match id {
-        // Africa.
-        "E. Africa Standard Time" => "Africa/Nairobi",
-        "South Africa Standard Time" => "Africa/Johannesburg",
-        "W. Central Africa Standard Time" => "Africa/Lagos",
-        "Egypt Standard Time" => "Africa/Cairo",
-        "Morocco Standard Time" => "Africa/Casablanca",
-        "Libya Standard Time" => "Africa/Tripoli",
-        "Namibia Standard Time" => "Africa/Windhoek",
-        "Sudan Standard Time" => "Africa/Khartoum",
-        "South Sudan Standard Time" => "Africa/Juba",
-        "Mauritius Standard Time" => "Indian/Mauritius",
-        // Europe.
-        "GMT Standard Time" => "Europe/London",
-        "W. Europe Standard Time" => "Europe/Berlin",
-        "Romance Standard Time" => "Europe/Paris",
-        "Central Europe Standard Time" => "Europe/Budapest",
-        "Central European Standard Time" => "Europe/Warsaw",
-        "E. Europe Standard Time" => "Europe/Chisinau",
-        "FLE Standard Time" => "Europe/Kyiv",
-        "GTB Standard Time" => "Europe/Bucharest",
-        "Turkey Standard Time" => "Europe/Istanbul",
-        "Russian Standard Time" => "Europe/Moscow",
-        "Belarus Standard Time" => "Europe/Minsk",
-        // Middle East and Asia.
-        "Israel Standard Time" => "Asia/Jerusalem",
-        "Jordan Standard Time" => "Asia/Amman",
-        "Middle East Standard Time" => "Asia/Beirut",
-        "Arab Standard Time" => "Asia/Riyadh",
-        "Arabic Standard Time" => "Asia/Baghdad",
-        "Arabian Standard Time" => "Asia/Dubai",
-        "Iran Standard Time" => "Asia/Tehran",
-        "Pakistan Standard Time" => "Asia/Karachi",
-        "India Standard Time" => "Asia/Kolkata",
-        "Sri Lanka Standard Time" => "Asia/Colombo",
-        "Nepal Standard Time" => "Asia/Kathmandu",
-        "Bangladesh Standard Time" => "Asia/Dhaka",
-        "SE Asia Standard Time" => "Asia/Bangkok",
-        "China Standard Time" => "Asia/Shanghai",
-        "Singapore Standard Time" => "Asia/Singapore",
-        "Taipei Standard Time" => "Asia/Taipei",
-        "W. Australia Standard Time" => "Australia/Perth",
-        "Tokyo Standard Time" => "Asia/Tokyo",
-        "Korea Standard Time" => "Asia/Seoul",
-        // Australia and the Pacific.
-        "Cen. Australia Standard Time" => "Australia/Adelaide",
-        "AUS Central Standard Time" => "Australia/Darwin",
-        "E. Australia Standard Time" => "Australia/Brisbane",
-        "AUS Eastern Standard Time" => "Australia/Sydney",
-        "Tasmania Standard Time" => "Australia/Hobart",
-        "New Zealand Standard Time" => "Pacific/Auckland",
-        "Hawaiian Standard Time" => "Pacific/Honolulu",
-        // The Americas.
-        "Alaskan Standard Time" => "America/Anchorage",
-        "Pacific Standard Time" => "America/Los_Angeles",
-        "US Mountain Standard Time" => "America/Phoenix",
-        "Mountain Standard Time" => "America/Denver",
-        "Central Standard Time" => "America/Chicago",
-        "Canada Central Standard Time" => "America/Regina",
-        "Central Standard Time (Mexico)" => "America/Mexico_City",
-        "Eastern Standard Time" => "America/New_York",
-        "US Eastern Standard Time" => "America/Indiana/Indianapolis",
-        "SA Pacific Standard Time" => "America/Bogota",
-        "Atlantic Standard Time" => "America/Halifax",
-        "Venezuela Standard Time" => "America/Caracas",
-        "Pacific SA Standard Time" => "America/Santiago",
-        "Newfoundland Standard Time" => "America/St_Johns",
-        "E. South America Standard Time" => "America/Sao_Paulo",
-        "Argentina Standard Time" => "America/Argentina/Buenos_Aires",
-        "UTC" | "Coordinated Universal Time" | "Greenwich Standard Time" => "UTC",
-        _ => return None,
-    };
-    Some(name)
+    WINDOWS_ZONES
+        .iter()
+        .find(|(windows, _)| *windows == id)
+        .map(|(_, iana)| *iana)
+}
+
+/// The IANA zone for a Windows zone name (as Microsoft Graph writes them).
+#[must_use]
+pub fn iana_zone(windows: &str) -> Option<&'static str> {
+    windows_zone(windows.trim())
+}
+
+/// The Windows name of an IANA zone (for Microsoft Graph), if it has a
+/// common one.
+#[must_use]
+pub fn windows_zone_name(iana: &str) -> Option<&'static str> {
+    WINDOWS_ZONES
+        .iter()
+        .find(|(_, zone)| *zone == iana)
+        .map(|(windows, _)| *windows)
 }
 
 /// A time zone from a `TZID`: an IANA name, a name with a vendor prefix
@@ -783,6 +952,8 @@ fn base(event: &Component, zones: &Zones) -> Option<Base> {
         .filter_map(person)
         .collect();
     let rule = event.prop("RRULE").map(|p| p.value.trim().to_owned());
+    let repeat_rule = rule.as_deref().and_then(|r| repeat_rule_of(r, &start));
+    let is_organizer = organizer.is_none();
     Some(Base {
         start,
         length: end.saturating_sub(begin),
@@ -803,8 +974,222 @@ fn base(event: &Component, zones: &Zones) -> Option<Base> {
                 .prop("STATUS")
                 .is_some_and(|p| p.value.trim().eq_ignore_ascii_case("TENTATIVE")),
             reminders: reminders_of(event, begin, end),
+            show_as: show_as_of(event),
+            private: event.prop("CLASS").is_some_and(|p| {
+                matches!(
+                    p.value.trim().to_ascii_uppercase().as_str(),
+                    "PRIVATE" | "CONFIDENTIAL"
+                )
+            }),
+            repeat_rule,
+            is_organizer,
         },
     })
+}
+
+/// Free/busy from Outlook's `X-MICROSOFT-CDO-BUSYSTATUS`, else `TRANSP`
+/// and `STATUS`.
+fn show_as_of(event: &Component) -> ShowAs {
+    if let Some(cdo) = event.prop("X-MICROSOFT-CDO-BUSYSTATUS") {
+        match cdo.value.trim().to_ascii_uppercase().as_str() {
+            "FREE" => return ShowAs::Free,
+            "TENTATIVE" => return ShowAs::Tentative,
+            "OOF" => return ShowAs::Away,
+            "BUSY" | "WORKINGELSEWHERE" => return ShowAs::Busy,
+            _ => {}
+        }
+    }
+    if event
+        .prop("TRANSP")
+        .is_some_and(|p| p.value.trim().eq_ignore_ascii_case("TRANSPARENT"))
+    {
+        return ShowAs::Free;
+    }
+    if event
+        .prop("STATUS")
+        .is_some_and(|p| p.value.trim().eq_ignore_ascii_case("TENTATIVE"))
+    {
+        return ShowAs::Tentative;
+    }
+    ShowAs::Busy
+}
+
+const WEEKDAY_CODES: [&str; 7] = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+
+/// `2TU` as (Some(2), "TU"); `TU` as (None, "TU").
+fn split_by_day(part: &str) -> Option<(Option<i32>, String)> {
+    let part = part.trim().to_ascii_uppercase();
+    let code = part.get(part.len().checked_sub(2)?..)?.to_owned();
+    if !WEEKDAY_CODES.contains(&code.as_str()) {
+        return None;
+    }
+    let number = part.get(..part.len().checked_sub(2)?)?;
+    if number.is_empty() {
+        return Some((None, code));
+    }
+    let n: i32 = number.trim_start_matches('+').parse().ok()?;
+    Some((Some(n), code))
+}
+
+/// The day an `UNTIL` value falls on, as midnight UTC of that day (in the
+/// series' own zone).
+fn until_day(value: &str, start: &DateTime<Tz>) -> Option<i64> {
+    let value = value.trim();
+    let date = if value.len() == 8 {
+        NaiveDate::parse_from_str(value, "%Y%m%d").ok()?
+    } else if let Some(utc) = value.strip_suffix(['Z', 'z']) {
+        let at = NaiveDateTime::parse_from_str(utc, "%Y%m%dT%H%M%S").ok()?;
+        Utc.from_utc_datetime(&at)
+            .with_timezone(&start.timezone())
+            .date_naive()
+    } else {
+        NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
+            .ok()?
+            .date()
+    };
+    Some(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp())
+}
+
+/// A rule in the repeat dialog's terms, if it can show it.
+fn repeat_rule_of(rule: &str, start: &DateTime<Tz>) -> Option<RepeatRule> {
+    let mut out = RepeatRule {
+        freq: Freq::Daily,
+        interval: 1,
+        by_day: Vec::new(),
+        month_day: None,
+        month: None,
+        set_pos: None,
+        count: None,
+        until: None,
+    };
+    let mut freq = None;
+    let mut day_pos: Option<i32> = None;
+    for part in rule.split(';').filter(|p| !p.trim().is_empty()) {
+        let (key, value) = part.split_once('=')?;
+        let value = value.trim();
+        match key.trim().to_ascii_uppercase().as_str() {
+            "FREQ" => {
+                freq = Some(match value.to_ascii_uppercase().as_str() {
+                    "DAILY" => Freq::Daily,
+                    "WEEKLY" => Freq::Weekly,
+                    "MONTHLY" => Freq::Monthly,
+                    "YEARLY" => Freq::Yearly,
+                    _ => return None,
+                });
+            }
+            "INTERVAL" => out.interval = value.parse().ok().filter(|n| *n >= 1)?,
+            "COUNT" => out.count = Some(value.parse().ok().filter(|n| *n >= 1)?),
+            "UNTIL" => out.until = Some(until_day(value, start)?),
+            "BYDAY" => {
+                for day in value.split(',') {
+                    let (pos, code) = split_by_day(day)?;
+                    if pos.is_some() {
+                        if day_pos.is_some() || !out.by_day.is_empty() {
+                            return None;
+                        }
+                        day_pos = pos;
+                    } else if day_pos.is_some() {
+                        return None;
+                    }
+                    if !out.by_day.contains(&code) {
+                        out.by_day.push(code);
+                    }
+                }
+            }
+            "BYMONTHDAY" => {
+                let n: i32 = value.parse().ok()?;
+                if !(n == -1 || (1..=31).contains(&n)) {
+                    return None;
+                }
+                out.month_day = Some(n);
+            }
+            "BYMONTH" => {
+                let n: u32 = value.parse().ok()?;
+                if !(1..=12).contains(&n) {
+                    return None;
+                }
+                out.month = Some(n);
+            }
+            "BYSETPOS" => out.set_pos = Some(value.parse().ok()?),
+            "WKST" => {}
+            _ => return None,
+        }
+    }
+    out.freq = freq?;
+    if day_pos.is_some() {
+        if out.set_pos.is_some() {
+            return None;
+        }
+        out.set_pos = day_pos;
+    }
+    if let Some(pos) = out.set_pos
+        && (!(pos == -1 || (1..=4).contains(&pos)) || out.by_day.len() != 1)
+    {
+        return None;
+    }
+    let fits = match out.freq {
+        Freq::Daily => out.by_day.is_empty() && out.month_day.is_none() && out.month.is_none(),
+        Freq::Weekly => out.month_day.is_none() && out.month.is_none() && out.set_pos.is_none(),
+        Freq::Monthly => {
+            out.month.is_none()
+                && (out.by_day.is_empty() || out.set_pos.is_some())
+                && !(out.month_day.is_some() && out.set_pos.is_some())
+        }
+        Freq::Yearly => {
+            (out.by_day.is_empty() || out.set_pos.is_some())
+                && !(out.month_day.is_some() && out.set_pos.is_some())
+        }
+    };
+    (fits && !(out.count.is_some() && out.until.is_some())).then_some(out)
+}
+
+/// The `RRULE` value for a rule from the repeat dialog. `UNTIL` is the end
+/// of that day: a date for all-day series, else the last second of the day
+/// in `zone` (UTC without one).
+#[must_use]
+pub fn rule_text(rule: &RepeatRule, all_day: bool, zone: Option<chrono_tz::Tz>) -> String {
+    let mut parts = vec![format!("FREQ={}", rule.freq.rule_name())];
+    if rule.interval > 1 {
+        parts.push(format!("INTERVAL={}", rule.interval));
+    }
+    let days: Vec<String> = rule
+        .by_day
+        .iter()
+        .map(|d| d.trim().to_ascii_uppercase())
+        .filter(|d| WEEKDAY_CODES.contains(&d.as_str()))
+        .collect();
+    match (rule.set_pos, days.as_slice()) {
+        (Some(pos), [day]) if !matches!(rule.freq, Freq::Daily | Freq::Weekly) => {
+            parts.push(format!("BYDAY={pos}{day}"));
+        }
+        (_, []) => {}
+        (_, days) => parts.push(format!("BYDAY={}", days.join(","))),
+    }
+    if let Some(day) = rule.month_day {
+        parts.push(format!("BYMONTHDAY={day}"));
+    }
+    if let Some(month) = rule.month {
+        parts.push(format!("BYMONTH={month}"));
+    }
+    if let Some(count) = rule.count {
+        parts.push(format!("COUNT={count}"));
+    } else if let Some(until) = rule.until {
+        let day = Utc
+            .timestamp_opt(until, 0)
+            .single()
+            .unwrap_or_default()
+            .date_naive();
+        if all_day {
+            parts.push(format!("UNTIL={}", day.format("%Y%m%d")));
+        } else {
+            let last = day.and_hms_opt(23, 59, 59).unwrap_or_default();
+            let utc = zone
+                .and_then(|z| z.from_local_datetime(&last).earliest())
+                .map_or_else(|| last.and_utc(), |d| d.with_timezone(&Utc));
+            parts.push(format!("UNTIL={}", utc.format("%Y%m%dT%H%M%SZ")));
+        }
+    }
+    parts.join(";")
 }
 
 /// Most reminder lead time read: four weeks, in minutes.
@@ -1437,7 +1822,161 @@ fn field_lines(
     lines.extend(text_line("SUMMARY", &input.title));
     lines.extend(text_line("LOCATION", &input.location));
     lines.extend(text_line("DESCRIPTION", &input.notes));
+    if let Some(show_as) = input.show_as {
+        lines.push(
+            if show_as == ShowAs::Free {
+                "TRANSP:TRANSPARENT"
+            } else {
+                "TRANSP:OPAQUE"
+            }
+            .to_owned(),
+        );
+        lines.push(format!("X-MICROSOFT-CDO-BUSYSTATUS:{}", show_as.cdo()));
+    }
+    if let Some(private) = input.private {
+        lines.push(
+            if private {
+                "CLASS:PRIVATE"
+            } else {
+                "CLASS:PUBLIC"
+            }
+            .to_owned(),
+        );
+    }
     (lines, zone)
+}
+
+/// Properties of an edited event the editor's fields replace.
+fn replaced_props(input: &EventInput) -> Vec<&'static str> {
+    let mut drop = vec![
+        "SUMMARY",
+        "LOCATION",
+        "DESCRIPTION",
+        "DTSTART",
+        "DTEND",
+        "DURATION",
+        "DTSTAMP",
+        "LAST-MODIFIED",
+        "SEQUENCE",
+    ];
+    if input.show_as.is_some() {
+        drop.extend(["TRANSP", "X-MICROSOFT-CDO-BUSYSTATUS"]);
+    }
+    if input.private.is_some() {
+        drop.push("CLASS");
+    }
+    if input.attendees.is_some() {
+        drop.push("ATTENDEE");
+    }
+    drop
+}
+
+/// What an edit does to the series' rule: `None` keeps it, `Some(None)`
+/// removes it, `Some(Some(line))` writes this one.
+#[allow(clippy::option_option, reason = "keep, remove or replace")]
+fn rule_change(input: &EventInput, zone: Option<chrono_tz::Tz>) -> Option<Option<String>> {
+    if let Some(rule) = &input.repeat_rule {
+        return Some(Some(format!(
+            "RRULE:{}",
+            rule_text(rule, input.all_day, zone)
+        )));
+    }
+    match input.repeat {
+        Repeat::Keep | Repeat::Custom => None,
+        other => Some(rule_line(other)),
+    }
+}
+
+/// The email address in an `ATTENDEE` or `ORGANIZER` line.
+fn line_address(raw: &str) -> Option<String> {
+    let line = split_line(raw)?;
+    person(&Prop {
+        name: line.name.clone(),
+        params: line.params.to_owned(),
+        value: line.value.to_owned(),
+    })
+    .map(|p| p.email)
+}
+
+/// `ATTENDEE` lines (and an `ORGANIZER` if none) for the editor's list of
+/// addresses. People already invited keep their line with their answer.
+fn people_lines(input: &EventInput, block_lines: &[&str]) -> Vec<String> {
+    let Some(wanted) = &input.attendees else {
+        return Vec::new();
+    };
+    let top_level = |name: &str| -> Vec<&str> {
+        let mut depth = 0usize;
+        block_lines
+            .iter()
+            .filter(|raw| {
+                let n = split_line(raw).map(|l| l.name).unwrap_or_default();
+                match n.as_str() {
+                    "BEGIN" => {
+                        depth = depth.saturating_add(1);
+                        false
+                    }
+                    "END" => {
+                        depth = depth.saturating_sub(1);
+                        false
+                    }
+                    _ => depth == 0 && n == name,
+                }
+            })
+            .copied()
+            .collect()
+    };
+    let existing = top_level("ATTENDEE");
+    let organizer = top_level("ORGANIZER")
+        .first()
+        .and_then(|raw| line_address(raw));
+    let me = input.organizer.as_ref().map(|p| p.email.clone());
+    let mut out = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for address in wanted {
+        let address = address.trim();
+        if address.is_empty()
+            || !address.contains('@')
+            || address
+                .chars()
+                .any(|c| c.is_control() || c == ':' || c == ';')
+            || seen.iter().any(|s| same_address(s, address))
+        {
+            continue;
+        }
+        seen.push(address.to_owned());
+        let kept = existing
+            .iter()
+            .find(|raw| line_address(raw).is_some_and(|a| same_address(&a, address)));
+        match kept {
+            Some(raw) => out.push((*raw).to_owned()),
+            None => out.push(format!(
+                "ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{address}"
+            )),
+        }
+    }
+    // You, as organiser, stay listed if you were.
+    if let Some(me) = &me
+        && let Some(raw) = existing
+            .iter()
+            .find(|raw| line_address(raw).is_some_and(|a| same_address(&a, me)))
+        && !seen.iter().any(|s| same_address(s, me))
+    {
+        out.insert(0, (*raw).to_owned());
+    }
+    if organizer.is_none()
+        && !seen.is_empty()
+        && let Some(me) = &input.organizer
+    {
+        let mut line = "ORGANIZER".to_owned();
+        if let Some(name) = me.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            line.push_str(";CN=");
+            line.push_str(&quote_param(name));
+        }
+        line.push_str(":mailto:");
+        line.push_str(me.email.trim());
+        out.insert(0, line);
+    }
+    out
 }
 
 /// A new calendar resource with one event.
@@ -1457,7 +1996,8 @@ pub fn new_event(uid: &str, input: &EventInput, now: i64) -> String {
     lines.push(format!("UID:{}", escape(uid)));
     lines.push(format!("CREATED:{}", utc_stamp(now)));
     lines.extend(fields);
-    lines.extend(rule_line(input.repeat));
+    lines.extend(rule_change(input, zone).flatten());
+    lines.extend(people_lines(input, &[]));
     lines.extend(alarm_lines(input.reminders.as_deref().unwrap_or_default()));
     lines.push("END:VEVENT".to_owned());
     lines.push("END:VCALENDAR".to_owned());
@@ -1577,20 +2117,12 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
         .unwrap_or(0)
         .saturating_add(1);
     let (fields, zone) = field_lines(input, now, sequence);
-    let mut drop = vec![
-        "SUMMARY",
-        "LOCATION",
-        "DESCRIPTION",
-        "DTSTART",
-        "DTEND",
-        "DURATION",
-        "DTSTAMP",
-        "LAST-MODIFIED",
-        "SEQUENCE",
-    ];
-    if input.repeat != Repeat::Keep {
+    let rule = rule_change(input, zone);
+    let no_longer_a_series = matches!(rule, Some(None));
+    let mut drop = replaced_props(input);
+    if rule.is_some() {
         drop.push("RRULE");
-        if input.repeat == Repeat::None {
+        if no_longer_a_series {
             drop.extend(["EXDATE", "RDATE"]);
         }
     }
@@ -1604,7 +2136,7 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
     // No longer a series: the changed copies of single dates
     // (`RECURRENCE-ID`) go with the rule, or each would show as an event
     // of its own.
-    let drop_overrides = input.repeat == Repeat::None;
+    let drop_overrides = no_longer_a_series;
     let mut out: Vec<String> = Vec::new();
     for (i, raw) in lines.iter().enumerate() {
         if i == master.begin {
@@ -1616,9 +2148,15 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
             }
             out.push((*raw).to_owned());
             out.extend(fields.iter().cloned());
-            if input.repeat != Repeat::Keep {
-                out.extend(rule_line(input.repeat));
+            if let Some(rule) = &rule {
+                out.extend(rule.iter().cloned());
             }
+            out.extend(people_lines(
+                input,
+                lines
+                    .get(master.begin.saturating_add(1)..master.end)
+                    .unwrap_or_default(),
+            ));
             out.extend(
                 kept_lines(&lines, master, &drop, input.reminders.is_some())
                     .into_iter()
@@ -1652,6 +2190,140 @@ pub fn edit_event(original: &str, input: &EventInput, now: i64) -> Option<String
     Some(finish(&out))
 }
 
+/// A date line (`EXDATE`, `RECURRENCE-ID`, `DTSTART`) naming `seconds` the
+/// way the series' `DTSTART` is written: a date, UTC, or local time in its
+/// zone.
+fn date_line(name: &str, start: &Prop, zones: &Zones, seconds: i64) -> Option<String> {
+    Some(if is_date(start) {
+        format!("{name};VALUE=DATE:{}", utc_date(seconds))
+    } else if start.value.trim().ends_with(['Z', 'z']) {
+        format!("{name}:{}", utc_stamp(seconds))
+    } else {
+        let tz = tz_of(start, zones);
+        let local = at(tz, seconds)?.format("%Y%m%dT%H%M%S").to_string();
+        match start.param("TZID") {
+            Some(id) if !tz.is_local() => format!("{name};TZID={}:{local}", quote_param(&id)),
+            _ => format!("{name}:{local}"),
+        }
+    })
+}
+
+/// Whether a block is the changed copy of the date `recurrence_id`.
+fn override_for(lines: &[&str], block: &Block, zones: &Zones, recurrence_id: i64) -> bool {
+    block.is_override
+        && lines
+            .get(block.begin..block.end)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|l| split_line(l))
+            .find(|l| l.name == "RECURRENCE-ID")
+            .and_then(|l| {
+                when(
+                    &Prop {
+                        name: l.name,
+                        params: l.params.to_owned(),
+                        value: l.value.to_owned(),
+                    },
+                    zones,
+                )
+            })
+            .is_some_and(|(rid, _)| rid.timestamp() == recurrence_id)
+}
+
+/// The `DTSTART` of a block, as a property.
+fn block_start(lines: &[&str], block: &Block) -> Option<Prop> {
+    lines
+        .get(block.begin..block.end)?
+        .iter()
+        .filter_map(|l| split_line(l))
+        .find(|l| l.name == "DTSTART")
+        .map(|l| Prop {
+            name: l.name,
+            params: l.params.to_owned(),
+            value: l.value.to_owned(),
+        })
+}
+
+/// Change one date of a series only: its changed copy (`RECURRENCE-ID`)
+/// is written, or rewritten, with the editor's fields; the series and its
+/// other dates stay as they are. `None` when there is no series.
+#[must_use]
+pub fn edit_occurrence(
+    original: &str,
+    recurrence_id: i64,
+    input: &EventInput,
+    now: i64,
+) -> Option<String> {
+    let unfolded = unfold(original);
+    let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
+    let found = blocks(&lines);
+    let zones = calendar(original).1;
+    let master = found.iter().find(|b| !b.is_override)?;
+    let start = block_start(&lines, master)?;
+    let rid = date_line("RECURRENCE-ID", &start, &zones, recurrence_id)?;
+    let existing = found
+        .iter()
+        .find(|b| override_for(&lines, b, &zones, recurrence_id));
+    let source = existing.unwrap_or(master);
+    let sequence = vevents(original)
+        .iter()
+        .filter_map(|e| e.prop("SEQUENCE"))
+        .filter_map(|p| p.value.trim().parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    // One date can't repeat on its own.
+    let single = EventInput {
+        repeat: Repeat::Keep,
+        repeat_rule: None,
+        ..input.clone()
+    };
+    let (fields, zone) = field_lines(&single, now, sequence);
+    let mut drop = replaced_props(&single);
+    drop.extend(["RRULE", "EXDATE", "RDATE", "RECURRENCE-ID"]);
+    let mut block = vec!["BEGIN:VEVENT".to_owned(), rid];
+    block.extend(fields);
+    block.extend(people_lines(
+        &single,
+        lines
+            .get(source.begin.saturating_add(1)..source.end)
+            .unwrap_or_default(),
+    ));
+    block.extend(
+        kept_lines(&lines, source, &drop, single.reminders.is_some())
+            .into_iter()
+            .map(str::to_owned),
+    );
+    if let Some(reminders) = &single.reminders {
+        block.extend(alarm_lines(reminders));
+    }
+    block.push("END:VEVENT".to_owned());
+    let has_zone = |name: &str| {
+        parse(original).iter().any(|cal| {
+            cal.children
+                .iter()
+                .any(|c| c.name == "VTIMEZONE" && c.text("TZID") == name)
+        })
+    };
+    let mut out = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        if let Some(zone) = zone
+            && !has_zone(zone.name())
+            && found.first().is_some_and(|b| b.begin == i)
+        {
+            out.extend(vtimezone(zone, year_of(single.start)));
+        }
+        if existing.is_some_and(|b| i >= b.begin && i <= b.end) {
+            continue;
+        }
+        out.push((*raw).to_owned());
+        if i == master.end {
+            out.extend(block.iter().cloned());
+        }
+    }
+    Some(finish(&out))
+}
+
 /// Remove one date of a series: an `EXDATE` on the series, and that
 /// date's own changed copy if it has one. `None` when there's no series.
 #[must_use]
@@ -1671,41 +2343,11 @@ pub fn skip_occurrence(original: &str, recurrence_id: i64) -> Option<String> {
             params: l.params.to_owned(),
             value: l.value.to_owned(),
         })?;
-    let exdate = if is_date(&start) {
-        format!("EXDATE;VALUE=DATE:{}", utc_date(recurrence_id))
-    } else if start.value.trim().ends_with(['Z', 'z']) {
-        format!("EXDATE:{}", utc_stamp(recurrence_id))
-    } else {
-        let tz = tz_of(&start, &zones);
-        let local = at(tz, recurrence_id)?.format("%Y%m%dT%H%M%S").to_string();
-        match start.param("TZID") {
-            Some(id) if !tz.is_local() => format!("EXDATE;TZID={id}:{local}"),
-            _ => format!("EXDATE:{local}"),
-        }
-    };
+    let exdate = date_line("EXDATE", &start, &zones, recurrence_id)?;
     // Overrides for that date are dropped.
     let skipped: Vec<&Block> = found
         .iter()
-        .filter(|b| {
-            b.is_override
-                && lines
-                    .get(b.begin..b.end)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|l| split_line(l))
-                    .find(|l| l.name == "RECURRENCE-ID")
-                    .and_then(|l| {
-                        when(
-                            &Prop {
-                                name: l.name,
-                                params: l.params.to_owned(),
-                                value: l.value.to_owned(),
-                            },
-                            &zones,
-                        )
-                    })
-                    .is_some_and(|(rid, _)| rid.timestamp() == recurrence_id)
-        })
+        .filter(|b| override_for(&lines, b, &zones, recurrence_id))
         .collect();
     let mut out = Vec::new();
     for (i, raw) in lines.iter().enumerate() {
@@ -2039,6 +2681,526 @@ pub fn apply_reply(stored: &str, reply: &str) -> Option<String> {
     changed.then(|| finish(&out))
 }
 
+// ------------------------------------------------------------- scheduling
+
+/// Lines of a resource without alarms or `METHOD`, unfolded.
+fn without_alarms(lines: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut skipping: Option<usize> = None;
+    for raw in lines {
+        let line = split_line(raw);
+        let name = line.as_ref().map(|l| l.name.clone()).unwrap_or_default();
+        match name.as_str() {
+            "BEGIN" => {
+                depth = depth.saturating_add(1);
+                if skipping.is_none()
+                    && line.is_some_and(|l| l.value.trim().eq_ignore_ascii_case("VALARM"))
+                {
+                    skipping = Some(depth);
+                }
+            }
+            "END" => {
+                let closing = depth;
+                depth = depth.saturating_sub(1);
+                if skipping == Some(closing) {
+                    skipping = None;
+                    continue;
+                }
+            }
+            "METHOD" if depth == 1 => continue,
+            _ => {}
+        }
+        if skipping.is_none() {
+            out.push((*raw).to_owned());
+        }
+    }
+    out
+}
+
+/// An invitation or update to email the attendees (iMIP `METHOD:REQUEST`):
+/// the stored event as it is, without your own alarms. `None` when it has
+/// no event.
+#[must_use]
+pub fn itip_request(ics: &str) -> Option<String> {
+    let unfolded = unfold(ics);
+    let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
+    if blocks(&lines).is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in without_alarms(&lines) {
+        let calendar_start = line.trim().eq_ignore_ascii_case("BEGIN:VCALENDAR");
+        out.push(line);
+        if calendar_start {
+            out.push("METHOD:REQUEST".to_owned());
+        }
+    }
+    Some(finish(&out))
+}
+
+/// What a cancellation keeps of each event.
+const CANCEL_KEEPS: &[&str] = &[
+    "UID",
+    "RECURRENCE-ID",
+    "DTSTART",
+    "DTEND",
+    "DURATION",
+    "SUMMARY",
+    "LOCATION",
+    "ORGANIZER",
+];
+
+/// A cancellation to email (iMIP `METHOD:CANCEL`): of the whole event, or
+/// with `recurrence_id` of that one date. `only` limits the `ATTENDEE`s
+/// named (people taken off the list); `None` names everyone. `None` when
+/// there is no event.
+#[must_use]
+pub fn itip_cancel(
+    ics: &str,
+    recurrence_id: Option<i64>,
+    only: Option<&[String]>,
+    now: i64,
+) -> Option<String> {
+    let unfolded = unfold(ics);
+    let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
+    let events = blocks(&lines);
+    let zones = calendar(ics).1;
+    let master = events
+        .iter()
+        .find(|b| !b.is_override)
+        .or_else(|| events.first())?;
+    let sequence = vevents(ics)
+        .iter()
+        .filter_map(|e| e.prop("SEQUENCE"))
+        .filter_map(|p| p.value.trim().parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let named = |raw: &str| {
+        only.is_none_or(|list| {
+            line_address(raw).is_some_and(|a| list.iter().any(|w| same_address(w, &a)))
+        })
+    };
+    let mut out = vec![
+        "BEGIN:VCALENDAR".to_owned(),
+        "VERSION:2.0".to_owned(),
+        PRODID.to_owned(),
+        "METHOD:CANCEL".to_owned(),
+    ];
+    for (from, to) in zone_blocks(&lines) {
+        out.extend(copy_block(&lines, from, to));
+    }
+    let chosen: Vec<&Block> = match recurrence_id {
+        Some(_) => vec![master],
+        None => events.iter().collect(),
+    };
+    for block in chosen {
+        out.push("BEGIN:VEVENT".to_owned());
+        let mut depth = 0usize;
+        for raw in lines
+            .get(block.begin.saturating_add(1)..block.end)
+            .unwrap_or_default()
+        {
+            let name = split_line(raw).map(|l| l.name).unwrap_or_default();
+            match name.as_str() {
+                "BEGIN" => depth = depth.saturating_add(1),
+                "END" => depth = depth.saturating_sub(1),
+                _ if depth > 0 => {}
+                "ATTENDEE" if named(raw) => out.push((*raw).to_owned()),
+                "DTSTART" | "DTEND" | "DURATION" | "RECURRENCE-ID" if recurrence_id.is_some() => {}
+                n if CANCEL_KEEPS.contains(&n) => out.push((*raw).to_owned()),
+                _ => {}
+            }
+        }
+        if let Some(rid) = recurrence_id {
+            let start = block_start(&lines, block)?;
+            out.push(date_line("RECURRENCE-ID", &start, &zones, rid)?);
+            out.push(date_line("DTSTART", &start, &zones, rid)?);
+        }
+        out.push(format!("SEQUENCE:{sequence}"));
+        out.push(format!("DTSTAMP:{}", utc_stamp(now)));
+        out.push("STATUS:CANCELLED".to_owned());
+        out.push("END:VEVENT".to_owned());
+    }
+    out.push("END:VCALENDAR".to_owned());
+    Some(finish(&out))
+}
+
+/// A busy stretch in free/busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BusyPeriod {
+    /// Unix seconds.
+    pub start: i64,
+    /// Unix seconds, exclusive.
+    pub end: i64,
+    /// Busy, tentative or away.
+    pub show_as: ShowAs,
+}
+
+/// The busy periods in a `VFREEBUSY` (a `free-busy-query` answer, or one
+/// recipient's part of a scheduling answer). Free periods are left out.
+#[must_use]
+pub fn free_busy_periods(ics: &str) -> Vec<BusyPeriod> {
+    let mut out = Vec::new();
+    for fb in parse(ics)
+        .into_iter()
+        .filter(|c| c.name == "VCALENDAR")
+        .flat_map(|c| c.children)
+        .filter(|c| c.name == "VFREEBUSY")
+    {
+        for prop in fb.props.iter().filter(|p| p.name == "FREEBUSY") {
+            let show_as = match prop
+                .param("FBTYPE")
+                .unwrap_or_default()
+                .to_ascii_uppercase()
+                .as_str()
+            {
+                "FREE" => continue,
+                "BUSY-TENTATIVE" => ShowAs::Tentative,
+                "BUSY-UNAVAILABLE" => ShowAs::Away,
+                _ => ShowAs::Busy,
+            };
+            for period in prop.value.split(',') {
+                let Some((from, to)) = period.trim().split_once('/') else {
+                    continue;
+                };
+                let Some(start) = parse_value(from, false, Tz::UTC).map(|d| d.timestamp()) else {
+                    continue;
+                };
+                let end = if to.trim_start().starts_with(['P', 'p', '+', '-']) {
+                    parse_duration(to).and_then(|d| start.checked_add(d))
+                } else {
+                    parse_value(to, false, Tz::UTC).map(|d| d.timestamp())
+                };
+                if let Some(end) = end.filter(|e| *e > start) {
+                    out.push(BusyPeriod {
+                        start,
+                        end,
+                        show_as,
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by_key(|p| (p.start, p.end));
+    out
+}
+
+/// The `ATTENDEE` a `VFREEBUSY` answer is for, if it names one.
+#[must_use]
+pub fn free_busy_attendee(ics: &str) -> Option<String> {
+    parse(ics)
+        .into_iter()
+        .filter(|c| c.name == "VCALENDAR")
+        .flat_map(|c| c.children)
+        .find(|c| c.name == "VFREEBUSY")?
+        .prop("ATTENDEE")
+        .and_then(person)
+        .map(|p| p.email)
+}
+
+/// A free/busy request (`METHOD:REQUEST` `VFREEBUSY`, RFC 6638) for the
+/// scheduling outbox: when `attendees` are busy between `from` and `to`.
+#[must_use]
+pub fn free_busy_request(
+    organizer: &str,
+    attendees: &[String],
+    from: i64,
+    to: i64,
+    uid: &str,
+    now: i64,
+) -> String {
+    let mut lines = vec![
+        "BEGIN:VCALENDAR".to_owned(),
+        "VERSION:2.0".to_owned(),
+        PRODID.to_owned(),
+        "METHOD:REQUEST".to_owned(),
+        "BEGIN:VFREEBUSY".to_owned(),
+        format!("UID:{}", escape(uid)),
+        format!("DTSTAMP:{}", utc_stamp(now)),
+        format!("DTSTART:{}", utc_stamp(from)),
+        format!("DTEND:{}", utc_stamp(to)),
+        format!("ORGANIZER:mailto:{}", organizer.trim()),
+    ];
+    for attendee in attendees {
+        lines.push(format!("ATTENDEE:mailto:{}", attendee.trim()));
+    }
+    lines.push("END:VFREEBUSY".to_owned());
+    lines.push("END:VCALENDAR".to_owned());
+    finish(&lines)
+}
+
+// ------------------------------------------------------------------ tasks
+
+/// Where each `VTODO` block is in a list of unfolded lines.
+fn todo_block(lines: &[&str]) -> Option<(usize, usize)> {
+    let mut depth = 0usize;
+    let mut open = None;
+    for (i, raw) in lines.iter().enumerate() {
+        let Some(line) = split_line(raw) else {
+            continue;
+        };
+        match line.name.as_str() {
+            "BEGIN" => {
+                depth = depth.saturating_add(1);
+                if depth == 2 && line.value.trim().eq_ignore_ascii_case("VTODO") {
+                    open = Some(i);
+                }
+            }
+            "END" => {
+                if depth == 2
+                    && let Some(begin) = open.take()
+                {
+                    return Some((begin, i));
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The to-do in a calendar resource (`VTODO`): its `UID` and fields.
+/// `None` when the resource has none.
+#[must_use]
+pub fn parse_todo(ics: &str) -> Option<(String, TaskFields)> {
+    let todo = parse(ics)
+        .into_iter()
+        .filter(|c| c.name == "VCALENDAR")
+        .flat_map(|c| c.children)
+        .find(|c| c.name == "VTODO")?;
+    let zones = calendar(ics).1;
+    let uid = todo.text("UID");
+    let due = todo
+        .prop("DUE")
+        .and_then(|p| when(p, &zones))
+        .map(|(d, _)| d.timestamp());
+    let start = todo
+        .prop("DTSTART")
+        .and_then(|p| when(p, &zones))
+        .map(|(d, _)| d.timestamp());
+    let completed_at = todo
+        .prop("COMPLETED")
+        .and_then(|p| parse_value(&p.value, false, Tz::UTC))
+        .map(|d| d.timestamp());
+    let status = todo.text("STATUS").to_ascii_uppercase();
+    let completed = status == "COMPLETED"
+        || (status.is_empty() && completed_at.is_some())
+        || todo.text("PERCENT-COMPLETE") == "100";
+    let importance = match todo.text("PRIORITY").parse::<u8>().unwrap_or(0) {
+        1..=4 => Importance::High,
+        6..=9 => Importance::Low,
+        _ => Importance::Normal,
+    };
+    let reminder = todo
+        .children
+        .iter()
+        .filter(|c| c.name == "VALARM")
+        .filter_map(|alarm| {
+            let trigger = alarm.prop("TRIGGER")?;
+            if trigger
+                .param("VALUE")
+                .is_some_and(|v| v.eq_ignore_ascii_case("DATE-TIME"))
+            {
+                return parse_value(&trigger.value, false, Tz::UTC).map(|d| d.timestamp());
+            }
+            let offset = parse_duration(&trigger.value)?;
+            let from_end = trigger
+                .param("RELATED")
+                .is_some_and(|r| r.eq_ignore_ascii_case("END"));
+            let base = if from_end { due } else { start.or(due) }?;
+            base.checked_add(offset)
+        })
+        .min();
+    let categories = todo
+        .props
+        .iter()
+        .filter(|p| p.name == "CATEGORIES")
+        .flat_map(|p| split_categories(&p.value))
+        .collect();
+    Some((
+        uid,
+        TaskFields {
+            title: todo.text("SUMMARY"),
+            notes: todo.text("DESCRIPTION"),
+            due,
+            reminder,
+            importance,
+            completed,
+            completed_at: if completed { completed_at } else { None },
+            categories,
+        },
+    ))
+}
+
+/// Category names in a `CATEGORIES` value (commas, with `\,` kept).
+fn split_categories(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push('\\');
+                    current.push(next);
+                }
+            }
+            ',' => out.push(std::mem::take(&mut current)),
+            c => current.push(c),
+        }
+    }
+    out.push(current);
+    out.into_iter()
+        .map(|c| unescape(&c).trim().to_owned())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// The properties of a to-do that [`write_todo`] replaces.
+const TODO_MANAGED: &[&str] = &[
+    "SUMMARY",
+    "DESCRIPTION",
+    "DUE",
+    "PRIORITY",
+    "STATUS",
+    "COMPLETED",
+    "PERCENT-COMPLETE",
+    "CATEGORIES",
+    "DTSTAMP",
+    "LAST-MODIFIED",
+    "SEQUENCE",
+    "UID",
+];
+
+/// A calendar resource for a to-do. With `original` (the server's copy),
+/// everything the app doesn't edit is kept (start date, URL, related
+/// items, other properties); its alarms are replaced by the reminder.
+#[must_use]
+#[allow(clippy::too_many_lines, reason = "one property after another")]
+pub fn write_todo(uid: &str, task: &TaskFields, original: Option<&str>, now: i64) -> String {
+    let unfolded = original.map(unfold).unwrap_or_default();
+    let lines: Vec<&str> = unfolded.lines().filter(|l| !l.trim().is_empty()).collect();
+    let block = todo_block(&lines);
+    let sequence = original
+        .and_then(|o| {
+            parse(o)
+                .into_iter()
+                .filter(|c| c.name == "VCALENDAR")
+                .flat_map(|c| c.children)
+                .find(|c| c.name == "VTODO")
+        })
+        .map_or(0, |t| {
+            t.text("SEQUENCE")
+                .parse::<u32>()
+                .unwrap_or(0)
+                .saturating_add(1)
+        });
+    let mut fields = vec![
+        format!("UID:{}", escape(uid)),
+        format!("DTSTAMP:{}", utc_stamp(now)),
+        format!("LAST-MODIFIED:{}", utc_stamp(now)),
+        format!("SEQUENCE:{sequence}"),
+    ];
+    fields.extend(text_line("SUMMARY", &task.title));
+    fields.extend(text_line("DESCRIPTION", &task.notes));
+    let due_is_date = task.due.is_some_and(|d| d.rem_euclid(DAY) == 0);
+    if let Some(due) = task.due {
+        fields.push(if due_is_date {
+            format!("DUE;VALUE=DATE:{}", utc_date(due))
+        } else {
+            format!("DUE:{}", utc_stamp(due))
+        });
+    }
+    match task.importance {
+        Importance::High => fields.push("PRIORITY:1".to_owned()),
+        Importance::Low => fields.push("PRIORITY:9".to_owned()),
+        Importance::Normal => {}
+    }
+    if task.completed {
+        fields.push("STATUS:COMPLETED".to_owned());
+        fields.push("PERCENT-COMPLETE:100".to_owned());
+        fields.push(format!(
+            "COMPLETED:{}",
+            utc_stamp(task.completed_at.unwrap_or(now))
+        ));
+    } else {
+        fields.push("STATUS:NEEDS-ACTION".to_owned());
+    }
+    if !task.categories.is_empty() {
+        let names: Vec<String> = task.categories.iter().map(|c| escape(c)).collect();
+        fields.push(format!("CATEGORIES:{}", names.join(",")));
+    }
+    let alarm = task.reminder.map(|at| {
+        vec![
+            "BEGIN:VALARM".to_owned(),
+            "ACTION:DISPLAY".to_owned(),
+            "DESCRIPTION:Reminder".to_owned(),
+            format!("TRIGGER;VALUE=DATE-TIME:{}", utc_stamp(at)),
+            "END:VALARM".to_owned(),
+        ]
+    });
+    let Some((begin, end)) = block else {
+        let mut out = vec![
+            "BEGIN:VCALENDAR".to_owned(),
+            "VERSION:2.0".to_owned(),
+            PRODID.to_owned(),
+            "BEGIN:VTODO".to_owned(),
+            format!("CREATED:{}", utc_stamp(now)),
+        ];
+        out.extend(fields);
+        out.extend(alarm.unwrap_or_default());
+        out.push("END:VTODO".to_owned());
+        out.push("END:VCALENDAR".to_owned());
+        return finish(&out);
+    };
+    let found = Block {
+        begin,
+        end,
+        is_override: false,
+    };
+    let mut drop: Vec<&str> = TODO_MANAGED.to_vec();
+    // A start written as a date-time beside a due date (or the other way)
+    // would make the to-do invalid.
+    let start_mismatch = lines
+        .get(begin..end)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|l| split_line(l))
+        .find(|l| l.name == "DTSTART")
+        .is_some_and(|l| {
+            let params = l.params.to_ascii_uppercase();
+            let date = l.value.trim().len() == 8
+                || (params.contains("VALUE=DATE") && !params.contains("DATE-TIME"));
+            task.due.is_some() && date != due_is_date
+        });
+    if start_mismatch {
+        drop.push("DTSTART");
+    }
+    let mut out = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        if i == begin {
+            out.push((*raw).to_owned());
+            out.extend(fields.iter().cloned());
+            out.extend(
+                kept_lines(&lines, &found, &drop, true)
+                    .into_iter()
+                    .map(str::to_owned),
+            );
+            out.extend(alarm.iter().flatten().cloned());
+            continue;
+        }
+        if i > begin && i < end {
+            continue;
+        }
+        out.push((*raw).to_owned());
+    }
+    finish(&out)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -2172,6 +3334,7 @@ mod tests {
             repeat,
             time_zone: "Africa/Nairobi".into(),
             reminders: None,
+            ..EventInput::default()
         }
     }
 
@@ -2539,5 +3702,465 @@ mod tests {
         assert!(
             occurrences(&busy, 0, ts("2027-01-01T00:00:00Z")).len() <= usize::from(MAX_OCCURRENCES)
         );
+    }
+
+    fn rule_of(ics: &str) -> Option<RepeatRule> {
+        master(ics).unwrap().repeat_rule
+    }
+
+    fn series(rule: &str) -> String {
+        cal(&format!(
+            "BEGIN:VEVENT\r\nUID:r\r\nDTSTART;TZID=Africa/Nairobi:20261103T090000\r\nDTEND;TZID=Africa/Nairobi:20261103T100000\r\nRRULE:{rule}\r\nEND:VEVENT\r\n"
+        ))
+    }
+
+    #[test]
+    fn rules_the_repeat_dialog_can_show() {
+        let every_two_weeks =
+            rule_of(&series("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;WKST=MO")).unwrap();
+        assert_eq!(every_two_weeks.freq, Freq::Weekly);
+        assert_eq!(every_two_weeks.interval, 2);
+        assert_eq!(every_two_weeks.by_day, ["TU", "TH"]);
+        // "The second Tuesday", both ways of writing it.
+        for rule in ["FREQ=MONTHLY;BYDAY=2TU", "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2"] {
+            let r = rule_of(&series(rule)).unwrap();
+            assert_eq!(r.by_day, ["TU"]);
+            assert_eq!(r.set_pos, Some(2));
+        }
+        let last_friday = rule_of(&series("FREQ=MONTHLY;BYDAY=-1FR;COUNT=6")).unwrap();
+        assert_eq!(
+            (last_friday.set_pos, last_friday.count),
+            (Some(-1), Some(6))
+        );
+        let yearly = rule_of(&series(
+            "FREQ=YEARLY;BYMONTH=12;BYMONTHDAY=25;UNTIL=20301225T060000Z",
+        ))
+        .unwrap();
+        assert_eq!((yearly.month, yearly.month_day), (Some(12), Some(25)));
+        assert_eq!(yearly.until, Some(ts("2030-12-25T00:00:00Z")));
+        // A plain daily rule is a rule too (repeat says "daily").
+        let daily = master(&series("FREQ=DAILY")).unwrap();
+        assert_eq!(daily.repeat, Repeat::Daily);
+        assert_eq!(daily.repeat_rule.unwrap().interval, 1);
+        // Rules it can't show: custom, kept as they are.
+        for odd in [
+            "FREQ=HOURLY",
+            "FREQ=MONTHLY;BYMONTHDAY=1,15",
+            "FREQ=YEARLY;BYWEEKNO=20",
+            "FREQ=MONTHLY;BYDAY=MO",
+            "FREQ=DAILY;BYDAY=MO,TU",
+            "FREQ=MONTHLY;BYDAY=5TU",
+        ] {
+            let shown = master(&series(odd)).unwrap();
+            assert_eq!(shown.repeat_rule, None, "{odd}");
+            assert!(shown.recurring);
+        }
+        let single = cal("BEGIN:VEVENT\r\nUID:x\r\nDTSTART:20261103T090000Z\r\nEND:VEVENT\r\n");
+        assert_eq!(master(&single).unwrap().repeat_rule, None);
+    }
+
+    #[test]
+    fn repeat_rules_are_written_and_read_back() {
+        let rules = [
+            RepeatRule {
+                freq: Freq::Weekly,
+                interval: 2,
+                by_day: vec!["MO".into(), "WE".into()],
+                month_day: None,
+                month: None,
+                set_pos: None,
+                count: Some(10),
+                until: None,
+            },
+            RepeatRule {
+                freq: Freq::Monthly,
+                interval: 1,
+                by_day: vec!["TU".into()],
+                month_day: None,
+                month: None,
+                set_pos: Some(2),
+                count: None,
+                until: Some(ts("2027-06-30T00:00:00Z")),
+            },
+            RepeatRule {
+                freq: Freq::Yearly,
+                interval: 1,
+                by_day: vec![],
+                month_day: Some(18),
+                month: Some(11),
+                set_pos: None,
+                count: None,
+                until: None,
+            },
+        ];
+        for rule in rules {
+            let made = new_event(
+                "u",
+                &EventInput {
+                    repeat_rule: Some(rule.clone()),
+                    ..input(Repeat::None)
+                },
+                0,
+            );
+            assert_eq!(rule_of(&made).as_ref(), Some(&rule), "{made}");
+        }
+        // UNTIL is the end of that day where the event is.
+        let text = rule_text(
+            &RepeatRule {
+                freq: Freq::Daily,
+                interval: 1,
+                by_day: vec![],
+                month_day: None,
+                month: None,
+                set_pos: None,
+                count: None,
+                until: Some(ts("2026-11-30T00:00:00Z")),
+            },
+            false,
+            Some(chrono_tz::Africa::Nairobi),
+        );
+        assert_eq!(text, "FREQ=DAILY;UNTIL=20261130T205959Z");
+        // The last date counts.
+        let ics = new_event(
+            "u",
+            &EventInput {
+                start: ts("2026-11-03T06:00:00Z"),
+                end: ts("2026-11-03T07:00:00Z"),
+                repeat_rule: rule_of(&series("FREQ=DAILY;UNTIL=20261105")),
+                ..input(Repeat::None)
+            },
+            0,
+        );
+        let dates = occurrences(&ics, ts("2026-11-01T00:00:00Z"), ts("2026-12-01T00:00:00Z"));
+        assert_eq!(dates.len(), 3);
+        // A custom rule replaces the series' rule when editing.
+        let edited = edit_event(
+            &series("FREQ=DAILY"),
+            &EventInput {
+                repeat_rule: rule_of(&series("FREQ=WEEKLY;INTERVAL=3")),
+                ..input(Repeat::Keep)
+            },
+            0,
+        )
+        .unwrap();
+        assert!(edited.contains("RRULE:FREQ=WEEKLY;INTERVAL=3\r\n"));
+        assert_eq!(edited.matches("RRULE").count(), 1);
+    }
+
+    #[test]
+    fn show_as_and_private() {
+        let read = |props: &str| {
+            master(&cal(&format!(
+                "BEGIN:VEVENT\r\nUID:x\r\nDTSTART:20261103T090000Z\r\n{props}END:VEVENT\r\n"
+            )))
+            .unwrap()
+        };
+        assert_eq!(read("").show_as, ShowAs::Busy);
+        assert_eq!(read("TRANSP:TRANSPARENT\r\n").show_as, ShowAs::Free);
+        assert_eq!(read("STATUS:TENTATIVE\r\n").show_as, ShowAs::Tentative);
+        assert_eq!(
+            read("X-MICROSOFT-CDO-BUSYSTATUS:OOF\r\nTRANSP:OPAQUE\r\n").show_as,
+            ShowAs::Away
+        );
+        assert!(read("CLASS:PRIVATE\r\n").private);
+        assert!(read("CLASS:CONFIDENTIAL\r\n").private);
+        assert!(!read("CLASS:PUBLIC\r\n").private);
+
+        let made = new_event(
+            "u",
+            &EventInput {
+                show_as: Some(ShowAs::Free),
+                private: Some(true),
+                ..input(Repeat::None)
+            },
+            0,
+        );
+        let shown = master(&made).unwrap();
+        assert_eq!((shown.show_as, shown.private), (ShowAs::Free, true));
+        // None leaves them; Some replaces them.
+        let kept = edit_event(&made, &input(Repeat::Keep), 0).unwrap();
+        assert_eq!(master(&kept).unwrap().show_as, ShowAs::Free);
+        let away = edit_event(
+            &made,
+            &EventInput {
+                show_as: Some(ShowAs::Away),
+                private: Some(false),
+                ..input(Repeat::Keep)
+            },
+            0,
+        )
+        .unwrap();
+        let shown = master(&away).unwrap();
+        assert_eq!((shown.show_as, shown.private), (ShowAs::Away, false));
+        assert_eq!(away.matches("TRANSP").count(), 1);
+        assert_eq!(away.matches("CLASS").count(), 1);
+    }
+
+    #[allow(clippy::unnecessary_wraps, reason = "as the editor field holds it")]
+    fn me() -> Option<Person> {
+        Some(Person {
+            email: "info@mocky.co.ke".into(),
+            name: Some("Mocky Digital".into()),
+            status: None,
+        })
+    }
+
+    #[test]
+    fn inviting_people() {
+        let made = new_event(
+            "u",
+            &EventInput {
+                attendees: Some(vec![
+                    "peter@client.example".into(),
+                    "PETER@client.example".into(),
+                    "bad;value@x".into(),
+                ]),
+                organizer: me(),
+                ..input(Repeat::None)
+            },
+            0,
+        );
+        let mut shown = master(&made).unwrap();
+        assert_eq!(shown.organizer.as_ref().unwrap().email, "info@mocky.co.ke");
+        assert_eq!(shown.attendees.len(), 1);
+        assert_eq!(shown.attendees[0].status.as_deref(), Some("needs-action"));
+        shown.mark_organizer("Info@Mocky.co.ke");
+        assert!(shown.is_organizer);
+        shown.mark_organizer("peter@client.example");
+        assert!(!shown.is_organizer);
+        // Someone who answered keeps their answer; a new person is added;
+        // someone taken off goes.
+        let answered = made.replace("PARTSTAT=NEEDS-ACTION", "PARTSTAT=ACCEPTED");
+        let edited = edit_event(
+            &answered,
+            &EventInput {
+                attendees: Some(vec![
+                    "peter@client.example".into(),
+                    "amina@studio.example".into(),
+                ]),
+                organizer: me(),
+                ..input(Repeat::Keep)
+            },
+            0,
+        )
+        .unwrap();
+        let people = master(&edited).unwrap().attendees;
+        assert_eq!(people.len(), 2);
+        assert_eq!(people[0].status.as_deref(), Some("accepted"));
+        assert_eq!(edited.matches("ORGANIZER").count(), 1);
+        let fewer = edit_event(
+            &edited,
+            &EventInput {
+                attendees: Some(vec!["amina@studio.example".into()]),
+                organizer: me(),
+                ..input(Repeat::Keep)
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(master(&fewer).unwrap().attendees.len(), 1);
+        // No list: the attendees stay as they are.
+        let same = edit_event(&edited, &input(Repeat::Keep), 0).unwrap();
+        assert_eq!(master(&same).unwrap().attendees.len(), 2);
+        // Someone else's meeting keeps its organiser, whoever edits it.
+        let theirs = made.replace("mailto:info@mocky.co.ke", "mailto:lead@client.example");
+        assert_eq!(
+            master(&theirs)
+                .unwrap()
+                .organizer
+                .map(|p| p.email)
+                .as_deref(),
+            Some("lead@client.example")
+        );
+        for organizer in [None, me()] {
+            let edited = edit_event(
+                &theirs,
+                &EventInput {
+                    attendees: Some(vec!["amina@studio.example".into()]),
+                    organizer,
+                    ..input(Repeat::Keep)
+                },
+                0,
+            )
+            .unwrap();
+            let shown = master(&edited).unwrap();
+            assert_eq!(
+                shown.organizer.map(|p| p.email).as_deref(),
+                Some("lead@client.example")
+            );
+            assert_eq!(edited.matches("ORGANIZER").count(), 1);
+        }
+    }
+
+    #[test]
+    fn editing_one_date_of_a_series() {
+        let original = series("FREQ=DAILY;COUNT=5");
+        let rid = ts("2026-11-04T06:00:00Z");
+        let moved = EventInput {
+            title: "Stand-up (moved)".into(),
+            start: ts("2026-11-04T08:00:00Z"),
+            end: ts("2026-11-04T08:30:00Z"),
+            occurrence: Some(rid),
+            scope: Scope::This,
+            ..input(Repeat::Keep)
+        };
+        let edited = edit_occurrence(&original, rid, &moved, 0).unwrap();
+        assert!(edited.contains("RECURRENCE-ID;TZID=Africa/Nairobi:20261104T090000\r\n"));
+        assert_eq!(edited.matches("RRULE").count(), 1);
+        let all = occurrences(
+            &edited,
+            ts("2026-11-01T00:00:00Z"),
+            ts("2026-12-01T00:00:00Z"),
+        );
+        assert_eq!(all.len(), 5);
+        let one = all.iter().find(|o| o.recurrence_id == Some(rid)).unwrap();
+        assert_eq!(one.title, "Stand-up (moved)");
+        assert_eq!(one.start, ts("2026-11-04T08:00:00Z"));
+        assert!(one.recurring);
+        // Edited again: the same changed copy is replaced, not added.
+        let again = edit_occurrence(
+            &edited,
+            rid,
+            &EventInput {
+                title: "Stand-up (again)".into(),
+                ..moved.clone()
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(again.matches("RECURRENCE-ID").count(), 1);
+        assert!(again.contains("Stand-up (again)"));
+        let dates = occurrences(
+            &again,
+            ts("2026-11-01T00:00:00Z"),
+            ts("2026-12-01T00:00:00Z"),
+        );
+        assert_eq!(dates.len(), 5);
+        // No series: nothing to change one date of.
+        let lone = cal("BEGIN:VEVENT\r\nRECURRENCE-ID:20261103T090000Z\r\nEND:VEVENT\r\n");
+        assert!(edit_occurrence(&lone, rid, &moved, 0).is_none());
+    }
+
+    #[test]
+    fn invitations_and_cancellations_to_send() {
+        let made = new_event(
+            "meet-1",
+            &EventInput {
+                attendees: Some(vec![
+                    "peter@client.example".into(),
+                    "amina@studio.example".into(),
+                ]),
+                organizer: me(),
+                reminders: Some(vec![15]),
+                ..input(Repeat::Weekly)
+            },
+            0,
+        );
+        let request = itip_request(&made).unwrap();
+        assert!(request.starts_with("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\n"));
+        assert!(!request.contains("VALARM"));
+        let read = invitation(&request, "peter@client.example").unwrap();
+        assert_eq!(read.method, "REQUEST");
+        assert_eq!(read.my_status.as_deref(), Some("needs-action"));
+
+        let cancel = itip_cancel(&made, None, None, ts("2026-11-20T00:00:00Z")).unwrap();
+        assert!(cancel.contains("METHOD:CANCEL\r\n"));
+        assert!(cancel.contains("STATUS:CANCELLED\r\n"));
+        assert!(cancel.contains("SEQUENCE:1\r\n"));
+        assert_eq!(cancel.matches("ATTENDEE").count(), 2);
+        let read = invitation(&cancel, "amina@studio.example").unwrap();
+        assert_eq!(read.method, "CANCEL");
+        // Only the people taken off the list.
+        let only = ["amina@studio.example".to_owned()];
+        let cancel = itip_cancel(&made, None, Some(&only), 0).unwrap();
+        assert_eq!(cancel.matches("ATTENDEE").count(), 1);
+        // One date of the series.
+        let rid = ts("2026-11-25T06:00:00Z");
+        let one = itip_cancel(&made, Some(rid), None, 0).unwrap();
+        assert!(one.contains("RECURRENCE-ID;TZID=Africa/Nairobi:20261125T090000\r\n"));
+        assert!(!one.contains("RRULE"));
+        assert_eq!(
+            invitation(&one, "x@y").unwrap().event.recurrence_id,
+            Some(rid)
+        );
+        assert!(itip_request("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n").is_none());
+    }
+
+    #[test]
+    fn free_busy_answers_are_read() {
+        let answer = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VFREEBUSY\r\nATTENDEE:mailto:peter@client.example\r\nDTSTART:20261118T000000Z\r\nDTEND:20261119T000000Z\r\nFREEBUSY:20261118T060000Z/20261118T070000Z,20261118T090000Z/PT30M\r\nFREEBUSY;FBTYPE=BUSY-TENTATIVE:20261118T120000Z/20261118T130000Z\r\nFREEBUSY;FBTYPE=FREE:20261118T140000Z/20261118T150000Z\r\nFREEBUSY;FBTYPE=BUSY-UNAVAILABLE:20261118T150000Z/20261118T160000Z\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n";
+        let busy = free_busy_periods(answer);
+        assert_eq!(busy.len(), 4);
+        assert_eq!(
+            busy[0],
+            BusyPeriod {
+                start: ts("2026-11-18T06:00:00Z"),
+                end: ts("2026-11-18T07:00:00Z"),
+                show_as: ShowAs::Busy
+            }
+        );
+        assert_eq!(busy[1].end - busy[1].start, 1800);
+        assert_eq!(busy[2].show_as, ShowAs::Tentative);
+        assert_eq!(busy[3].show_as, ShowAs::Away);
+        assert_eq!(
+            free_busy_attendee(answer).as_deref(),
+            Some("peter@client.example")
+        );
+        let request = free_busy_request(
+            "info@mocky.co.ke",
+            &["peter@client.example".into()],
+            ts("2026-11-18T00:00:00Z"),
+            ts("2026-11-19T00:00:00Z"),
+            "fb-1",
+            0,
+        );
+        assert!(request.contains("BEGIN:VFREEBUSY\r\n"));
+        assert!(request.contains("ATTENDEE:mailto:peter@client.example\r\n"));
+        assert!(request.contains("DTSTART:20261118T000000Z\r\n"));
+        assert!(free_busy_periods("nonsense").is_empty());
+    }
+
+    #[test]
+    fn to_dos_are_read_and_written() {
+        let sogo = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Inverse inc./SOGo//EN\r\nBEGIN:VTODO\r\nUID:t-1\r\nSUMMARY:Send the quote\r\nDESCRIPTION:Kilimani fit-out\r\nDUE;VALUE=DATE:20261120\r\nPRIORITY:1\r\nCATEGORIES:Clients,Red\r\nSTATUS:NEEDS-ACTION\r\nX-SOGO-COLOR:red\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER;RELATED=END:-PT60M\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let (uid, task) = parse_todo(sogo).unwrap();
+        assert_eq!(uid, "t-1");
+        assert_eq!(task.title, "Send the quote");
+        assert_eq!(task.notes, "Kilimani fit-out");
+        assert_eq!(task.due, Some(ts("2026-11-20T00:00:00Z")));
+        assert_eq!(task.reminder, Some(ts("2026-11-19T23:00:00Z")));
+        assert_eq!(task.importance, Importance::High);
+        assert_eq!(task.categories, ["Clients", "Red"]);
+        assert!(!task.completed);
+
+        let done = TaskFields {
+            completed: true,
+            completed_at: Some(ts("2026-11-19T10:00:00Z")),
+            reminder: Some(ts("2026-11-19T08:00:00Z")),
+            importance: Importance::Low,
+            ..task
+        };
+        let written = write_todo("t-1", &done, Some(sogo), ts("2026-11-19T10:00:00Z"));
+        assert!(written.contains("X-SOGO-COLOR:red\r\n"));
+        assert!(written.contains("STATUS:COMPLETED\r\n"));
+        assert!(written.contains("PRIORITY:9\r\n"));
+        assert!(written.contains("SEQUENCE:1\r\n"));
+        assert_eq!(written.matches("BEGIN:VALARM").count(), 1);
+        assert_eq!(written.matches("UID:").count(), 1);
+        let (_, back) = parse_todo(&written).unwrap();
+        assert_eq!(back, done);
+
+        // A new one, due at a time.
+        let fresh = TaskFields {
+            title: "Call Peter".into(),
+            due: Some(ts("2026-11-20T07:30:00Z")),
+            ..TaskFields::default()
+        };
+        let written = write_todo("t-2", &fresh, None, 0);
+        assert!(written.contains("BEGIN:VTODO\r\n"));
+        assert!(written.contains("DUE:20261120T073000Z\r\n"));
+        assert_eq!(parse_todo(&written).unwrap().1, fresh);
+        // Events are not to-dos.
+        assert!(parse_todo(&series("FREQ=DAILY")).is_none());
     }
 }

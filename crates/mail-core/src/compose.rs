@@ -182,6 +182,17 @@ pub fn resolve_recipients(
     name_for: impl Fn(&str) -> Option<String>,
     search: impl Fn(&str) -> Vec<Mailbox>,
 ) -> RecipientCheck {
+    resolve_recipients_with_groups(input, |_| None, name_for, search)
+}
+
+/// [`resolve_recipients`], where an entry that is the name of a contact
+/// group (`group`, ignoring case) adds everyone in it.
+pub fn resolve_recipients_with_groups(
+    input: &str,
+    group: impl Fn(&str) -> Option<Vec<Mailbox>>,
+    name_for: impl Fn(&str) -> Option<String>,
+    search: impl Fn(&str) -> Vec<Mailbox>,
+) -> RecipientCheck {
     let mut check = RecipientCheck::default();
     let add = |resolved: &mut Vec<Mailbox>, mailbox: Mailbox| {
         if !resolved
@@ -211,6 +222,19 @@ pub fn resolve_recipients(
             .to_owned();
         if query.is_empty() {
             check.invalid.push(entry);
+            continue;
+        }
+        if let Some(members) = group(&query) {
+            let members: Vec<Mailbox> = members
+                .into_iter()
+                .filter(|m| is_valid_address(&m.address))
+                .collect();
+            if members.is_empty() {
+                check.invalid.push(entry);
+            }
+            for member in members {
+                add(&mut check.resolved, member);
+            }
             continue;
         }
         let mut candidates: Vec<Mailbox> = Vec::new();
@@ -405,6 +429,40 @@ mod tests {
             name: None,
             address: address.into(),
         }
+    }
+
+    #[test]
+    fn a_group_name_adds_everyone_in_it() {
+        let group = |name: &str| {
+            name.eq_ignore_ascii_case("site team").then(|| {
+                vec![
+                    Mailbox {
+                        name: Some("Peter".into()),
+                        address: "peter@client.example".into(),
+                    },
+                    mb("amina@studio.example"),
+                    mb("not an address"),
+                ]
+            })
+        };
+        let check = resolve_recipients_with_groups(
+            "Site Team, amina@studio.example, Nobody",
+            group,
+            |_| None,
+            |_| Vec::new(),
+        );
+        assert_eq!(
+            check
+                .resolved
+                .iter()
+                .map(|m| m.address.as_str())
+                .collect::<Vec<_>>(),
+            ["peter@client.example", "amina@studio.example"]
+        );
+        assert_eq!(check.invalid, ["Nobody"]);
+        // An empty group is not a recipient.
+        let empty = resolve_recipients_with_groups("Empty", |_| Some(vec![]), |_| None, |_| vec![]);
+        assert_eq!(empty.invalid, ["Empty"]);
     }
 
     #[test]
