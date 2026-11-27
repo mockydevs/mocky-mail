@@ -143,6 +143,10 @@ export interface Vacation {
   end: string | null;
   /** Days before the same sender gets the reply again. */
   days: number;
+  /** Microsoft accounts: a different reply for people outside your organisation (null: same as `message`). */
+  externalMessage?: string | null;
+  /** Microsoft accounts: who outside your organisation gets a reply. */
+  externalAudience?: 'none' | 'contacts' | 'all';
 }
 
 /** An account's automatic replies. */
@@ -362,8 +366,23 @@ export interface Contact {
   organization: string;
   title: string;
   notes: string;
+  /** Shown first in People and in recipient suggestions. */
+  favorite: boolean;
+  /** Category names (the same categories as mail). */
+  categories: string[];
+  /** A small picture as a `data:` URL, or null. */
+  photo: string | null;
   /** `changed` or `deleted`: waiting to be sent to the server. */
   state: 'synced' | 'changed' | 'deleted';
+}
+
+/** A named group of contacts (a contact list). Typing its name in a recipient field adds everyone in it. */
+export interface ContactGroup {
+  id: string;
+  /** null: kept on this device only. */
+  accountId: string | null;
+  name: string;
+  memberIds: string[];
 }
 
 /** A contact as typed in the editor. */
@@ -376,6 +395,10 @@ export interface ContactInput {
   organization: string;
   title: string;
   notes: string;
+  favorite?: boolean;
+  categories?: string[];
+  /** A `data:` URL; null removes it; missing leaves it as it is. */
+  photo?: string | null;
 }
 
 /** Whether an account's contacts sync with its server. */
@@ -383,6 +406,8 @@ export interface AddressBookStatus {
   accountId: string;
   state: 'synced' | 'unavailable' | 'error';
   message: string | null;
+  /** A Gmail or Microsoft account that can be connected with connectCalendarAndContacts. */
+  connectable?: boolean;
 }
 
 /** A calendar on an account's mail server. */
@@ -392,7 +417,34 @@ export interface CalendarInfo {
   name: string;
   /** `#RRGGBB` or `#RRGGBBAA` from the server, if it has one. */
   color: string | null;
+  /** Shown in the calendar views (a choice kept on this device). */
+  visible: boolean;
+  /** Events can be added and changed. */
+  writable: boolean;
+  provider: 'caldav' | 'google' | 'microsoft';
 }
+
+/** A custom repeat rule (RRULE), for the repeat dialog. */
+export interface RepeatRule {
+  freq: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  /** Every N days/weeks/months/years. */
+  interval: number;
+  /** Weekdays for weekly, or with `setPos` for "second Tuesday": `MO`…`SU`. */
+  byDay: string[];
+  /** Day of the month for monthly/yearly by date. */
+  monthDay: number | null;
+  /** Month (1–12) for yearly. */
+  month: number | null;
+  /** 1–4 or -1 (last), with one `byDay`: "the second Tuesday". */
+  setPos: number | null;
+  /** End after this many times, or */
+  count: number | null;
+  /** end on this day (Unix seconds), or neither: forever. */
+  until: number | null;
+}
+
+/** How an event shows you in free/busy. */
+export type ShowAs = 'busy' | 'free' | 'tentative' | 'away';
 
 /** How an event repeats. `custom`: a rule the editor can't show (kept as it is). */
 export type Repeat = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
@@ -430,6 +482,13 @@ export interface CalendarEvent {
   tentative: boolean;
   /** Reminders, minutes before the start (0: at the start). */
   reminders: number[];
+  showAs: ShowAs;
+  /** Others with access to the calendar see only "busy". */
+  private: boolean;
+  /** The full rule, for the repeat dialog; null when not repeating. */
+  repeatRule: RepeatRule | null;
+  /** You organise it (you can change it and invite people). */
+  isOrganizer: boolean;
 }
 
 /** An event from the editor. `repeat: 'keep'` leaves a series' rule alone. */
@@ -447,13 +506,78 @@ export interface EventInput {
   timeZone: string;
   /** Reminders, minutes before; null leaves an edited event's reminders as they are. */
   reminders: number[] | null;
+  /** Used instead of `repeat` when set (a custom rule from the repeat dialog). */
+  repeatRule?: RepeatRule | null;
+  showAs?: ShowAs;
+  private?: boolean;
+  /** Invite these people (addresses). Missing: leave the attendees as they are. */
+  attendees?: string[];
+  /** Send invitations, updates or cancellations to the attendees. */
+  notifyAttendees?: boolean;
+  /** Editing one date of a series: its `recurrenceId`, with `scope`. */
+  occurrence?: number | null;
+  /** `this`: only that date; `all`: the whole series (default). */
+  scope?: 'this' | 'all';
 }
+
+/** When people are busy, for Find a Time. */
+export interface FreeBusy {
+  email: string;
+  /** Busy periods (Unix seconds). `unknown`: their calendar couldn't be read. */
+  busy: { start: number; end: number; showAs: ShowAs }[];
+  unknown: boolean;
+}
+
+/** A reminder that is due (event, task or flagged message). */
+export interface DueReminder {
+  /** Stable while it is due; for dismiss/snooze. */
+  key: string;
+  kind: 'event' | 'task' | 'flag';
+  title: string;
+  /** When the event starts or the task/flag is due (Unix seconds). */
+  at: number;
+  location: string | null;
+  eventId: string | null;
+  recurrenceId: number | null;
+  taskId: string | null;
+  messageId: string | null;
+}
+
+/** A to-do list on an account (CalDAV VTODO, Google Tasks, Microsoft To Do) or on this device. */
+export interface TaskList {
+  id: string;
+  accountId: string | null;
+  name: string;
+  provider: 'device' | 'caldav' | 'google' | 'microsoft';
+}
+
+export interface Task {
+  id: string;
+  listId: string;
+  title: string;
+  notes: string;
+  /** Unix seconds (a day: midnight UTC). */
+  due: number | null;
+  /** Remind at (Unix seconds). */
+  reminder: number | null;
+  importance: Importance;
+  completed: boolean;
+  completedAt: number | null;
+  /** The flagged message it came from. */
+  messageId: string | null;
+  categories: string[];
+  state: 'synced' | 'changed' | 'deleted';
+}
+
+export type TaskInput = Omit<Task, 'id' | 'completedAt' | 'state'> & { id: string | null };
 
 /** Whether an account's calendars sync with its server. */
 export interface CalendarStatus {
   accountId: string;
   state: 'synced' | 'unavailable' | 'error';
   message: string | null;
+  /** A Gmail or Microsoft account that can be connected with connectCalendarAndContacts. */
+  connectable?: boolean;
 }
 
 /** A picture under the signature (PNG, JPEG or GIF), sent inside the message. */
@@ -638,6 +762,10 @@ export interface MailEvents {
   /** The backend also shows the desktop notification when enabled. */
   'mail://new-mail': { accountId: string; count: number };
   'mail://accounts-changed': Record<string, never>;
+  /** Reminders came due (or were dismissed or snoozed elsewhere): the full due list. */
+  'mail://reminders': { reminders: DueReminder[] };
+  /** Tasks changed (a sync, or a change here). */
+  'mail://tasks-changed': Record<string, never>;
   /** A rule's server copy was written, or writing it gave up. */
   'mail://rules-changed': { rules: Rule[] };
   'mail://contacts-changed': { books: AddressBookStatus[] };
@@ -704,6 +832,27 @@ export interface MailApi {
   openComposeWindow(draft: Draft): Promise<void>;
   /** The draft a compose window was opened with (`?compose=<key>` in its address); null once taken. */
   takeComposeDraft(key: string): Promise<Draft | null>;
+  /**
+   * Gmail and Microsoft accounts: sign in again in the browser asking for
+   * calendar, contacts, tasks and automatic-reply access (mail access is
+   * unchanged), then start syncing them.
+   */
+  connectCalendarAndContacts(accountId: string): Promise<void>;
+  setCalendarVisible(calendarId: string, visible: boolean): Promise<CalendarInfo[]>;
+  /** For Find a Time: when these people are busy (their servers permitting). */
+  getFreeBusy(accountId: string, emails: string[], from: number, to: number): Promise<FreeBusy[]>;
+  listDueReminders(): Promise<DueReminder[]>;
+  dismissReminder(key: string): Promise<DueReminder[]>;
+  snoozeReminder(key: string, minutes: number): Promise<DueReminder[]>;
+  listTaskLists(): Promise<TaskList[]>;
+  /** `listId` null: every list. */
+  listTasks(listId: string | null, includeCompleted: boolean): Promise<Task[]>;
+  saveTask(task: TaskInput): Promise<Task>;
+  deleteTask(id: string): Promise<void>;
+  syncTasks(): Promise<void>;
+  listContactGroups(): Promise<ContactGroup[]>;
+  saveContactGroup(group: Omit<ContactGroup, 'id'> & { id: string | null }): Promise<ContactGroup[]>;
+  deleteContactGroup(id: string): Promise<ContactGroup[]>;
   /** The mailto: link the app was started with, once (desktop). */
   takeMailto(): Promise<Mailto | null>;
   /** Read a mailto: link (from Android, or the mail://mailto event). */
