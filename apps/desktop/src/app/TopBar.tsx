@@ -1,5 +1,7 @@
 import { useState, type Ref } from 'react';
 
+import type { Category, Folder } from '../api/types';
+import { SearchField } from '../features/search/SearchField';
 import type { Theme } from '../theme/useTheme';
 import { Icon, Logo } from '../ui/Icon';
 import type { SyncSummary } from './sync';
@@ -18,6 +20,9 @@ interface Props {
   onMenu?: (() => void) | undefined;
   /** Work Offline is on: nothing is checked, so the sync button is off. */
   workOffline?: boolean;
+  /** For search suggestions after category: and in:. */
+  categories?: readonly Category[];
+  folders?: readonly Folder[];
 }
 
 export function TopBar({ searchField, ...props }: Props) {
@@ -45,27 +50,15 @@ export function TopBar({ searchField, ...props }: Props) {
         <Logo />
         <span className="brand__name">Mocky Mail</span>
       </div>
-      <div className="search" role="search">
-        <Icon name="search" />
-        <label htmlFor="search" className="visually-hidden">
-          Search mail
-        </label>
-        <input
-          id="search"
-          ref={searchField}
-          type="search"
-          className="search__input"
-          // Phones (which get the menu button) have room for two words only.
-          placeholder={props.onMenu ? 'Search mail' : 'Search mail, people, attachments'}
-          value={props.search}
-          onChange={(e) => {
-            props.onSearch(e.target.value);
-          }}
-        />
-        <kbd className="search__key" aria-hidden="true">
-          /
-        </kbd>
-      </div>
+      <SearchField
+        value={props.search}
+        inputRef={searchField}
+        // Phones (which get the menu button) have room for two words only.
+        placeholder={props.onMenu ? 'Search mail' : 'Search mail, people, attachments'}
+        categories={props.categories ?? []}
+        folders={props.folders ?? []}
+        onChange={props.onSearch}
+      />
       <div className="topbar__actions">
         {props.sync.pill && (
           <span className={`conn conn--${props.sync.tone}`} role="status" title={props.sync.status}>

@@ -2,7 +2,10 @@ import { useId, useRef, useState, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
-import type { Account, AppError, Category, Settings, ThemeSetting, MarkReadSetting } from '../../api/types';
+import type { Account, AppError, Category, Folder, Settings, ThemeSetting, MarkReadSetting } from '../../api/types';
+import type { Notice } from '../../app/useToasts';
+import { RulesSection } from '../rules/RulesSection';
+import { TrustedSenders } from './TrustedSenders';
 import { CategoryManager } from '../categories/CategoryManager';
 import { ConfirmDialog } from '../../ui/Modal';
 import { Icon } from '../../ui/Icon';
@@ -54,6 +57,10 @@ interface Props {
   onCategoriesChanged?: (categories: Category[]) => void;
   /** Phones: no reading pane choice (a message always fills the screen). */
   phone?: boolean;
+  /** Every account's folders, for rules. */
+  folders?: Readonly<Record<string, Folder[]>>;
+  /** A toast (rules run now say what they did). */
+  onNotice?: (notice: Notice) => void;
 }
 
 export function SettingsView({
@@ -66,6 +73,8 @@ export function SettingsView({
   categories,
   onCategoriesChanged,
   phone = false,
+  folders,
+  onNotice,
 }: Props) {
   const id = useId();
   const api = useMailApi();
@@ -157,6 +166,7 @@ export function SettingsView({
               />
               Always load images
             </label>
+            <TrustedSenders />
           </fieldset>
 
           <fieldset className="settings__group">
@@ -383,6 +393,16 @@ export function SettingsView({
           {accounts.length > 0 && <OutOfOffice accounts={accounts} />}
 
           {onCategoriesChanged && <CategoryManager categories={categories ?? []} onChange={onCategoriesChanged} />}
+
+          {folders && accounts.length > 0 && (
+            <RulesSection
+              accounts={accounts}
+              folders={folders}
+              categories={categories ?? []}
+              phone={phone}
+              {...(onNotice ? { onNotice } : {})}
+            />
+          )}
 
           <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`}>
             <h2 id={`${id}-accounts`} className="settings__legend">

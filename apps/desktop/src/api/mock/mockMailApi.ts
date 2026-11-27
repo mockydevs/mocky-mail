@@ -10,6 +10,7 @@ import type {
   AttachmentMeta,
   Category,
   Focus,
+  ImageSender,
   ListQuery,
   Mailto,
   AppError,
@@ -27,6 +28,8 @@ import type {
   MessageDetail,
   MessageListItem,
   OutboxEntry,
+  Rule,
+  RuleAction,
   ServerSuggestion,
   Settings,
 } from '../types';
@@ -41,6 +44,8 @@ import {
   MOCK_OUTBOX,
   MOCK_SETTINGS,
 } from './mockData';
+import { ruleMatches, serverStatusOf, validateRule } from './mockRules';
+import { matchesSearch, namesFolder, parseSearchQuery } from './mockSearch';
 
 /** A stored message; `remoteHtml` is what get_message returns when remote images are allowed. */
 export type MockMessage = MessageDetail & { remoteHtml?: string };
@@ -82,6 +87,10 @@ export interface MockOptions {
   favorites?: string[];
   /** Behave like the Android app: no message windows. */
   phone?: boolean;
+  /** Mail rules, in order; default: none. */
+  rules?: Rule[];
+  /** Senders whose pictures always load; default: none. */
+  imageSenders?: ImageSender[];
 }
 
 export interface MockMailApi extends MailApi {
@@ -172,6 +181,9 @@ const SUGGESTIONS: Record<string, ServerSuggestion> = {
 const SYNC_MONTHS = [1, 3, 6, 12, 24];
 
 const HEX = /^#[0-9a-f]{6}$/i;
+
+/** How long writing a rule to the mail server takes. */
+const SERVER_WRITE_MS = 150;
 
 /** Sort key of a list row for `sort`. */
 function sortKey(m: MessageListItem, sort: NonNullable<ListQuery['sort']>): string | number {
@@ -326,6 +338,21 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   /** Focused Inbox rules: address or @domain to focus. */
   const focusRules = new Map<string, Focus>();
   let seq = 1;
+  /** Rules in the order they run, numbered from 0. */
+  const renumber = (list: Rule[]) => list.map((r, order) => ({ ...r, order }));
+  let rules: Rule[] = renumber(clone(options.rules ?? []));
+  let imageSenders: ImageSender[] = clone(options.imageSenders ?? []);
+  /** The latest server write started for each rule. */
+  const serverWrites = new Map<string, number>();
+  /** Whether pictures from this sender always load. */
+  const trustsImages = (address: string | undefined) => {
+    const a = (address ?? '').toLowerCase();
+    const domain = a.slice(a.lastIndexOf('@') + 1);
+    return (
+      a !== '' &&
+      imageSenders.some((s) => (s.wholeDomain ? domain === s.sender || domain.endsWith(`.${s.sender}`) : a === s.sender))
+    );
+  };
 
   const emit = <E extends MailEventName>(event: E, payload: MailEvents[E]) => {
     for (const handler of handlers.get(event) ?? []) (handler as (p: MailEvents[E]) => void)(clone(payload));
@@ -428,6 +455,53 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     return roleFolder(m.accountId, target.role);
   };
   const sortedAccounts = () => [...accounts].sort((a, b) => a.sortOrder - b.sortOrder);
+  const ruleWorld = () => ({ accounts, folders, categories });
+
+  /** Do what a rule says to one message. */
+  const applyAction = (id: string, action: RuleAction) => {
+    const m = messages.find((x) => x.id === id);
+    if (!m) return;
+    const update = (patch: Partial<MockMessage>) => {
+      messages = messages.map((x) => (x.id === id ? { ...x, ...patch } : x));
+    };
+    const target = () => (action.folderId ? { folderId: action.folderId } : { role: action.role ?? 'inbox' });
+    switch (action.kind) {
+      case 'move':
+        update({ folderId: destination(m, target()).id });
+        return;
+      case 'copy':
+        messages = [...messages, { ...clone(m), id: `copy${String(seq++)}`, folderId: destination(m, target()).id }];
+        return;
+      case 'categorize': {
+        const name = categories.find((c) => sameName(c.name, action.category ?? ''))?.name;
+        if (name && !m.categories.some((c) => sameName(c, name))) update({ categories: [...m.categories, name] });
+        return;
+      }
+      case 'flag':
+        update({ flagged: true });
+        return;
+      case 'clearFlag':
+        update({ flagged: false, flagDue: null });
+        return;
+      case 'clearCategories':
+        update({ categories: [] });
+        return;
+      case 'markRead':
+        update({ unread: false });
+        return;
+      case 'setImportance':
+        update({ importance: action.importance ?? 'normal' });
+        return;
+      case 'delete':
+        update({ folderId: roleFolder(m.accountId, 'trash').id });
+        return;
+      case 'pin':
+        update({ pinned: true });
+        return;
+      case 'notify':
+        return;
+    }
+  };
 
   const api: MockMailApi = {
     opened,
@@ -639,11 +713,32 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     listMessages: (query) =>
       run('listMessages', () => {
         if (query.limit > 200 || query.limit < 1) throw appError('invalid', 'limit must be 1 to 200');
-        const needle = query.search?.trim().toLowerCase() ?? '';
+        const searching = (query.search?.trim() ?? '') !== '';
+        const { terms } = parseSearchQuery(query.search ?? '', now());
+        // Where a search looks: the open view, it and the folders below it, the account, or everything.
+        const asked = searching ? (query.searchScope ?? 'folder') : 'folder';
+        // Naming a folder with in: looks in the whole account (Trash and Spam
+        // included); otherwise wide searches leave Trash and Spam out.
+        const named = namesFolder(terms);
+        const scope = named && (asked === 'folder' || asked === 'subfolders') ? 'account' : asked;
+        const open = query.folderId === null ? undefined : folderOf(query.folderId);
+        const below = (folderId: string) => {
+          const f = folderOf(folderId);
+          const d = open?.delimiter ?? '/';
+          return !!open && !!f && f.accountId === open.accountId && f.path.startsWith(`${open.path}${d}`);
+        };
+        const wide = scope === 'all' || scope === 'account';
         const matches = messages
-          .filter((m) => query.accountId === null || m.accountId === query.accountId)
-          .filter((m) => query.folderId === null || m.folderId === query.folderId)
-          .filter((m) => query.role === null || folderOf(m.folderId)?.role === query.role)
+          .filter((m) => scope === 'all' || query.accountId === null || m.accountId === query.accountId)
+          .filter(
+            (m) =>
+              wide ||
+              query.folderId === null ||
+              m.folderId === query.folderId ||
+              (scope === 'subfolders' && below(m.folderId)),
+          )
+          .filter((m) => wide || query.role === null || folderOf(m.folderId)?.role === query.role)
+          .filter((m) => !wide || named || !['trash', 'junk'].includes(folderOf(m.folderId)?.role ?? ''))
           .filter((m) => query.filter !== 'unread' || m.unread)
           .filter((m) => query.filter !== 'flagged' || m.flagged)
           .filter((m) => query.filter !== 'attachments' || m.hasAttachments)
@@ -654,14 +749,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
             return [...m.to, ...m.cc].some((t) => t.address.toLowerCase() === own);
           })
           .filter((m) => !query.focus || folderOf(m.folderId)?.role !== 'inbox' || focusOf(m) === query.focus)
-          .filter(
-            (m) =>
-              !needle ||
-              [m.subject, m.preview, m.text ?? '', m.from?.name ?? '', m.from?.address ?? '', ...m.to.map((t) => t.address)]
-                .join(' ')
-                .toLowerCase()
-                .includes(needle),
-          )
+          .filter((m) => matchesSearch(m, terms, { now: now(), folderOf }))
           .sort((a, b) => (b.date ?? 0) - (a.date ?? 0));
         if (!query.threads) {
           return {
@@ -731,7 +819,117 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     getMessage: (id, allowRemote) =>
       run('getMessage', () => {
         const { remoteHtml, ...detail } = stored(id);
-        return allowRemote && remoteHtml ? { ...detail, html: remoteHtml, blockedRemoteImages: 0 } : detail;
+        const trusted = remoteHtml !== undefined && trustsImages(detail.from?.address);
+        if (!remoteHtml || !(allowRemote || trusted)) return detail;
+        return { ...detail, html: remoteHtml, blockedRemoteImages: 0, ...(trusted ? { imagesTrusted: true } : {}) };
+      }),
+
+    parseSearch: (query) => run('parseSearch', () => parseSearchQuery(query, now())),
+
+    listRules: () => run('listRules', () => rules),
+
+    saveRule: (input) =>
+      run('saveRule', () => {
+        validateRule(input, ruleWorld());
+        const name = input.name.trim();
+        const final = serverStatusOf(input);
+        // Like the backend: a rule kept on the server is saved here at once,
+        // and its server copy is written in the background; the outcome
+        // comes in mail://rules-changed.
+        const status: Pick<Rule, 'serverStatus' | 'serverNote'> = input.keepOnServer
+          ? { serverStatus: 'local', serverNote: 'Being saved to the mail server.' }
+          : final;
+        const id = input.id ?? `rule${String(seq++)}`;
+        if (input.id !== null) {
+          const old = rules.find((r) => r.id === input.id);
+          if (!old) throw appError('not_found', 'That rule no longer exists.');
+          rules = rules.map((r) => (r.id === old.id ? { ...clone(input), id, name, order: old.order, ...status } : r));
+        } else {
+          rules = renumber([...rules, { ...clone(input), id, name, order: rules.length, ...status }]);
+        }
+        const write = seq++;
+        serverWrites.set(id, write);
+        if (input.keepOnServer) {
+          setTimeout(() => {
+            // Changed again (or deleted) meanwhile: that save writes its own copy.
+            if (serverWrites.get(id) !== write || !rules.some((r) => r.id === id)) return;
+            rules = rules.map((r) => (r.id === id ? { ...r, ...final } : r));
+            emit('mail://rules-changed', { rules });
+          }, SERVER_WRITE_MS);
+        }
+        return rules;
+      }),
+
+    deleteRule: (id) =>
+      run('deleteRule', () => {
+        if (!rules.some((r) => r.id === id)) throw appError('not_found', 'That rule no longer exists.');
+        rules = renumber(rules.filter((r) => r.id !== id));
+        return rules;
+      }),
+
+    reorderRules: (ids) =>
+      run('reorderRules', () => {
+        if (ids.length !== rules.length || new Set(ids).size !== ids.length || !rules.every((r) => ids.includes(r.id))) {
+          throw appError('invalid', 'List every rule once.');
+        }
+        rules = renumber(ids.map((id) => rules.find((r) => r.id === id)).filter((r): r is Rule => r !== undefined));
+        return rules;
+      }),
+
+    runRules: (ruleIds, folderId) =>
+      run('runRules', () => {
+        const folder = folderOf(folderId);
+        if (!folder) throw appError('not_found', 'That folder no longer exists.');
+        const own = account(folder.accountId).email;
+        const chosen = rules.filter(
+          (r) =>
+            (r.accountId === null || r.accountId === folder.accountId) &&
+            (ruleIds === null ? r.enabled : ruleIds.includes(r.id)),
+        );
+        const inFolder = messages.filter((m) => m.folderId === folderId).map((m) => m.id);
+        let matched = 0;
+        for (const id of inFolder) {
+          let hit = false;
+          for (const rule of chosen) {
+            const current = messages.find((m) => m.id === id);
+            if (!current || !ruleMatches(rule, current, own)) continue;
+            hit = true;
+            for (const action of rule.actions) applyAction(id, action);
+            if (rule.stopProcessing) break;
+          }
+          if (hit) matched += 1;
+        }
+        if (matched > 0) changed(folder.accountId, []);
+        return { checked: inFolder.length, matched };
+      }),
+
+    previewRule: (rule, folderId) =>
+      run('previewRule', () => {
+        const folder = folderOf(folderId);
+        if (!folder) throw appError('not_found', 'That folder no longer exists.');
+        const own = account(folder.accountId).email;
+        return messages.filter((m) => m.folderId === folderId && ruleMatches(rule, m, own)).length;
+      }),
+
+    listImageSenders: () => run('listImageSenders', () => imageSenders),
+
+    trustImageSender: (sender, wholeDomain) =>
+      run('trustImageSender', () => {
+        const clean = sender.trim().toLowerCase();
+        const at = clean.lastIndexOf('@');
+        const value = wholeDomain ? clean.slice(at + 1) : clean;
+        if (wholeDomain ? !/^[^@\s]+\.[^@\s]+$/.test(value) : at < 1) {
+          throw appError('invalid', wholeDomain ? "That isn't a domain." : "That isn't an email address.");
+        }
+        if (!imageSenders.some((s) => s.sender === value)) imageSenders = [...imageSenders, { sender: value, wholeDomain }];
+        return imageSenders;
+      }),
+
+    untrustImageSender: (sender) =>
+      run('untrustImageSender', () => {
+        const clean = sender.trim().toLowerCase();
+        imageSenders = imageSenders.filter((s) => s.sender !== clean);
+        return imageSenders;
       }),
 
     setFlags: (ids, change) =>

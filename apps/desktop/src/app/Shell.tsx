@@ -12,6 +12,8 @@ import type {
   MessageListItem,
   MoveTarget,
   OutboxEntry,
+  RuleInput,
+  SearchScope,
   Settings,
   SyncStatus,
 } from '../api/types';
@@ -50,6 +52,9 @@ import { SettingsView } from '../features/settings/SettingsView';
 import { ContactsView } from '../features/contacts/ContactsView';
 import { CalendarView } from '../features/calendar/CalendarView';
 import { ManageFolders } from '../features/mailbox/ManageFolders';
+import { RuleEditor } from '../features/rules/RuleEditor';
+import { ruleFromMessages } from '../features/rules/ruleText';
+import { SearchStrip, useParsedSearch } from '../features/search/SearchStrip';
 import { HelpSheet } from '../features/shortcuts/HelpSheet';
 import { shortcutFor, type ShortcutAction } from '../features/shortcuts/shortcuts';
 import { nowSeconds } from '../lib/format';
@@ -288,6 +293,20 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [screen, setScreen] = useState<Screen>({ kind: 'mail' });
   const listView = useListView();
   const { view, setView, filter, setFilter, searchInput, setSearchInput, search, focusTab, setFocusTab, order } = listView;
+  const parsedSearch = useParsedSearch(api, search);
+  const searching = search.trim() !== '';
+  // Where a search can look from this view: a folder can widen to the folders
+  // below it, its account or everything; a unified view to everything.
+  const viewFolder = view.type === 'folder' ? allFolders.find((f) => f.id === view.folderId) : undefined;
+  const hasSubfolders =
+    viewFolder !== undefined &&
+    allFolders.some(
+      (f) => f.accountId === viewFolder.accountId && f.path.startsWith(`${viewFolder.path}${viewFolder.delimiter ?? '/'}`),
+    );
+  const scopes: SearchScope[] =
+    view.type === 'folder' ? ['folder', ...(hasSubfolders ? (['subfolders'] as const) : []), 'account', 'all'] : ['folder', 'all'];
+  const searchScope = scopes.includes(listView.searchScope) ? listView.searchScope : 'folder';
+  const wideSearch = searching && (searchScope === 'account' || searchScope === 'all');
   const baseQuery = viewQuery(view, filter, search);
   const threads = settings?.threads ?? true;
   // Focused Inbox: inbox views show one half at a time.
@@ -302,6 +321,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     focus: focusSplit ? focusTab : null,
     sort: order.sort,
     descending: order.descending,
+    ...(searching ? { searchScope } : {}),
   };
   const page = useMessagePage(api, query, revision);
   const roleOfFolder = (folderId: string) => allFolders.find((f) => f.id === folderId)?.role ?? null;
@@ -320,6 +340,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [drawer, setDrawer] = useState(false);
   /** Messages waiting for "Delete forever?" to be answered. */
   const [confirmForever, setConfirmForever] = useState<MessageListItem[] | null>(null);
+  /** "Create rule…" is open with this rule. */
+  const [ruleDraft, setRuleDraft] = useState<RuleInput | null>(null);
   /** "Move to…" or "Copy to…" is open for these messages. */
   const [picker, setPicker] = useState<{ mode: 'move' | 'copy'; rows: MessageListItem[] } | null>(null);
   /** Messages being dragged to a folder (computers). */
@@ -876,6 +898,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       onJunk={(isJunk) => {
         junk(checkedRows, isJunk);
       }}
+      onCreateRule={() => {
+        setRuleDraft(ruleFromMessages(checkedRows, allFolders));
+      }}
     />
   );
 
@@ -917,6 +942,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             refresh();
           }}
           phone={phone}
+          folders={foldersByAccount}
+          onNotice={setNotice}
           onAddAccount={() => {
             setScreen({ kind: 'addAccount' });
           }}
@@ -1070,6 +1097,14 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
                 )
           }
           selectionBar={selectionBar || undefined}
+          folderOf={
+            wideSearch
+              ? (item) => {
+                  const folder = allFolders.find((f) => f.id === item.folderId);
+                  return folder ? folderLabel(folder) : null;
+                }
+              : undefined
+          }
           tools={
             <ListTools
               order={order}
@@ -1159,6 +1194,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
                   if (readerId) openWindow(readerId);
                 }
           }
+          onCreateRule={(m) => {
+            setRuleDraft(ruleFromMessages([m], allFolders));
+          }}
         />
       );
       main = pane === 'off' ? (reading ? reader : list) : (
@@ -1183,6 +1221,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         sync={summary}
         theme={theme}
         workOffline={workOffline}
+        categories={categories}
+        folders={allFolders}
         onSearch={(value) => {
           setSearchInput(value);
           setSelectedId(null);
@@ -1204,6 +1244,29 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             : undefined
         }
       />
+      {screen.kind === 'mail' && view.type !== 'outbox' && searchInput.trim() !== '' && (
+        <SearchStrip
+          query={searchInput}
+          parsed={parsedSearch}
+          scope={searchScope}
+          scopes={scopes}
+          {...(view.type === 'unified'
+            ? { labels: { folder: `${info.title} of every account`, all: 'Every folder of every account' } }
+            : {})}
+          onScope={(next) => {
+            listView.setSearchScope(next);
+            setSelectedId(null);
+            setKept(null);
+            selection.clearChecked();
+          }}
+          onQuery={(next) => {
+            setSearchInput(next);
+            setSelectedId(null);
+            setKept(null);
+            selection.clearChecked();
+          }}
+        />
+      )}
       <UpdateBanner />
       <div className="workspace">
         {(!phone || drawer) && (
@@ -1326,6 +1389,25 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             setPicker(null);
             if (mode === 'move') moveTo(rows, target, name);
             else copyTo(rows, target, name);
+          }}
+        />
+      )}
+      {ruleDraft && (
+        <RuleEditor
+          initial={ruleDraft}
+          accounts={accounts}
+          folders={foldersByAccount}
+          categories={categories}
+          onClose={() => {
+            setRuleDraft(null);
+          }}
+          onSaved={(_rules, saved) => {
+            setRuleDraft(null);
+            setNotice({
+              tone: 'info',
+              title: 'Rule saved',
+              text: `“${saved.name.trim()}” sorts new mail from now on. Run it on mail you already have from Settings › Rules.`,
+            });
           }}
         />
       )}

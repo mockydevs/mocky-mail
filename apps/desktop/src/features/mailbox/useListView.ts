@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import type { Focus, ListSort, ReadFilter } from '../../api/types';
+import type { Focus, ListSort, ReadFilter, SearchScope } from '../../api/types';
 import { useDebounced } from '../../lib/useDebounced';
 import { safeLocalStorage } from './folderTree';
 import { INBOX_VIEW, type MailView } from './selectors';
@@ -59,6 +59,8 @@ export function useListView() {
   const [filter, setFilter] = useState<ReadFilter>('all');
   const [searchInput, setSearchInput] = useState('');
   const search = useDebounced(searchInput, SEARCH_DEBOUNCE_MS);
+  /** Where a search looks; the last choice holds until the app closes. */
+  const [searchScope, setSearchScope] = useState<SearchScope>('folder');
   const [focusTab, setFocusTab] = useState<Focus>('focused');
   const [order, setOrderState] = useState<ListOrder>(() => readOrder(safeLocalStorage()));
 
@@ -82,6 +84,8 @@ export function useListView() {
     searchInput,
     setSearchInput,
     search,
+    searchScope,
+    setSearchScope,
     focusTab,
     setFocusTab,
     order,

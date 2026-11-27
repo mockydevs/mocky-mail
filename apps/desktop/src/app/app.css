@@ -5150,3 +5150,449 @@ button.contact-row:hover,
     outline-color: Highlight;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   0.6.0 search and rules: the search language (suggestions, tips, chips,
+   scope), mail rules, and senders whose pictures always load.
+   ------------------------------------------------------------------------- */
+
+.search {
+  position: relative;
+}
+
+.search__help {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.search__suggestions {
+  top: calc(100% + 4px);
+  margin-top: 0;
+}
+
+.search-help {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  width: min(540px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 22%);
+  font-size: 14px;
+}
+
+.search-help__title {
+  font-weight: 700;
+}
+
+.search-help__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.search-help__row dt {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.search-help__row dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 0;
+}
+
+.search-help__example {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.search-help__example:hover,
+.search-help__example:focus-visible {
+  background: var(--row-hover);
+}
+
+.search-help__example code {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+
+/* Under the top bar while searching. */
+.search-strip {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 6px 16px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.search-strip__scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-strip__label {
+  color: var(--text-2);
+}
+
+.field--compact {
+  min-height: 32px;
+  padding: 2px 8px;
+  font-size: 13px;
+}
+
+.search-strip__terms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 1px 2px 1px 10px;
+  border-radius: 999px;
+  background: var(--sel-bg);
+  color: var(--sel-text);
+}
+
+.search-strip__term {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.search-strip__or {
+  color: var(--text-2);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+
+.rule-badge--saving {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.search-chip--not {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.search-chip__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-strip__errors {
+  flex: 1 1 100%;
+}
+
+.search-strip__error {
+  color: var(--error-text);
+}
+
+/* Search results from other folders say where they are. */
+.row__folder {
+  display: inline-flex;
+  max-width: 160px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pictures: always from a sender, and the note when that is why they show. */
+.images-strip {
+  flex-wrap: wrap;
+}
+
+.images-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.trusted__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trusted__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+
+.trusted__who {
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+
+/* Settings › Rules. */
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.rule-item--off .rule-item__text {
+  opacity: 0.7;
+}
+
+.rule-item--drop {
+  outline: 2px dashed var(--focus);
+  outline-offset: 2px;
+}
+
+.rule-item--dragging {
+  opacity: 0.5;
+}
+
+.rule-item__main {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rule-item__handle {
+  cursor: grab;
+}
+
+.rule-item__switch {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 3px;
+}
+
+.rule-item__text {
+  min-width: 0;
+}
+
+.rule-item__name {
+  font-weight: 600;
+}
+
+.rule-item__summary {
+  color: var(--text-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.rule-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.rule-item__note {
+  margin-top: 4px;
+}
+
+.rule-item__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.rule-badge--server {
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.rule-badge--local,
+.rule-badge--unsupported {
+  background: var(--list);
+  color: var(--text-2);
+}
+
+/* The rule editor. */
+.modal--large {
+  max-width: 720px;
+}
+
+.rule-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.rule-editor__group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.rule-editor__group > .rule-rows,
+.rule-editor__group > .choice-row {
+  align-self: stretch;
+}
+
+.rule-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rule-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.rule-row__kind {
+  flex: 0 1 230px;
+  min-width: 0;
+}
+
+.rule-row__value {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.rule-row__size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rule-row__size .field {
+  max-width: 120px;
+}
+
+.rule-editor__preview {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: 13px;
+}
+
+.picker__heading {
+  margin: 10px 0 4px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .search__help {
+    width: 32px;
+    height: 32px;
+  }
+
+  /* The tips take the width of the screen under the top bar. */
+  .search-help {
+    position: fixed;
+    top: calc(60px + var(--safe-top));
+    right: 8px;
+    left: 8px;
+    width: auto;
+  }
+
+  .search-strip {
+    padding: 6px 8px;
+  }
+
+  .search-strip__scope {
+    flex: 1 1 100%;
+  }
+
+  .search-strip__scope .field {
+    flex: 1 1 auto;
+  }
+
+  /* The rule editor fills the screen. */
+  .modal--large {
+    position: fixed;
+    inset: 0;
+    max-width: none;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    padding: calc(16px + var(--safe-top)) 16px calc(16px + var(--safe-bottom));
+  }
+
+  .rule-row__kind,
+  .rule-row__value {
+    flex: 1 1 100%;
+  }
+
+  .rule-item__actions .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+}
