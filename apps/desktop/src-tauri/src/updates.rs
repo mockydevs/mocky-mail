@@ -55,7 +55,8 @@ pub struct Manifest {
     /// What's new, shown in the prompt.
     #[serde(default)]
     pub notes: String,
-    /// Installers by kind: `windows-nsis`, `linux-deb`.
+    /// Installers by kind: `windows-nsis`, `linux-deb` (x64), and
+    /// `windows-nsis-arm64`, `linux-deb-arm64` (ARM64).
     #[serde(default)]
     pub installers: std::collections::HashMap<String, Installer>,
 }
@@ -82,12 +83,24 @@ enum InstallKind {
     Store,
 }
 
+/// Whether this copy was built for ARM64 processors.
+const ARM64: bool = cfg!(target_arch = "aarch64");
+
 impl InstallKind {
+    /// The manifest entry this copy installs from: one for its processor, so
+    /// an ARM64 computer is never handed the x64 installer. The x64 keys keep
+    /// their original names, which copies released before 0.5.1 read.
     const fn installer_key(self) -> Option<&'static str> {
-        match self {
-            Self::WindowsInstaller => Some("windows-nsis"),
-            Self::LinuxDeb => Some("linux-deb"),
-            Self::Manual | Self::Store => None,
+        self.installer_key_for(ARM64)
+    }
+
+    const fn installer_key_for(self, arm64: bool) -> Option<&'static str> {
+        match (self, arm64) {
+            (Self::WindowsInstaller, false) => Some("windows-nsis"),
+            (Self::WindowsInstaller, true) => Some("windows-nsis-arm64"),
+            (Self::LinuxDeb, false) => Some("linux-deb"),
+            (Self::LinuxDeb, true) => Some("linux-deb-arm64"),
+            (Self::Manual | Self::Store, _) => None,
         }
     }
 }
@@ -456,7 +469,13 @@ mod tests {
 
     #[test]
     fn offers_the_installer_for_this_kind_of_install() {
-        let m = manifest("0.3.0", &["windows-nsis", "linux-deb"]);
+        let m = manifest(
+            "0.3.0",
+            &[
+                key(InstallKind::WindowsInstaller),
+                key(InstallKind::LinuxDeb),
+            ],
+        );
         let deb = update_for(&m, "0.2.1", InstallKind::LinuxDeb).unwrap();
         assert_eq!(deb.how, "install");
         assert_eq!(deb.version, "0.3.0");
@@ -472,7 +491,7 @@ mod tests {
         assert_eq!(manual.how, "download");
         assert_eq!(manual.page, "https://mailer.co.ke/");
         // No installer of our kind published yet: download page too.
-        let only_windows = manifest("0.3.0", &["windows-nsis"]);
+        let only_windows = manifest("0.3.0", &[key(InstallKind::WindowsInstaller)]);
         assert_eq!(
             update_for(&only_windows, "0.2.1", InstallKind::LinuxDeb)
                 .unwrap()
@@ -481,9 +500,43 @@ mod tests {
         );
     }
 
+    /// This copy's manifest key for `kind`.
+    fn key(kind: InstallKind) -> &'static str {
+        kind.installer_key().unwrap()
+    }
+
+    #[test]
+    fn each_processor_has_its_own_installers() {
+        assert_eq!(
+            InstallKind::WindowsInstaller.installer_key_for(false),
+            Some("windows-nsis")
+        );
+        assert_eq!(
+            InstallKind::WindowsInstaller.installer_key_for(true),
+            Some("windows-nsis-arm64")
+        );
+        assert_eq!(
+            InstallKind::LinuxDeb.installer_key_for(false),
+            Some("linux-deb")
+        );
+        assert_eq!(
+            InstallKind::LinuxDeb.installer_key_for(true),
+            Some("linux-deb-arm64")
+        );
+        assert_eq!(InstallKind::Manual.installer_key_for(true), None);
+        // A manifest with only the other processor's installers sends this
+        // copy to the download page rather than offering the wrong one.
+        let other = InstallKind::LinuxDeb.installer_key_for(!ARM64).unwrap();
+        let m = manifest("0.3.0", &[other]);
+        assert_eq!(
+            update_for(&m, "0.2.1", InstallKind::LinuxDeb).unwrap().how,
+            "download"
+        );
+    }
+
     #[test]
     fn nothing_when_current_or_updated_by_a_store() {
-        let m = manifest("0.3.0", &["windows-nsis"]);
+        let m = manifest("0.3.0", &[key(InstallKind::WindowsInstaller)]);
         assert_eq!(update_for(&m, "0.3.0", InstallKind::WindowsInstaller), None);
         assert_eq!(update_for(&m, "0.2.1", InstallKind::Store), None);
     }
