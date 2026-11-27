@@ -194,6 +194,8 @@ export interface SearchTerm {
   field: 'text' | 'from' | 'to' | 'cc' | 'subject' | 'body' | 'has' | 'is' | 'category' | 'before' | 'after' | 'in' | 'larger' | 'smaller';
   value: string;
   negated: boolean;
+  /** Joined to the next term by OR (absent otherwise). */
+  orWithNext?: boolean;
 }
 
 /** The result of parsing a search box query. */
@@ -613,6 +615,8 @@ export interface MailEvents {
   /** The backend also shows the desktop notification when enabled. */
   'mail://new-mail': { accountId: string; count: number };
   'mail://accounts-changed': Record<string, never>;
+  /** A rule's server copy was written, or writing it gave up. */
+  'mail://rules-changed': { rules: Rule[] };
   'mail://contacts-changed': { books: AddressBookStatus[] };
   /** After a calendar sync (with each account's status) or a change made here (empty). */
   'mail://calendar-changed': { calendars: CalendarStatus[] };
