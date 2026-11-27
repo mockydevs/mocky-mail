@@ -20,8 +20,18 @@ import com.google.android.gms.common.api.CommonStatusCodes
 import com.google.android.gms.common.api.Scope
 
 @InvokeArg
+class SignInArgs {
+  /** Permissions beyond mail to ask for too (an account signing in again). */
+  var scopes: Array<String>? = null
+}
+
+@InvokeArg
 class TokenArgs {
   lateinit var email: String
+  /** Permissions beyond mail (calendar, contacts, tasks) the token must carry. */
+  var scopes: Array<String>? = null
+  /** Google's consent sheet may be shown (connecting calendar and contacts). */
+  var interactive: Boolean = false
 }
 
 /**
@@ -31,15 +41,33 @@ class TokenArgs {
  * local callback page. Later tokens come from the same call without any
  * screen, so the app never stores a refresh token for these accounts.
  *
+ * Connecting calendar and contacts asks again for the same account with
+ * more scopes (incremental authorization): Google's consent sheet shows the
+ * new ones only, and the token that comes back covers mail and them. Later
+ * tokens are asked for with every scope the account was granted, so one
+ * token serves IMAP, CalDAV, CardDAV and Google's APIs.
+ *
  * Tokens are returned to Rust only, never to the web page.
  */
 @TauriPlugin
 class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
-  private val scopes = listOf(Scope(GMAIL_SCOPE), Scope("email"))
+  private val mailScopes = listOf(GMAIL_SCOPE, "email")
+
+  /** Mail's scopes and the extra ones, once each. */
+  private fun scopesWith(extra: Array<String>?): List<Scope> =
+    (mailScopes + (extra?.toList() ?: emptyList()))
+      .map { it.trim() }
+      .filter { it.isNotEmpty() }
+      .distinct()
+      .map { Scope(it) }
+
+  /** Extra scopes for the account being chosen. */
+  private var chosenExtra: Array<String>? = null
 
   /** Pick an account on the phone, then ask for Gmail access to it. */
   @Command
   fun signIn(invoke: Invoke) {
+    chosenExtra = invoke.parseArgs(SignInArgs::class.java).scopes
     val chooser = AccountManager.newChooseAccountIntent(
       null, null, arrayOf(GOOGLE_ACCOUNT_TYPE), null, null, null, null,
     )
@@ -49,23 +77,29 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
   @ActivityCallback
   fun accountChosen(invoke: Invoke, result: ActivityResult) {
     val email = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+    val extra = chosenExtra
+    chosenExtra = null
     if (result.resultCode != Activity.RESULT_OK || email.isNullOrBlank()) {
       invoke.reject("Sign-in was cancelled.", CANCELLED)
       return
     }
-    authorize(invoke, email, interactive = true)
+    authorize(invoke, email, interactive = true, extra = extra)
   }
 
-  /** A fresh access token for an account that already granted access. */
+  /**
+   * A fresh access token for an account that already granted access (no
+   * screen), or with `interactive` and more `scopes`, Google's consent
+   * sheet for them first.
+   */
   @Command
   fun token(invoke: Invoke) {
     val args = invoke.parseArgs(TokenArgs::class.java)
-    authorize(invoke, args.email, interactive = false)
+    authorize(invoke, args.email, interactive = args.interactive, extra = args.scopes)
   }
 
-  private fun authorize(invoke: Invoke, email: String, interactive: Boolean) {
+  private fun authorize(invoke: Invoke, email: String, interactive: Boolean, extra: Array<String>? = null) {
     val request = AuthorizationRequest.builder()
-      .setRequestedScopes(scopes)
+      .setRequestedScopes(scopesWith(extra))
       .setAccount(Account(email, GOOGLE_ACCOUNT_TYPE))
       .build()
     Identity.getAuthorizationClient(activity).authorize(request)
@@ -144,6 +178,8 @@ class GoogleAuthPlugin(private val activity: Activity) : Plugin(activity) {
     val out = JSObject()
     out.put("email", email)
     out.put("accessToken", token)
+    // Which scopes this token carries, so the app knows what was allowed.
+    out.put("grantedScopes", org.json.JSONArray(result.grantedScopes))
     invoke.resolve(out)
   }
 

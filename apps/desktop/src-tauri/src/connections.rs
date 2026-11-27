@@ -6,6 +6,10 @@
 //! permissions on top of mail (incremental, so mail access stays). The new
 //! refresh token replaces the old one in the keyring and covers both, so
 //! one access token serves IMAP, `CalDAV`, `CardDAV` and Google's APIs.
+//! On Android, Gmail accounts use Google Play services instead: its
+//! consent sheet adds the permissions (incremental authorization) and
+//! every later token is asked for with them. Signing in again
+//! (`reconnect_account`) asks for them too, so they are never dropped.
 //!
 //! Microsoft: tokens are issued per resource, so Graph gets its own grant
 //! and refresh token (`<account>:graph` in the keyring) beside the mail
@@ -181,12 +185,14 @@ pub async fn connect_calendar_and_contacts(
             ));
         }
     };
-    // Gmail accounts on Android sign in through Google Play services, which
-    // the extra permissions aren't wired into yet.
-    if cfg!(target_os = "android") && provider == Provider::Google {
-        return Err(AppError::invalid(
-            "Connecting a Gmail calendar isn't available on Android yet. Connect it in Mocky Mail on a computer; your mail works as before.",
-        ));
+    // Gmail accounts added with Android's own Google sign-in: Google Play
+    // services asks for the extra permissions (incremental authorization)
+    // and hands back one token covering mail and them; no refresh token.
+    if provider == Provider::Google
+        && state.secrets.get(&oauth_key(&account.id))?.as_deref()
+            == Some(crate::credentials::ANDROID_GOOGLE)
+    {
+        return connect_android_google(&app, &state, &account).await;
     }
     let opener = app.clone();
     let tokens =
@@ -221,18 +227,104 @@ pub async fn connect_calendar_and_contacts(
         )
     })?;
     let scopes = keep_grant(&state, &account, provider, &tokens, &refresh)?;
+    connected(&app, &state, &account, &scopes)
+}
+
+/// Record a connection and sync what was connected, in the background.
+fn connected(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    account: &Account,
+    scopes: &[String],
+) -> AppResult<()> {
     state
         .store
-        .set_account_connection(&account.id, &scopes, i64::try_from(now()).unwrap_or(0))?;
-    crate::events::accounts_changed(&app);
-    // Sync what was connected, in the background.
-    let (app2, state2) = (app.clone(), Arc::clone(&state));
+        .set_account_connection(&account.id, scopes, i64::try_from(now()).unwrap_or(0))?;
+    crate::events::accounts_changed(app);
+    let (app2, state2) = (app.clone(), Arc::clone(state));
     tauri::async_runtime::spawn(async move {
         crate::calendar::sync_all(&app2, &state2).await;
         crate::contacts::sync_all(&app2, &state2).await;
         crate::tasks::sync_all(&app2, &state2).await;
     });
     Ok(())
+}
+
+/// Whether Google's list of granted scopes covers calendar and mail. An
+/// empty list (Google didn't say) counts as yes.
+fn google_grant_ok(scopes: &[String]) -> AppResult<()> {
+    if !scopes.is_empty()
+        && !scopes
+            .iter()
+            .any(|s| s == "https://www.googleapis.com/auth/calendar")
+    {
+        return Err(AppError::new(
+            "auth",
+            "Calendar access wasn't allowed. Connect again and tick every box Google shows.",
+        ));
+    }
+    if !scopes.is_empty() && !scopes.iter().any(|s| s == "https://mail.google.com/") {
+        return Err(AppError::new(
+            "auth",
+            "Mail access was taken away in that sign-in. Connect again and allow mail too.",
+        ));
+    }
+    Ok(())
+}
+
+/// Connect a Gmail account added with Android's own Google sign-in: Google
+/// Play services shows its consent sheet for the extra permissions and
+/// returns one access token for mail and them (renewed later the same way,
+/// with no screen; see `credentials::android_google`).
+#[cfg(target_os = "android")]
+async fn connect_android_google(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    account: &Account,
+) -> AppResult<()> {
+    let extra: Vec<String> = mail_auth::GOOGLE_EXTRA_SCOPES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let granted = crate::google_android::authorize(&account.email, &extra)
+        .await
+        .map_err(|e| {
+            if e.kind == "config" {
+                AppError::new(
+                    "config",
+                    "Google hasn't enabled calendar access for Mocky Mail yet. Your mail is not affected; try again after the app's Google setup is finished.",
+                )
+            } else {
+                e
+            }
+        })?;
+    google_grant_ok(&granted.granted_scopes)?;
+    cache_token(
+        state,
+        &account.id,
+        &granted.access_token,
+        now().saturating_add(crate::google_android::TOKEN_LIFETIME_SECS),
+    );
+    let scopes = if granted.granted_scopes.is_empty() {
+        extra
+    } else {
+        granted.granted_scopes
+    };
+    connected(app, state, account, &scopes)
+}
+
+/// Such accounts only exist on Android.
+#[cfg(not(target_os = "android"))]
+#[allow(clippy::unused_async, reason = "same signature as the Android version")]
+async fn connect_android_google(
+    _app: &AppHandle,
+    _state: &Arc<AppState>,
+    _account: &Account,
+) -> AppResult<()> {
+    Err(AppError::new(
+        "auth",
+        "Sign this account in again, then connect its calendar and contacts.",
+    ))
 }
 
 /// Whether a granted scope list includes one ending in `name`.
@@ -257,23 +349,8 @@ fn keep_grant(
     let mut scopes = tokens.granted_scopes.clone();
     match provider {
         Provider::Google => {
-            if !scopes.is_empty()
-                && !scopes
-                    .iter()
-                    .any(|s| s == "https://www.googleapis.com/auth/calendar")
-            {
-                return Err(AppError::new(
-                    "auth",
-                    "Calendar access wasn't allowed. Connect again and tick every box Google shows.",
-                ));
-            }
             // Mail must still be covered, or the account would stop syncing.
-            if !scopes.is_empty() && !scopes.iter().any(|s| s == "https://mail.google.com/") {
-                return Err(AppError::new(
-                    "auth",
-                    "Mail access was taken away in that sign-in. Connect again and allow mail too.",
-                ));
-            }
+            google_grant_ok(&scopes)?;
             state.secrets.set(&oauth_key(&account.id), refresh)?;
             cache_token(
                 state,

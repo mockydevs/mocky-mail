@@ -89,10 +89,17 @@ struct SignedIn {
 
 /// Sign in with the provider. On Android, Google uses the phone's own
 /// accounts; everything else opens the provider's page in the browser.
-async fn sign_in(app: &AppHandle, provider: Provider, typed: &str) -> AppResult<SignedIn> {
+/// `keep` are permissions beyond mail the account was granted before
+/// (calendar, contacts, tasks), asked for again so they aren't dropped.
+async fn sign_in(
+    app: &AppHandle,
+    provider: Provider,
+    typed: &str,
+    keep: &[String],
+) -> AppResult<SignedIn> {
     #[cfg(target_os = "android")]
     if provider == Provider::Google {
-        let granted = crate::google_android::sign_in().await?;
+        let granted = crate::google_android::sign_in(keep).await?;
         return Ok(SignedIn {
             email: clean_email(&granted.email)?,
             access_token: granted.access_token,
@@ -101,7 +108,7 @@ async fn sign_in(app: &AppHandle, provider: Provider, typed: &str) -> AppResult<
         });
     }
     let opener = app.clone();
-    let tokens = mail_auth::authorize(provider, typed, move |url| {
+    let tokens = mail_auth::authorize_keeping(provider, typed, keep, move |url| {
         // The opener plugin works on every platform, Android included.
         match opener.opener().open_url(url, None::<&str>) {
             Ok(()) => true,
@@ -257,7 +264,7 @@ pub async fn add_oauth_account(
         "microsoft" => (Provider::Microsoft, AuthKind::Microsoft),
         _ => return Err(AppError::invalid("Unknown sign-in provider.")),
     };
-    let signed_in = sign_in(&app, provider, typed).await?;
+    let signed_in = sign_in(&app, provider, typed, &[]).await?;
     let email = signed_in.email;
     ensure_new(&state, &email)?;
     let servers = provider.servers();
@@ -385,7 +392,8 @@ pub async fn reconnect_account(
             ));
         }
     };
-    let signed_in = sign_in(&app, provider, &account.email).await?;
+    let keep = crate::credentials::kept_scopes(&state, &account);
+    let signed_in = sign_in(&app, provider, &account.email, &keep).await?;
     // The provider's chooser lets any account be picked; only this one fits.
     if !signed_in.email.eq_ignore_ascii_case(&account.email) {
         return Err(AppError::new(

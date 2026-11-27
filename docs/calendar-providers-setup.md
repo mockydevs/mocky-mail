@@ -49,11 +49,15 @@ In the Google Cloud project that holds Mocky Mail's sign-in client:
    stays as it was, and the new refresh token covers both.
 
 Android: Gmail accounts on Android sign in through Google Play services
-(`GoogleAuthPlugin.kt`), which asks for the mail scope only. Connecting a
-Gmail calendar on Android is refused with a plain message for now; it needs
-the Kotlin plugin to request the scopes above (`Scope(...)` in its
-`AuthorizationRequest`) and return the extra grant. Microsoft accounts
-connect on Android through the browser like on computers.
+(`GoogleAuthPlugin.kt`, Google Identity Services `AuthorizationClient`).
+Connecting asks Play services for the same scopes as above for that
+account (incremental authorization: the consent sheet shows the new ones),
+and every later token is asked for with mail plus the granted scopes, with
+no screen. There is no refresh token and no server component. The Android
+OAuth client in the same Cloud project (package `ke.co.mocky.mail` and the
+release signing certificate SHA-1) needs nothing extra; the scopes on the
+consent screen above cover it. Microsoft accounts connect on Android
+through the browser like on computers.
 
 ## Microsoft (Outlook.com and Microsoft 365 accounts)
 
