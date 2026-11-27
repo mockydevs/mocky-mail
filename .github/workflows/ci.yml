@@ -100,3 +100,34 @@ jobs:
       - name: Build installers
         working-directory: apps/desktop
         run: npx --yes @tauri-apps/cli@2.12.4 build
+
+  # Builds the Android app (one processor type, unsigned) so Kotlin and
+  # Android-only Rust code are compiled before a release, not first by it.
+  android:
+    name: Android app (build check)
+    needs: [engine, interface]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-ci
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+        working-directory: apps/desktop
+      - name: Build the app bundle
+        working-directory: apps/desktop
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npx --yes @tauri-apps/cli@2.12.4 android build --aab --ci --target aarch64
