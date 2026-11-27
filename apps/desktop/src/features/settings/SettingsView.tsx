@@ -29,6 +29,12 @@ const READ_DELAY = [1, 3, 5, 10] as const;
 /** Same choices as the backend accepts (UNDO_SEND_CHOICES in settings.rs). */
 const UNDO_SEND = [0, 5, 10, 20, 30] as const;
 
+const READ_RECEIPTS: readonly [Settings['readReceipts'], string][] = [
+  ['ask', 'Ask each time'],
+  ['always', 'Always send'],
+  ['never', 'Never send'],
+];
+
 const READING_PANE: readonly [Settings['readingPane'], string][] = [
   ['right', 'Right of the list'],
   ['bottom', 'Below the list'],
@@ -225,6 +231,24 @@ export function SettingsView({
                 </select>
               </label>
             )}
+            <label className="form-field">
+              <span className="form-field__label">Read receipts</span>
+              <select
+                className="field"
+                value={settings.readReceipts}
+                onChange={(e) => {
+                  const value = READ_RECEIPTS.find(([v]) => v === e.target.value)?.[0];
+                  if (value) onChange({ ...settings, readReceipts: value });
+                }}
+              >
+                {READ_RECEIPTS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="form-hint">Read receipts: what to do when a message you open asks to know that you read it.</p>
           </fieldset>
 
           <fieldset className="settings__group">

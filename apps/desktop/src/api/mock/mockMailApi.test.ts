@@ -86,3 +86,63 @@ describe('mock backend: 0.5.0 mail handling', () => {
     await expect(createMockMailApi({ phone: true }).openMessageWindow('m1')).rejects.toMatchObject({ kind: 'invalid' });
   });
 });
+
+describe('mock backend: 0.7.0 compose', () => {
+  it('checks names against contacts and people in the mail', async () => {
+    const api = createMockMailApi({
+      contacts: [
+        { id: 'c1', accountId: 'work', uid: 'c1', name: 'Amina Wairimu', emails: ['amina.w@site.example'], phones: [], organization: '', title: '', notes: '', state: 'synced' },
+      ],
+    });
+    const check = await api.resolveRecipients('Wanjiru, peter@client.example, "Boss" <boss@work.example>, Amina, nobody here');
+    expect(check.resolved).toEqual([
+      { name: 'Wanjiru Kamau', address: 'wanjiru@fitout.example' },
+      { name: 'Peter Mwangi', address: 'peter@client.example' },
+      { name: 'Boss', address: 'boss@work.example' },
+    ]);
+    expect(check.ambiguous).toEqual([
+      {
+        input: 'Amina',
+        candidates: expect.arrayContaining([
+          { name: 'Amina Wairimu', address: 'amina.w@site.example' },
+          { name: 'Amina Hassan', address: 'amina@studio.example' },
+        ]) as unknown,
+      },
+    ]);
+    expect(check.invalid).toEqual(['nobody here']);
+    // An exact name of several wins, as in the backend.
+    expect((await api.resolveRecipients('Amina Hassan')).resolved).toEqual([{ name: 'Amina Hassan', address: 'amina@studio.example' }]);
+  });
+
+  it('makes contact cards and messages into attachments', async () => {
+    const api = createMockMailApi({
+      contacts: [{ id: 'c1', accountId: null, uid: 'c1', name: 'Peter Mwangi', emails: ['peter@client.example'], phones: [], organization: '', title: '', notes: '', state: 'synced' }],
+    });
+    expect(await api.contactCardAttachment('c1')).toEqual(expect.objectContaining({ fileName: 'Peter Mwangi.vcf' }));
+    await expect(api.contactCardAttachment('gone')).rejects.toMatchObject({ kind: 'not_found' });
+    expect(await api.messageAsAttachment('m3')).toEqual(expect.objectContaining({ fileName: 'Lunch on Friday_.eml' }));
+  });
+
+  it('answers a read receipt once', async () => {
+    const api = createMockMailApi();
+    expect((await api.getMessage('m6', false)).readReceipt).toEqual({ requestedBy: 'peter@client.example', answered: false });
+    await api.answerReadReceipt('m6', true);
+    expect((await api.getMessage('m6', false)).readReceipt?.answered).toBe(true);
+    await expect(api.answerReadReceipt('m6', false)).rejects.toMatchObject({ kind: 'invalid' });
+    await expect(api.answerReadReceipt('m1', true)).rejects.toMatchObject({ kind: 'invalid' });
+    expect(api.answeredReceipts).toEqual([{ messageId: 'm6', send: true }]);
+  });
+
+  it('hands each compose window its draft once; phones have none', async () => {
+    const api = createMockMailApi();
+    const draft = { accountId: 'work', to: '', cc: '', bcc: '', subject: 'A', bodyText: '', bodyHtml: '<p></p>', inReplyTo: null, references: [], attachments: [], replyToMessageId: null, draftMessageId: null };
+    await api.openComposeWindow(draft);
+    await api.openComposeWindow({ ...draft, subject: 'B' });
+    const [a, b] = api.openedComposeWindows;
+    expect(a).not.toBe(b);
+    expect((await api.takeComposeDraft(b ?? ''))?.subject).toBe('B');
+    expect(await api.takeComposeDraft(b ?? '')).toBeNull();
+    expect((await api.takeComposeDraft(a ?? ''))?.subject).toBe('A');
+    await expect(createMockMailApi({ phone: true }).openComposeWindow(draft)).rejects.toMatchObject({ kind: 'invalid' });
+  });
+});

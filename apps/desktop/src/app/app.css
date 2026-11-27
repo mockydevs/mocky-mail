@@ -5596,3 +5596,389 @@ button.contact-row:hover,
     height: 44px;
   }
 }
+
+/* ---------------------------------------------------------- Rich-text compose (0.7.0) */
+
+.rte {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 260px;
+}
+
+/* Holds the scrolling toolbar; menus line up with it, so they are never clipped. */
+.rte__bar {
+  position: relative;
+  flex: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.rte__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 12px;
+}
+
+.rte__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rte__btn:hover:not(:disabled) {
+  background: var(--list);
+  color: var(--text);
+}
+
+.rte__btn[aria-pressed='true'],
+.rte__btn.is-active {
+  background: var(--sel-bg);
+  color: var(--sel-text);
+}
+
+.rte__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.rte__btn:focus-visible,
+.rte__select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.rte__select {
+  height: 32px;
+  max-width: 140px;
+  padding: 0 6px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.rte__sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+.rte__swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--input-border);
+  border-radius: 3px;
+  background: linear-gradient(135deg, transparent 45%, var(--muted) 45%, var(--muted) 55%, transparent 55%);
+}
+
+.rte__mark {
+  padding: 0 2px;
+  border-radius: 2px;
+  background: #fff59d;
+  color: #1c1c1a;
+}
+
+.rte__area {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.rte__content {
+  flex: 1 1 auto;
+  outline: none;
+  overflow-wrap: anywhere;
+}
+
+.rte__content > * + * {
+  margin-top: 0.5em;
+}
+
+.rte__content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--faint);
+  pointer-events: none;
+}
+
+.rte__content ul,
+.rte__content ol {
+  padding-left: 1.6em;
+}
+
+.rte__content blockquote {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.rte__content a {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.rte__content hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.rte__content table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.rte__content td,
+.rte__content th {
+  min-width: 48px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.rte__content .selectedCell {
+  background: var(--sel-bg);
+}
+
+.rte__content img {
+  max-width: 100%;
+  height: auto;
+}
+
+.rte__content mark {
+  color: inherit;
+}
+
+/* The signature and the original under a reply: set off a little. */
+.rte__content [data-mocky-signature] {
+  color: var(--muted);
+}
+
+.rte__content [data-mocky-quote] {
+  margin-top: 1.2em;
+  padding-top: 0.8em;
+  border-top: 1px solid var(--border-soft);
+}
+
+.rte--painting .rte__content {
+  cursor: copy;
+}
+
+.rte-find {
+  border-radius: 2px;
+  background: var(--warn-bg);
+  box-shadow: 0 0 0 1px var(--warn-border);
+}
+
+.rte-find--current {
+  background: #ffd54f;
+  color: #1c1c1a;
+}
+
+.rte__find {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--list);
+}
+
+.rte__find-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.rte__find-input {
+  flex: 1 1 160px;
+  max-width: 280px;
+}
+
+.rte__find-count {
+  min-width: 64px;
+}
+
+.rte__find-case {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.compose__body--loading {
+  color: var(--faint);
+}
+
+.compose__option-note {
+  padding: 4px 20px;
+}
+
+.compose__popout {
+  margin-left: auto;
+}
+
+/* Pop out: compose fills a window of its own. */
+.compose--window {
+  height: 100%;
+}
+
+.splash__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.symbol-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 4px;
+  margin: 12px 0;
+}
+
+.symbol-grid__btn {
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.symbol-grid__btn:hover,
+.symbol-grid__btn:focus-visible {
+  border-color: var(--primary);
+  background: var(--sel-bg);
+}
+
+.pick-list {
+  display: flex;
+  flex-direction: column;
+  max-height: min(360px, 50vh);
+  margin: 12px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.pick-list__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pick-list__item:hover:not(:disabled),
+.pick-list__item:focus-visible {
+  background: var(--row-hover);
+}
+
+.pick-list__name {
+  font-weight: 600;
+}
+
+/* A sender asked for a read receipt. */
+.receipt-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: 13px;
+}
+
+.receipt-bar__actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.receipt-bar--done {
+  background: transparent;
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  /* One row that scrolls sideways, buttons big enough to tap. */
+  .rte--phone .rte__toolbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 4px 8px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .rte--phone .rte__toolbar > * {
+    flex: none;
+  }
+
+  .rte--phone .rte__btn,
+  .rte--phone .rte__select {
+    min-width: 44px;
+    height: 44px;
+  }
+
+  /* Menus open from the bar, not inside the scrolling row. */
+  .rte--phone .rte__toolbar .menu-wrap {
+    position: static;
+  }
+
+  .rte--phone .rte__toolbar .menu {
+    left: 8px;
+    right: 8px;
+    top: 100%;
+  }
+
+  .rte--phone {
+    min-height: 0;
+  }
+
+  .rte--phone .rte__content {
+    min-height: 50vh;
+  }
+
+  .receipt-bar__actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .receipt-bar__actions .btn {
+    flex: 1;
+    min-height: 44px;
+  }
+}

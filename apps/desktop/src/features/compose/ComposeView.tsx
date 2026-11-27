@@ -2,15 +2,28 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type SyntheticE
 
 import { useMailApi } from '../../api/MailApiContext';
 import { errorTitle, toAppError } from '../../api/errors';
-import type { Account, AppError, Draft, DraftAttachment, Importance, OutboxEntry, SignatureImage, SignatureSet } from '../../api/types';
+import type {
+  Account,
+  AppError,
+  Draft,
+  DraftAttachment,
+  Importance,
+  Mailbox,
+  OutboxEntry,
+  RecipientCheck,
+  SignatureImage,
+  SignatureSet,
+} from '../../api/types';
 import { formatBytes } from '../../lib/format';
 import { Icon } from '../../ui/Icon';
+import { MenuButton, MenuItem } from '../../ui/Menu';
 import { Modal } from '../../ui/Modal';
+import { RichEditorSlot, type EditorHandle } from './editor/loader';
+import { ContactCardDialog, ItemDialog, NameChooser, SymbolDialog } from './InsertDialogs';
 import { RecipientField } from './RecipientField';
-import { parseRecipients } from './recipients';
-import { link, prefixLines, wrap, type Edit } from './formatting';
-import { signatureBlock, signatureFor, swapSignature, type ComposeKind } from './seed';
-import { SandboxedHtml } from '../reader/SandboxedHtml';
+import { entryFor, parseRecipients, splitRecipients } from './recipients';
+import { htmlToPlainText, swapSignatureHtml, textToHtml } from './richText';
+import { signatureBlock, signatureFor, type ComposeKind } from './seed';
 
 const IMPORTANCE: readonly [Importance, string, string][] = [
   ['high', 'High', 'High importance'],
@@ -43,12 +56,22 @@ interface Props {
    * that runs after the user's answer (save or discard). Null: nothing to ask.
    */
   onLeaveGuard?: (ask: LeaveCompose | null) => void;
+  /**
+   * Computers: offer Pop out, which carries on with the message in a window
+   * of its own. Called once that window is open; compose here then closes.
+   */
+  onPoppedOut?: (() => void) | undefined;
+  /** Phone layout: the editor's toolbar is one scrolling row. */
+  phone?: boolean;
+  /** A window of its own: compose fills it. */
+  standalone?: boolean;
 }
 
 /** Ask compose to close, then carry on with `then`. */
 export type LeaveCompose = (then: () => void) => void;
 
 type FieldName = 'to' | 'cc' | 'bcc';
+const FIELDS: readonly FieldName[] = ['to', 'cc', 'bcc'];
 
 function recipientError(input: string, required: boolean): string | null {
   const { valid, invalid } = parseRecipients(input);
@@ -62,6 +85,39 @@ function encodedEstimate(bytes: number): number {
   return Math.ceil(bytes / 3) * 4;
 }
 
+/** The message as the editor holds it: its HTML, or HTML made from plain text (older drafts). */
+function htmlOf(draft: Draft): string {
+  return draft.bodyHtml ?? textToHtml(draft.bodyText);
+}
+
+/** The body replaced, with its plain-text version kept in step. */
+function withBody(draft: Draft, html: string, text: string = htmlToPlainText(html)): Draft {
+  return { ...draft, bodyHtml: html, bodyText: text };
+}
+
+/**
+ * Where the message goes while the editor loads (the first time only). It
+ * holds the focus a reply starts with, so Esc and Ctrl+Enter work meanwhile.
+ */
+function EditorLoading({ focus }: { focus: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focus) ref.current?.focus();
+  }, [focus]);
+  return (
+    <div ref={ref} className="compose__body compose__body--loading" aria-busy="true" tabIndex={-1}>
+      Getting the editor ready
+    </div>
+  );
+}
+
+/** A typed name Check Names found more than one contact for. */
+interface Choice {
+  field: FieldName;
+  input: string;
+  candidates: Mailbox[];
+}
+
 export function ComposeView({
   initial,
   attachmentsFrom = null,
@@ -73,9 +129,13 @@ export function ComposeView({
   kind = 'draft',
   unsaved: startsUnsaved = false,
   onLeaveGuard,
+  onPoppedOut,
+  phone = false,
+  standalone = false,
 }: Props) {
   const api = useMailApi();
   const id = useId();
+  const editorRef = useRef<EditorHandle>(null);
   const [draft, setDraft] = useState<Draft>(initial);
   /** The last saved (or loaded) state; changes are compared against it. */
   const [baseline, setBaseline] = useState<Draft>(initial);
@@ -84,13 +144,19 @@ export function ComposeView({
   const [showCc, setShowCc] = useState(initial.cc !== '');
   const [showBcc, setShowBcc] = useState(initial.bcc !== '');
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<FieldName, string>>>({});
+  /** Bumped when Check Names rewrites the fields, so they show the new entries. */
+  const [fieldsRevision, setFieldsRevision] = useState(0);
   const [error, setError] = useState<AppError | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | 'send' | 'save' | 'attach'>(null);
+  const [busy, setBusy] = useState<null | 'send' | 'save' | 'attach' | 'check' | 'popout'>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   const [unsaved, setUnsaved] = useState(startsUnsaved);
   /** Where the shell wants to go once this message is saved or discarded. */
   const [afterClose, setAfterClose] = useState<(() => void) | null>(null);
+  const [inserting, setInserting] = useState<null | 'symbol' | 'contact' | 'item'>(null);
+  /** Check Names: names still to pick a contact for, and whether Send waits on them. */
+  const [choices, setChoices] = useState<Choice[]>([]);
+  const [sendAfterChoices, setSendAfterChoices] = useState(false);
 
   useEffect(() => {
     if (attachmentsFrom === null) return;
@@ -138,9 +204,14 @@ export function ComposeView({
     signature.current = text;
     setSignatureId(next?.id ?? null);
     setSignatureImage(next?.image && text !== null ? { text, image: next.image } : null);
-    setDraft((d) => ({ ...d, bodyText: swapSignature(d.bodyText, previous, text) }));
+    const swap = (d: Draft) => {
+      const html = htmlOf(d);
+      const swapped = swapSignatureHtml(html, previous, text, next?.id ?? null);
+      return swapped === html ? d : withBody(d, swapped);
+    };
+    setDraft(swap);
     // Adding it at the start isn't a change the user made.
-    if (atStart) setBaseline((b) => ({ ...b, bodyText: swapSignature(b.bodyText, previous, text) }));
+    if (atStart) setBaseline(swap);
   };
 
   useEffect(() => {
@@ -172,11 +243,18 @@ export function ComposeView({
     setStatus(null);
   };
 
-  const validate = (): boolean => {
+  const addFiles = (files: readonly DraftAttachment[]) => {
+    setDraft((d) => {
+      const known = new Set(d.attachments.map((a) => a.path));
+      return { ...d, attachments: [...d.attachments, ...files.filter((f) => !known.has(f.path))] };
+    });
+  };
+
+  const validate = (d: Draft): boolean => {
     const errors: Partial<Record<FieldName, string>> = {};
-    const to = recipientError(draft.to, draft.cc.trim() === '' && draft.bcc.trim() === '');
-    const cc = recipientError(draft.cc, false);
-    const bcc = recipientError(draft.bcc, false);
+    const to = recipientError(d.to, d.cc.trim() === '' && d.bcc.trim() === '');
+    const cc = recipientError(d.cc, false);
+    const bcc = recipientError(d.bcc, false);
     if (to) errors.to = to;
     if (cc) errors.cc = cc;
     if (bcc) errors.bcc = bcc;
@@ -184,18 +262,89 @@ export function ComposeView({
     return Object.keys(errors).length === 0;
   };
 
-  const send = (event: SyntheticEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError(null);
-    if (!validate()) return;
+  const sendNow = (d: Draft) => {
+    if (!validate(d)) return;
     setBusy('send');
     api
-      .checkDraft(draft)
-      .then(() => api.sendMessage(draft))
+      .checkDraft(d)
+      .then(() => api.sendMessage(d))
       .then(onSent, (e: unknown) => {
         setError(toAppError(e));
         setBusy(null);
       });
+  };
+
+  /**
+   * Check Names: look up what was typed in To, Cc and Bcc. Known names become
+   * "Name <address>"; a name with several matches asks which; anything else
+   * is marked. With `thenSend`, the message goes once everything is resolved.
+   */
+  const checkNames = (thenSend: boolean) => {
+    setError(null);
+    setStatus(null);
+    const snapshot = draft;
+    const fields = FIELDS.filter((f) => snapshot[f].trim() !== '');
+    setBusy('check');
+    Promise.all(fields.map((f) => api.resolveRecipients(snapshot[f]).then((r): [FieldName, RecipientCheck] => [f, r])))
+      .then((results) => {
+        setBusy(null);
+        const patch: Partial<Draft> = {};
+        const errors: Partial<Record<FieldName, string>> = {};
+        const queue: Choice[] = [];
+        for (const [f, check] of results) {
+          patch[f] = [...check.resolved.map(entryFor), ...check.ambiguous.map((a) => a.input), ...check.invalid].join(', ');
+          if (check.invalid.length > 0) {
+            errors[f] = `Check ${check.invalid.join(', ')}. That does not look like an email address or the name of a contact.`;
+          }
+          queue.push(...check.ambiguous.map((a) => ({ field: f, input: a.input, candidates: a.candidates })));
+        }
+        const next = { ...snapshot, ...patch };
+        setDraft((d) => ({ ...d, ...patch }));
+        setFieldsRevision((r) => r + 1);
+        setFieldErrors(errors);
+        setChoices(queue);
+        const clean = queue.length === 0 && Object.keys(errors).length === 0;
+        setSendAfterChoices(thenSend && queue.length > 0 && Object.keys(errors).length === 0);
+        if (thenSend && clean) sendNow(next);
+        else if (!thenSend && clean) setStatus('Names checked.');
+      })
+      .catch((e: unknown) => {
+        setBusy(null);
+        setError(toAppError(e));
+      });
+  };
+
+  const choose = (choice: Choice, person: Mailbox | null) => {
+    const rest = choices.slice(1);
+    setChoices(rest);
+    if (person === null) {
+      setSendAfterChoices(false);
+      setFieldErrors((errors) => ({
+        ...errors,
+        [choice.field]: `Pick who ${choice.input} is, or type their address.`,
+      }));
+      return;
+    }
+    const entries = splitRecipients(draft[choice.field]).map((e) => (e === choice.input ? entryFor(person) : e));
+    const next = { ...draft, [choice.field]: entries.join(', ') };
+    setDraft(next);
+    setFieldsRevision((r) => r + 1);
+    if (rest.length === 0 && sendAfterChoices) {
+      setSendAfterChoices(false);
+      sendNow(next);
+    }
+  };
+
+  const send = (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+    const empty = FIELDS.every((f) => parseRecipients(draft[f]).valid.length === 0 && parseRecipients(draft[f]).invalid.length === 0);
+    // Names typed instead of addresses: look them up first.
+    if (!empty && FIELDS.some((f) => parseRecipients(draft[f]).invalid.length > 0)) {
+      checkNames(true);
+      return;
+    }
+    sendNow(draft);
   };
 
   /** Save and remember the saved copy's id, so the next save or send replaces it. */
@@ -228,15 +377,27 @@ export function ComposeView({
     setBusy('attach');
     api.pickAttachments().then(
       (files) => {
-        setDraft((d) => {
-          const known = new Set(d.attachments.map((a) => a.path));
-          return { ...d, attachments: [...d.attachments, ...files.filter((f) => !known.has(f.path))] };
-        });
+        addFiles(files);
         setBusy(null);
       },
       (e: unknown) => {
         setError(toAppError(e));
         setBusy(null);
+      },
+    );
+  };
+
+  const popOut = () => {
+    setError(null);
+    setBusy('popout');
+    api.openComposeWindow(draft).then(
+      () => {
+        setBusy(null);
+        onPoppedOut?.();
+      },
+      (e: unknown) => {
+        setBusy(null);
+        setError(toAppError(e));
       },
     );
   };
@@ -264,55 +425,16 @@ export function ComposeView({
     setAfterClose(null);
   };
 
-  // Formatting: marks typed or added by the toolbar; Preview shows the result.
-  const bodyRef = useRef<HTMLTextAreaElement>(null);
-  const [preview, setPreview] = useState<string | null>(null);
-  const format = (make: (value: string, start: number, end: number) => Edit) => {
-    const box = bodyRef.current;
-    if (!box) return;
-    const edit = make(box.value, box.selectionStart, box.selectionEnd);
-    update({ bodyText: edit.value });
-    // After React writes the new value, put the cursor where the edit says.
-    requestAnimationFrame(() => {
-      box.focus();
-      box.setSelectionRange(edit.start, edit.end);
-    });
-  };
-  const tools: { label: string; key?: string; text: string; make: (v: string, s: number, e: number) => Edit }[] = [
-    { label: 'Bold', key: 'b', text: 'B', make: (v, s, e) => wrap(v, s, e, '**', 'bold text') },
-    { label: 'Italic', key: 'i', text: 'I', make: (v, s, e) => wrap(v, s, e, '*', 'italic text') },
-    { label: 'Link', key: 'k', text: 'Link', make: link },
-    { label: 'Bulleted list', text: '•', make: (v, s, e) => prefixLines(v, s, e, '- ') },
-    { label: 'Numbered list', text: '1.', make: (v, s, e) => prefixLines(v, s, e, '', true) },
-    { label: 'Quote', text: '❝', make: (v, s, e) => prefixLines(v, s, e, '> ') },
-    { label: 'Code', text: '</>', make: (v, s, e) => wrap(v, s, e, '`', 'code') },
-  ];
-  const togglePreview = () => {
-    if (preview !== null) {
-      setPreview(null);
-      return;
-    }
-    api.previewBody(draft.bodyText).then(setPreview, (e: unknown) => {
-      setError(toAppError(e));
-    });
-  };
-
   const onKeyDown = (event: KeyboardEvent) => {
-    const shortcut =
-      (event.ctrlKey || event.metaKey) && !event.altKey && event.target === bodyRef.current
-        ? tools.find((t) => t.key === event.key.toLowerCase())
-        : undefined;
-    if (shortcut) {
-      event.preventDefault();
-      format(shortcut.make);
-      return;
-    }
     if (event.key === 'Escape' && !confirmClose) {
       event.stopPropagation();
       requestClose();
     } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && busy === null && !loadingAttachments) {
       event.preventDefault();
       (event.currentTarget as HTMLFormElement).requestSubmit();
+    } else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      if (busy === null) checkNames(false);
     } else if (event.key === 'Enter' && event.target instanceof HTMLInputElement) {
       // Plain Enter in To, Cc, Bcc or Subject must not send the message
       // (browsers submit a form on Enter in a text field).
@@ -330,6 +452,7 @@ export function ComposeView({
         </label>
         <div className="compose__field">
           <RecipientField
+            key={fieldsRevision}
             id={fieldId}
             label={label}
             value={draft[name]}
@@ -337,7 +460,7 @@ export function ComposeView({
             describedBy={message ? `${fieldId}-error` : undefined}
             // The first field of a view the user just opened.
             // eslint-disable-next-line jsx-a11y/no-autofocus
-            autoFocus={autoFocus}
+            autoFocus={autoFocus && fieldsRevision === 0}
             onChange={(value) => {
               update({ [name]: value });
             }}
@@ -380,10 +503,19 @@ export function ComposeView({
     );
   };
 
+  const choice = choices[0];
+  const bodyHtml = htmlOf(draft);
+
   return (
     // The form handles Esc for its own fields; it is not an interactive control itself.
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
-    <form className="compose" aria-labelledby={`${id}-title`} onSubmit={send} onKeyDown={onKeyDown} noValidate>
+    <form
+      className={`compose${standalone ? ' compose--window' : ''}`}
+      aria-labelledby={`${id}-title`}
+      onSubmit={send}
+      onKeyDown={onKeyDown}
+      noValidate
+    >
       <div className="compose__card">
       <header className="compose__head">
         <h1 id={`${id}-title`} className="compose__title">
@@ -394,7 +526,24 @@ export function ComposeView({
             {status}
           </span>
         )}
-        <button type="button" className="icon-btn compose__close" aria-label="Close" onClick={requestClose}>
+        {onPoppedOut && !phone && (
+          <button
+            type="button"
+            className="icon-btn compose__popout"
+            aria-label="Pop out"
+            title="Carry on in a window of its own"
+            disabled={busy !== null || loadingAttachments}
+            onClick={popOut}
+          >
+            <Icon name="external" />
+          </button>
+        )}
+        <button
+          type="button"
+          className={`icon-btn${onPoppedOut && !phone ? '' : ' compose__close'}`}
+          aria-label="Close"
+          onClick={requestClose}
+        >
           <Icon name="close" />
         </button>
       </header>
@@ -443,6 +592,41 @@ export function ComposeView({
           <Icon name="paperclip" />
           Attach files
         </button>
+        <MenuButton label="Insert" text="Insert" className="btn btn--ghost" align="left" disabled={busy !== null}>
+          <MenuItem
+            onSelect={() => {
+              setInserting('symbol');
+            }}
+          >
+            Symbol…
+          </MenuItem>
+          <MenuItem
+            onSelect={() => {
+              setInserting('contact');
+            }}
+          >
+            Contact card…
+          </MenuItem>
+          <MenuItem
+            onSelect={() => {
+              setInserting('item');
+            }}
+          >
+            Item…
+          </MenuItem>
+        </MenuButton>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          title="Check names (Alt+K)"
+          disabled={busy !== null}
+          onClick={() => {
+            checkNames(false);
+          }}
+        >
+          <Icon name="people" />
+          {busy === 'check' ? 'Checking' : 'Check names'}
+        </button>
         <div className="compose__importance" role="group" aria-label="Importance">
           {IMPORTANCE.map(([value, text, title]) => (
             <button
@@ -461,6 +645,17 @@ export function ComposeView({
             </button>
           ))}
         </div>
+        <MenuButton label="Options" text="Options" className="btn btn--ghost" align="left" active={draft.requestReadReceipt === true}>
+          <MenuItem
+            kind="check"
+            checked={draft.requestReadReceipt === true}
+            onSelect={() => {
+              update({ requestReadReceipt: draft.requestReadReceipt !== true });
+            }}
+          >
+            Request a read receipt
+          </MenuItem>
+        </MenuButton>
         {signatures && signatures.items.length > 0 && (
           <label className="compose__signature-pick">
             <span>Signature</span>
@@ -482,60 +677,28 @@ export function ComposeView({
         )}
         <span className="compose__hint">Ctrl+Enter to send</span>
       </div>
-
-      <div className="compose__format" role="toolbar" aria-label="Formatting">
-        {tools.map((tool) => (
-          <button
-            key={tool.label}
-            type="button"
-            className="compose__format-btn"
-            style={tool.label === 'Italic' ? { fontStyle: 'italic', fontFamily: 'Georgia, serif' } : undefined}
-            aria-label={tool.label}
-            title={tool.key ? `${tool.label} (Ctrl+${tool.key.toUpperCase()})` : tool.label}
-            disabled={preview !== null}
-            onClick={() => {
-              format(tool.make);
-            }}
-          >
-            {tool.text}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="compose__format-btn compose__format-preview"
-          aria-pressed={preview !== null}
-          onClick={togglePreview}
-        >
-          {preview !== null ? 'Edit' : 'Preview'}
-        </button>
-      </div>
-
-      {preview !== null && (
-        <div className="compose__preview">
-          <SandboxedHtml title="Preview of your message" html={preview} fitContent />
-        </div>
+      {draft.requestReadReceipt === true && (
+        <p className="compose__option-note form-hint">A read receipt is requested. The recipient can choose not to send one.</p>
       )}
-      <label htmlFor={`${id}-body`} className="visually-hidden">
-        Message
-      </label>
-      <textarea
-        ref={bodyRef}
-        id={`${id}-body`}
-        hidden={preview !== null}
-        className="compose__body"
-        value={draft.bodyText}
-        // Replies start in the body, since To is already filled.
-        // eslint-disable-next-line jsx-a11y/no-autofocus
-        autoFocus={initial.to !== ''}
-        onFocus={(e) => {
-          if (initial.to !== '' && e.currentTarget.selectionStart === e.currentTarget.value.length) {
-            e.currentTarget.setSelectionRange(0, 0);
-          }
-        }}
-        onChange={(e) => {
-          update({ bodyText: e.target.value });
-        }}
-      />
+
+      <RichEditorSlot
+          label="Message"
+          value={bodyHtml}
+          // Replies start in the body, since To is already filled.
+          focusOnOpen={initial.to !== ''}
+          handleRef={editorRef}
+          phone={phone}
+          onChange={(html, text) => {
+            setDraft((d) => withBody(d, html, text));
+            setStatus(null);
+          }}
+          onNormalize={(from, to, text) => {
+            const tidy = (d: Draft) => (htmlOf(d) === from ? withBody(d, to, text) : d);
+            setDraft(tidy);
+            setBaseline(tidy);
+          }}
+          fallback={<EditorLoading focus={initial.to !== ''} />}
+        />
 
       {signatureImage && draft.bodyText.includes(signatureBlock(signatureImage.text)) && (
         <figure className="compose__signature">
@@ -618,6 +781,49 @@ export function ComposeView({
         </button>
       </footer>
       </div>
+
+      {inserting === 'symbol' && (
+        <SymbolDialog
+          onClose={() => {
+            setInserting(null);
+            editorRef.current?.focus();
+          }}
+          onPick={(symbol) => {
+            setInserting(null);
+            editorRef.current?.insertText(symbol);
+          }}
+        />
+      )}
+      {(inserting === 'contact' || inserting === 'item') &&
+        (() => {
+          const Picker = inserting === 'contact' ? ContactCardDialog : ItemDialog;
+          return (
+            <Picker
+              onClose={() => {
+                setInserting(null);
+              }}
+              onAttach={(file) => {
+                setInserting(null);
+                addFiles([file]);
+                setStatus(`Attached ${file.fileName}.`);
+              }}
+            />
+          );
+        })()}
+
+      {choice && (
+        <NameChooser
+          key={`${choice.field}:${choice.input}`}
+          input={choice.input}
+          candidates={choice.candidates}
+          onPick={(person) => {
+            choose(choice, person);
+          }}
+          onCancel={() => {
+            choose(choice, null);
+          }}
+        />
+      )}
 
       {confirmClose && (
         <Modal
