@@ -91,7 +91,7 @@ describe('mock backend: 0.7.0 compose', () => {
   it('checks names against contacts and people in the mail', async () => {
     const api = createMockMailApi({
       contacts: [
-        { id: 'c1', accountId: 'work', uid: 'c1', name: 'Amina Wairimu', emails: ['amina.w@site.example'], phones: [], organization: '', title: '', notes: '', state: 'synced' },
+        { id: 'c1', accountId: 'work', uid: 'c1', name: 'Amina Wairimu', emails: ['amina.w@site.example'], phones: [], organization: '', title: '', notes: '', favorite: false, categories: [], photo: null, state: 'synced' },
       ],
     });
     const check = await api.resolveRecipients('Wanjiru, peter@client.example, "Boss" <boss@work.example>, Amina, nobody here');
@@ -116,7 +116,7 @@ describe('mock backend: 0.7.0 compose', () => {
 
   it('makes contact cards and messages into attachments', async () => {
     const api = createMockMailApi({
-      contacts: [{ id: 'c1', accountId: null, uid: 'c1', name: 'Peter Mwangi', emails: ['peter@client.example'], phones: [], organization: '', title: '', notes: '', state: 'synced' }],
+      contacts: [{ id: 'c1', accountId: null, uid: 'c1', name: 'Peter Mwangi', emails: ['peter@client.example'], phones: [], organization: '', title: '', notes: '', favorite: false, categories: [], photo: null, state: 'synced' }],
     });
     expect(await api.contactCardAttachment('c1')).toEqual(expect.objectContaining({ fileName: 'Peter Mwangi.vcf' }));
     await expect(api.contactCardAttachment('gone')).rejects.toMatchObject({ kind: 'not_found' });

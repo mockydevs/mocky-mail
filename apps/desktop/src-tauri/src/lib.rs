@@ -11,11 +11,13 @@ mod accounts;
 mod attachments;
 mod calendar;
 mod compose;
+mod connections;
 mod contacts;
 mod convert;
 mod credentials;
 mod error;
 mod events;
+mod files;
 #[cfg(target_os = "android")]
 mod files_android;
 mod folders;
@@ -26,9 +28,11 @@ mod mail;
 mod mailto;
 mod message_tools;
 mod message_window;
+mod opened;
 mod organize;
 mod out_of_office;
 mod outbox;
+mod pst;
 mod read_receipts;
 mod reminders;
 mod rules;
@@ -38,6 +42,7 @@ mod settings;
 mod signatures;
 mod state;
 mod sync;
+mod tasks;
 #[cfg(desktop)]
 mod tray;
 mod updates;
@@ -167,6 +172,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     calendar::start(handle.clone(), Arc::clone(&state));
     reminders::start(handle.clone(), Arc::clone(&state));
     server_rules::start(&handle);
+    // Android: files shared to the app or opened with it.
+    #[cfg(target_os = "android")]
+    opened::watch_shared(handle.clone());
     tauri::async_runtime::spawn(outbox::run(handle, state));
     Ok(())
 }
@@ -179,15 +187,21 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 #[allow(clippy::too_many_lines, reason = "mostly the list of commands")]
 pub fn run() {
     mailto::remember_launch_link();
+    opened::remember_launch_files();
     let builder = tauri::Builder::default();
     // Must be first: a second copy would sync and send in parallel.
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
         // Opening it again brings the window back, even from the tray.
         tray::show(app);
         // A mailto: link opened while the app runs: start a message.
         if let Some(url) = mailto::from_args(args.iter().map(String::as_str)) {
             let _ = app.emit("mail://mailto", serde_json::json!({ "url": url }));
+        }
+        // A mail, calendar or contact file opened while the app runs.
+        let cwd = std::path::PathBuf::from(cwd);
+        for path in opened::from_args(args.iter().skip(1).map(String::as_str), &cwd) {
+            opened::deliver(Some(app), &path, None, None);
         }
     }));
     // Android: Gmail sign-in with the phone's own Google accounts.
@@ -265,12 +279,26 @@ pub fn run() {
             contacts::save_contact,
             contacts::delete_contact,
             contacts::sync_contacts,
+            contacts::list_contact_groups,
+            contacts::save_contact_group,
+            contacts::delete_contact_group,
+            connections::connect_calendar_and_contacts,
             calendar::list_calendars,
             calendar::list_events,
             calendar::get_event,
             calendar::save_event,
             calendar::delete_event,
             calendar::sync_calendars,
+            calendar::set_calendar_visible,
+            calendar::get_free_busy,
+            reminders::list_due_reminders,
+            reminders::dismiss_reminder,
+            reminders::snooze_reminder,
+            tasks::list_task_lists,
+            tasks::list_tasks,
+            tasks::save_task,
+            tasks::delete_task,
+            tasks::sync_tasks,
             invitations::answer_invitation,
             out_of_office::get_out_of_office,
             out_of_office::set_out_of_office,
@@ -311,14 +339,40 @@ pub fn run() {
             security::get_account_keys,
             security::set_preferred_kind,
             security::check_encryption,
+            files::import_mail_files,
+            files::export_mail,
+            files::import_calendar_file,
+            files::export_calendar,
+            files::import_contacts_file,
+            files::export_contacts,
+            files::import_opened_file,
+            files::import_message_file,
+            files::read_message_file,
+            pst::import_pst,
+            opened::take_opened_files,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!())
+        .map(|app| app.run(on_run_event));
 
     if let Err(error) = result {
         eprintln!("Mocky Mail could not start: {error}");
         startup_failed(&error.to_string());
         std::process::exit(1);
     }
+}
+
+/// Events of the running app: on macOS, files opened with it (Finder's
+/// "Open With", a double-click) come this way rather than as arguments.
+fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    if let tauri::RunEvent::Opened { urls } = &event {
+        for url in urls {
+            if let Ok(path) = url.to_file_path() {
+                opened::deliver(Some(app), &path, None, None);
+            }
+        }
+    }
+    let _ = (app, event);
 }
 
 #[cfg(test)]

@@ -32,12 +32,71 @@ export function fromDayKey(key: DayKey): Date {
 
 export const seconds = (date: Date) => Math.floor(date.getTime() / 1000);
 
-/** The six weeks shown for a month, Monday first. */
-export function monthGrid(month: Date): Date[] {
+/**
+ * The first day of the week where the user lives: 0 Sunday … 6 Saturday
+ * (from the locale's week information; Monday when it isn't known).
+ */
+export function firstDayOfWeek(): number {
+  try {
+    const locale = new Intl.Locale(Intl.DateTimeFormat().resolvedOptions().locale) as Intl.Locale & {
+      getWeekInfo?: () => { firstDay: number };
+      weekInfo?: { firstDay: number };
+    };
+    const info = locale.getWeekInfo?.() ?? locale.weekInfo;
+    if (info && info.firstDay >= 1 && info.firstDay <= 7) return info.firstDay % 7;
+  } catch {
+    // Older engines: fall through.
+  }
+  return 1;
+}
+
+/** The first day of the week holding `date`. */
+export function startOfWeek(date: Date, firstDay = firstDayOfWeek()): Date {
+  const back = (date.getDay() - firstDay + 7) % 7;
+  return addDays(startOfDay(date), -back);
+}
+
+/** The six weeks shown for a month, from the week's first day. */
+export function monthGrid(month: Date, firstDay = firstDayOfWeek()): Date[] {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);
-  const back = (first.getDay() + 6) % 7;
-  const start = addDays(first, -back);
+  const start = startOfWeek(first, firstDay);
   return Array.from({ length: 42 }, (_, i) => addDays(start, i));
+}
+
+/** Short weekday names from the week's first day. */
+export function weekdayNames(firstDay = firstDayOfWeek(), style: 'short' | 'narrow' = 'short'): string[] {
+  const format = new Intl.DateTimeFormat(undefined, { weekday: style });
+  // 7 Jan 2024 was a Sunday.
+  return Array.from({ length: 7 }, (_, i) => format.format(new Date(2024, 0, 7 + ((firstDay + i) % 7))));
+}
+
+/** The days a view shows around `date`. */
+export function viewDays(view: 'day' | 'workweek' | 'week', date: Date, firstDay = firstDayOfWeek()): Date[] {
+  if (view === 'day') return [startOfDay(date)];
+  if (view === 'workweek') {
+    // Monday to Friday of the week holding the date (a weekend shows the next one).
+    const day = date.getDay();
+    const monday = addDays(startOfDay(date), day === 0 ? 1 : day === 6 ? 2 : 1 - day);
+    return Array.from({ length: 5 }, (_, i) => addDays(monday, i));
+  }
+  const start = startOfWeek(date, firstDay);
+  return Array.from({ length: 7 }, (_, i) => addDays(start, i));
+}
+
+/** Minutes since local midnight of `day` (may be negative or past 1440). */
+export function minutesInto(day: Date, secondsUtc: number): number {
+  return Math.round((secondsUtc * 1000 - day.getTime()) / 60_000);
+}
+
+/** Local time on `day` after `minutes`, as Unix seconds (DST-safe for whole minutes). */
+export function atMinutes(day: Date, minutes: number): number {
+  const d = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, minutes);
+  return seconds(d);
+}
+
+/** "09:30" from minutes since midnight. */
+export function hhmm(minutes: number): string {
+  return `${pad(Math.floor(minutes / 60) % 24)}:${pad(minutes % 60)}`;
 }
 
 /** All-day dates are stored as midnight UTC: read them as calendar dates. */

@@ -169,7 +169,8 @@ impl Store {
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLUMNS} FROM contacts
              WHERE state != 'deleted' AND search LIKE ?1 ESCAPE '\\'
-             ORDER BY sort_name COLLATE NOCASE, id LIMIT ?2"
+             ORDER BY coalesce(json_extract(card, '$.favorite'), 0) DESC,
+                 sort_name COLLATE NOCASE, id LIMIT ?2"
         ))?;
         let rows = stmt.query_map(params![pattern, limit], from_row)?;
         rows.map(|row| Ok(to_sync(row?)?.contact)).collect()
@@ -330,19 +331,63 @@ impl Store {
         card: &ContactCard,
         now: UnixSeconds,
     ) -> Result<()> {
+        self.apply_server_card(account_id, href, etag, vcard, card, now, false)
+    }
+
+    /// [`Store::apply_server_contact`] for a server that doesn't keep the
+    /// picture and favourite set here (Google, Microsoft): a picture the
+    /// device has is kept when the server's copy comes without one, and so
+    /// is a favourite.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn apply_server_contact_keeping_photo(
+        &self,
+        account_id: &str,
+        href: &str,
+        etag: Option<&str>,
+        vcard: &str,
+        card: &ContactCard,
+        now: UnixSeconds,
+    ) -> Result<()> {
+        self.apply_server_card(account_id, href, etag, vcard, card, now, true)
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "one private helper")]
+    fn apply_server_card(
+        &self,
+        account_id: &str,
+        href: &str,
+        etag: Option<&str>,
+        vcard: &str,
+        card: &ContactCard,
+        now: UnixSeconds,
+        keep_photo: bool,
+    ) -> Result<()> {
         let now = crate::ids::to_i64(now, "time")?;
-        let existing: Option<(String, String)> = self
+        let existing: Option<(String, String, String)> = self
             .conn()
             .query_row(
-                "SELECT id, state FROM contacts WHERE account_id = ?1 AND href = ?2",
+                "SELECT id, state, card FROM contacts WHERE account_id = ?1 AND href = ?2",
                 params![account_id, href],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
+        let mut card = card.clone();
+        if keep_photo
+            && let Some((_, _, old)) = &existing
+            && let Ok(old) = serde_json::from_str::<ContactCard>(old)
+        {
+            if card.photo.is_none() {
+                card.photo = old.photo;
+            }
+            card.favorite = card.favorite || old.favorite;
+        }
+        let card = &card;
         let card_json = serde_json::to_string(card)?;
         match existing {
-            Some((_, state)) if state != "synced" => {}
-            Some((id, _)) => {
+            Some((_, state, _)) if state != "synced" => {}
+            Some((id, _, _)) => {
                 self.conn().execute(
                     "UPDATE contacts SET card = ?2, etag = ?3, vcard = ?4, sort_name = ?5,
                         search = ?6, updated_at = ?7 WHERE id = ?1",
@@ -432,6 +477,65 @@ impl Store {
         self.conn()
             .execute("DELETE FROM contacts WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    /// Drop the synced contact at `href` (deleted on the server). One with
+    /// a change still to send is kept.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn forget_server_contact(&self, account_id: &str, href: &str) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM contacts WHERE account_id = ?1 AND href = ?2 AND state = 'synced'",
+            params![account_id, href],
+        )?;
+        Ok(())
+    }
+
+    /// The ids of the contacts with these `UID`s in one address book (an
+    /// account's, or with `None` this device's), in the order asked.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn contact_ids_by_uid(
+        &self,
+        account_id: Option<&str>,
+        uids: &[String],
+    ) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM contacts WHERE account_id IS ?1 AND state != 'deleted'
+             AND json_extract(card, '$.uid') = ?2",
+        )?;
+        let mut out = Vec::new();
+        for uid in uids {
+            let found: Option<String> = stmt
+                .query_row(params![account_id, uid], |row| row.get(0))
+                .optional()?;
+            if let Some(id) = found
+                && !out.contains(&id)
+            {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Contacts by id, in the order asked; deleted and unknown ones are
+    /// left out.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn contacts_by_id(&self, ids: &[String]) -> Result<Vec<Contact>> {
+        let mut out = Vec::new();
+        for id in ids {
+            match self.get_contact(id) {
+                Ok(contact) => out.push(contact),
+                Err(StoreError::NotFound(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(out)
     }
 
     /// Drop synced contacts whose server copy no longer exists (deleted in
@@ -694,5 +798,54 @@ mod tests {
             .unwrap();
         store.delete_account(&account).unwrap();
         assert_eq!(store.list_contacts("", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn favourites_come_first_and_api_servers_keep_local_pictures() {
+        let store = Store::open_in_memory().unwrap();
+        let account = new_account(&store);
+        store
+            .save_contact(None, None, card("Amina", "amina@studio.example"), 1)
+            .unwrap();
+        let zed = ContactCard {
+            favorite: true,
+            ..card("Zawadi", "zawadi@shop.example")
+        };
+        store.save_contact(None, None, zed, 1).unwrap();
+        let listed = store.list_contacts("", 10).unwrap();
+        assert_eq!(listed[0].card.name, "Zawadi");
+
+        // A Microsoft contact with a picture and favourite set here.
+        let theirs = card("Peter", "peter@client.example");
+        store
+            .apply_server_contact_keeping_photo(&account, "AAMk1", Some("1"), "v", &theirs, 1)
+            .unwrap();
+        let id = store.list_contacts("peter", 1).unwrap()[0].id.clone();
+        let mut mine = store.get_contact(&id).unwrap().card;
+        mine.photo = Some("data:image/png;base64,AAAA".into());
+        mine.favorite = true;
+        store
+            .save_contact(Some(&id), Some(&account), mine, 2)
+            .unwrap();
+        let pending = store.contacts_to_push(&account).unwrap();
+        store
+            .contact_pushed(&id, "AAMk1", Some("2"), &sent(&pending[0]))
+            .unwrap();
+        // The next download has neither: both stay.
+        store
+            .apply_server_contact_keeping_photo(&account, "AAMk1", Some("3"), "v", &theirs, 3)
+            .unwrap();
+        let kept = store.get_contact(&id).unwrap().card;
+        assert!(kept.photo.is_some());
+        assert!(kept.favorite);
+        // Deleted on the server.
+        store.forget_server_contact(&account, "AAMk1").unwrap();
+        assert!(store.get_contact(&id).is_err());
+        // Contacts by UID, for groups.
+        let uid = listed[0].card.uid.clone();
+        assert_eq!(
+            store.contact_ids_by_uid(None, &[uid]).unwrap(),
+            [listed[0].id.clone()]
+        );
     }
 }

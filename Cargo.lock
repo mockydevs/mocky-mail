@@ -1048,6 +1048,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be95d4a884358a21a199689323c29e9256b4a1b315e22f183d155422041d3a9a"
 
 [[package]]
+name = "constant_time_eq"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "144e7f1de087984240b7816d47f698b414979faa6f40839c5b86d6bd47db57b7"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1832,6 +1841,20 @@ name = "embed_plist"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89253175e704ab869b04f9db224d38630e0211a53841a79181deae0889e169f5"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
 
 [[package]]
 name = "endi"
@@ -3458,6 +3481,9 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "mail-parser",
+ "mailcraft-charset",
+ "mailcraft-pst",
+ "mailcraft-tnef",
  "markdown",
  "proptest",
  "rrule",
@@ -3472,6 +3498,7 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec00bda90c6e645a54506c630c2820cd6b1890cfd2b0a169b50f74b2b8c7c86"
 dependencies = [
+ "encoding_rs",
  "hashify",
 ]
 
@@ -3498,6 +3525,8 @@ dependencies = [
  "async-imap",
  "base64 0.23.1",
  "cbc 0.1.2",
+ "chrono",
+ "chrono-tz",
  "cms",
  "const-oid 0.9.6",
  "der",
@@ -3544,6 +3573,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mailcraft-charset"
+version = "0.15.0"
+source = "git+https://github.com/UCSLabs/mailcraft?rev=61e9f46f069a3f0cf016283d7c329c07bd60c7cc#61e9f46f069a3f0cf016283d7c329c07bd60c7cc"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "mailcraft-names"
 version = "0.15.0"
 source = "git+https://github.com/UCSLabs/mailcraft?rev=61e9f46f069a3f0cf016283d7c329c07bd60c7cc#61e9f46f069a3f0cf016283d7c329c07bd60c7cc"
@@ -3558,6 +3595,23 @@ dependencies = [
  "sha2 0.10.9",
  "sha3",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mailcraft-pst"
+version = "0.15.0"
+source = "git+https://github.com/UCSLabs/mailcraft?rev=61e9f46f069a3f0cf016283d7c329c07bd60c7cc#61e9f46f069a3f0cf016283d7c329c07bd60c7cc"
+dependencies = [
+ "mailcraft-charset",
+]
+
+[[package]]
+name = "mailcraft-tnef"
+version = "0.15.0"
+source = "git+https://github.com/UCSLabs/mailcraft?rev=61e9f46f069a3f0cf016283d7c329c07bd60c7cc#61e9f46f069a3f0cf016283d7c329c07bd60c7cc"
+dependencies = [
+ "mailcraft-charset",
+ "mailcraft-pst",
 ]
 
 [[package]]
@@ -3667,11 +3721,12 @@ dependencies = [
 
 [[package]]
 name = "mocky-mail-desktop"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "android-bridge",
  "base64 0.23.1",
  "chrono",
+ "flate2",
  "futures",
  "mail-auth",
  "mail-core",
@@ -3693,6 +3748,7 @@ dependencies = [
  "tauri-winrt-notification",
  "tokio",
  "windows",
+ "zip",
 ]
 
 [[package]]
@@ -3732,6 +3788,12 @@ dependencies = [
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "ndk"
@@ -7095,6 +7157,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8261,6 +8329,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "zip"
+version = "9.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d8dbe089cf6b0448b78f5fc50139ab5aaa40d08ac07cdc1baf2c13add35fcce"
+dependencies = [
+ "constant_time_eq",
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "indexmap 2.14.2",
+ "libc",
+ "memchr",
+ "nix",
+ "typed-path",
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

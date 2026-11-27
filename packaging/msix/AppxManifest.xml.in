@@ -37,6 +37,17 @@
             <uap:DisplayName>Mocky Mail</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
+        <!-- Email, calendar and contact files can open in Mocky Mail; Windows passes the file path as the first argument. -->
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="mockymailfiles">
+            <uap:DisplayName>Mocky Mail</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType ContentType="message/rfc822">.eml</uap:FileType>
+              <uap:FileType ContentType="text/calendar">.ics</uap:FileType>
+              <uap:FileType ContentType="text/vcard">.vcf</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
       </Extensions>
     </Application>
   </Applications>

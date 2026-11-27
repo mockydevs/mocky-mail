@@ -36,7 +36,13 @@ pub async fn save_message(
     message_id: String,
 ) -> AppResult<Option<String>> {
     let raw = sync::body_now(&state, &message_id).await?;
-    let subject = state.store.get_message(&message_id)?.item.subject;
+    let subject = if crate::opened::is_file_id(&message_id) {
+        mail_core::message::parse_summary(&raw)
+            .map(|s| s.subject)
+            .unwrap_or_default()
+    } else {
+        state.store.get_message(&message_id)?.item.subject
+    };
     let info = AttachmentInfo {
         file_name: eml_name(&subject),
         mime_type: "message/rfc822".to_owned(),

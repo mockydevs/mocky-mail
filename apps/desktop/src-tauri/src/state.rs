@@ -35,6 +35,10 @@ pub struct AppState {
     pub cache_dir: PathBuf,
     /// Held while contacts sync, so two syncs never send the same change.
     pub contacts_sync: tokio::sync::Mutex<()>,
+    /// Held while tasks sync.
+    pub tasks_sync: tokio::sync::Mutex<()>,
+    /// The due reminders last told to the interface (their keys).
+    pub due_reminders: Mutex<Vec<String>>,
     /// Held while calendars sync.
     pub calendar_sync: tokio::sync::Mutex<()>,
     /// Drafts waiting for the compose window opened for them, by key.
@@ -61,6 +65,8 @@ impl AppState {
             cache_dir,
             contacts_sync: tokio::sync::Mutex::new(()),
             calendar_sync: tokio::sync::Mutex::new(()),
+            tasks_sync: tokio::sync::Mutex::new(()),
+            due_reminders: Mutex::new(Vec::new()),
             compose_drafts: Mutex::new(Vec::new()),
             security: crate::security::SecurityState::default(),
         }

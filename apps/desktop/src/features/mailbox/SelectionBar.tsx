@@ -17,6 +17,8 @@ export interface SelectionActions {
   onJunk: (junk: boolean) => void;
   /** "Create rule…" from the selected messages' senders. */
   onCreateRule?: () => void;
+  /** "Save as .eml (zip)…": the selected messages as .eml files in a .zip. */
+  onSaveEml?: () => void;
 }
 
 interface Props extends SelectionActions {
@@ -93,6 +95,7 @@ export function SelectionBar(props: Props) {
         />
         <Action icon="move" label="Move to…" onClick={props.onMove} />
         <Action icon="copy" label="Copy to…" onClick={props.onCopy} />
+        {props.onSaveEml && <Action icon="download" label="Save as .eml (zip)…" onClick={props.onSaveEml} />}
         {props.onCreateRule && role !== 'drafts' && role !== 'sent' && (
           <button type="button" className="btn btn--ghost btn--small" onClick={props.onCreateRule}>
             Create rule…

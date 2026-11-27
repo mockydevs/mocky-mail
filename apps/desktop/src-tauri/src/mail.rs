@@ -180,23 +180,7 @@ pub async fn get_message(
         text: body.text,
         blocked_remote_images: blocked,
         images_trusted,
-        attachments: body
-            .attachments
-            .into_iter()
-            .enumerate()
-            // The invitation card stands for the calendar part.
-            .filter(|(_, a)| {
-                invitation.is_none()
-                    || !matches!(a.mime_type.as_str(), "text/calendar" | "application/ics")
-            })
-            .map(|(index, a)| AttachmentMeta {
-                index,
-                preview: crate::attachments::preview_for(&a),
-                file_name: a.file_name,
-                mime_type: a.mime_type,
-                size: a.size,
-            })
-            .collect(),
+        attachments: attachment_metas(body.attachments, invitation.is_some()),
         message_id_header: stored.message_id_header,
         in_reply_to: stored.in_reply_to,
         references: stored.references,
@@ -207,6 +191,97 @@ pub async fn get_message(
     })
 }
 
+/// The attachments listed in the reading pane. With an invitation, its
+/// card stands for the calendar part.
+fn attachment_metas(
+    attachments: Vec<mail_core::message::AttachmentInfo>,
+    has_invitation: bool,
+) -> Vec<AttachmentMeta> {
+    attachments
+        .into_iter()
+        .enumerate()
+        .filter(|(_, a)| {
+            !has_invitation || !matches!(a.mime_type.as_str(), "text/calendar" | "application/ics")
+        })
+        .map(|(index, a)| AttachmentMeta {
+            index,
+            preview: crate::attachments::preview_for(&a),
+            file_name: a.file_name,
+            mime_type: a.mime_type,
+            size: a.size,
+        })
+        .collect()
+}
+
+/// An opened `.eml` file as the reading pane shows it, under its own id
+/// (`file:<hash>`, which the attachment commands take). It is in no folder
+/// and no account; remote pictures stay blocked.
+pub(crate) fn file_detail(state: &AppState, id: &str, raw: &[u8]) -> AppResult<MessageDetail> {
+    let summary = mail_core::message::parse_summary(raw)?;
+    // Signed or encrypted: checked and decrypted, as for received mail.
+    let opened = crate::security::open_file(state, id, raw)?;
+    let body = parse_body(opened.shown.as_deref().unwrap_or(raw))?;
+    let images_trusted = match summary.from.as_ref() {
+        Some(from) => state.store.images_trusted(&from.address)?,
+        None => false,
+    };
+    let remote = if images_trusted {
+        RemoteContent::Allow
+    } else {
+        RemoteContent::Block
+    };
+    let (html, blocked) = match body.html.as_deref() {
+        Some(html) => {
+            let clean = sanitize_html(html, remote);
+            (
+                Some(embed_inline_images(&clean.html, &body.inline_images)),
+                clean.blocked_remote_images,
+            )
+        }
+        None => (None, 0),
+    };
+    let item = MessageListItem {
+        id: id.to_owned(),
+        account_id: String::new(),
+        folder_id: String::new(),
+        from: summary.from,
+        to: summary.to,
+        subject: summary.subject,
+        preview: summary.preview,
+        date: summary.date,
+        unread: false,
+        flagged: false,
+        answered: false,
+        has_attachments: !body.attachments.is_empty(),
+        pinned: false,
+        importance: summary.importance,
+        categories: Vec::new(),
+        flag_due: None,
+        size: u64::try_from(raw.len()).unwrap_or(u64::MAX),
+        thread_count: 1,
+        thread_ids: Vec::new(),
+        signed: summary.signed,
+        encrypted: summary.encrypted,
+    };
+    Ok(MessageDetail {
+        item,
+        cc: summary.cc,
+        bcc: crate::outbox::bcc_in(raw),
+        reply_to: summary.reply_to,
+        html,
+        text: body.text,
+        blocked_remote_images: blocked,
+        images_trusted,
+        attachments: attachment_metas(body.attachments, false),
+        message_id_header: summary.message_id,
+        in_reply_to: summary.in_reply_to,
+        references: summary.references,
+        invitation: None,
+        read_receipt: None,
+        signature: opened.signature,
+        encryption: opened.encryption,
+    })
+}
 pub(crate) fn notify_changed(app: &AppHandle, folders: &[(String, String)]) {
     let mut by_account: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();

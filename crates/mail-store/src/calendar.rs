@@ -1,19 +1,55 @@
-//! Calendars: each account's calendars on its server (`CalDAV`), and a
-//! copy of their events so the calendar shows without a connection.
+//! Calendars: each account's calendars on its server (`CalDAV`, Google's
+//! `CalDAV`, or Microsoft Graph), and a copy of their events so the
+//! calendar shows without a connection.
 //!
-//! Events are kept as the server's iCalendar text; occurrences are worked
-//! out when shown (`mail_core::ical`). `starts_at` and `ends_at` let a
-//! month be read without opening every event; `ends_at` is `NULL` for a
-//! series that repeats forever.
+//! Events are kept as iCalendar text (the server's own, or for Microsoft
+//! made from Graph's JSON); occurrences are worked out when shown
+//! (`mail_core::ical`). `starts_at` and `ends_at` let a month be read
+//! without opening every event; `ends_at` is `NULL` for a series that
+//! repeats forever.
 
 use std::collections::HashMap;
 
+use mail_core::ical::Occurrence;
 use rusqlite::{OptionalExtension, Row, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Store;
 use crate::error::{Result, StoreError};
 use crate::ids::new_id;
+
+/// Which service keeps a calendar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CalendarProvider {
+    /// A `CalDAV` server (the account's mail server).
+    #[default]
+    Caldav,
+    /// Google Calendar (over Google's `CalDAV`).
+    Google,
+    /// Microsoft 365 or Outlook.com (Microsoft Graph).
+    Microsoft,
+}
+
+impl CalendarProvider {
+    /// The stored name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Caldav => "caldav",
+            Self::Google => "google",
+            Self::Microsoft => "microsoft",
+        }
+    }
+
+    fn parse(text: &str) -> Self {
+        match text {
+            "google" => Self::Google,
+            "microsoft" => Self::Microsoft,
+            _ => Self::Caldav,
+        }
+    }
+}
 
 /// A calendar on an account's server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -30,10 +66,19 @@ pub struct Calendar {
     pub name: String,
     /// Its colour from the server (`#RRGGBB` or `#RRGGBBAA`), if any.
     pub color: Option<String>,
+    /// Shown in the calendar views (this device's choice).
+    pub visible: bool,
+    /// Events can be added and changed.
+    pub writable: bool,
+    /// Which service keeps it.
+    pub provider: CalendarProvider,
+    /// The provider's own id for it (Google, Microsoft).
+    #[serde(skip)]
+    pub remote_id: Option<String>,
 }
 
-/// A calendar found on the server: address, name, colour.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A calendar found on the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FoundCalendar {
     /// Its address.
     pub url: String,
@@ -41,6 +86,12 @@ pub struct FoundCalendar {
     pub name: String,
     /// Its colour.
     pub color: Option<String>,
+    /// Events can be added and changed.
+    pub writable: bool,
+    /// Which service keeps it.
+    pub provider: CalendarProvider,
+    /// The provider's own id.
+    pub remote_id: Option<String>,
 }
 
 /// One calendar item (an event or series) as stored.
@@ -58,6 +109,39 @@ pub struct StoredEvent {
     pub ics: String,
 }
 
+/// One event's reminders kept here: (`recurrence_id` of one date or `None`
+/// for the whole event, minutes before).
+type KeptReminders = Vec<(Option<i64>, Vec<u32>)>;
+
+/// Reminders chosen on this device for events that can't be changed on
+/// the server (a read-only calendar, or a meeting someone else organises).
+/// They take the place of the event's own alarms here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReminderOverrides {
+    /// By event id.
+    by_event: HashMap<String, KeptReminders>,
+}
+
+impl ReminderOverrides {
+    /// The reminders kept here for an event's occurrence: that date's own,
+    /// else the whole event's. `None` when the event's alarms stand.
+    #[must_use]
+    pub fn get(&self, event_id: &str, recurrence_id: Option<i64>) -> Option<&[u32]> {
+        let all = self.by_event.get(event_id)?;
+        recurrence_id
+            .and_then(|rid| all.iter().find(|(o, _)| *o == Some(rid)))
+            .or_else(|| all.iter().find(|(o, _)| o.is_none()))
+            .map(|(_, minutes)| minutes.as_slice())
+    }
+
+    /// Put the reminders kept here (if any) on an occurrence of the event.
+    pub fn apply(&self, event_id: &str, occurrence: &mut Occurrence) {
+        if let Some(minutes) = self.get(event_id, occurrence.recurrence_id) {
+            minutes.clone_into(&mut occurrence.reminders);
+        }
+    }
+}
+
 fn calendar_row(row: &Row<'_>) -> rusqlite::Result<Calendar> {
     Ok(Calendar {
         id: row.get(0)?,
@@ -65,6 +149,10 @@ fn calendar_row(row: &Row<'_>) -> rusqlite::Result<Calendar> {
         url: row.get(2)?,
         name: row.get(3)?,
         color: row.get(4)?,
+        visible: row.get(5)?,
+        writable: row.get(6)?,
+        provider: CalendarProvider::parse(&row.get::<_, String>(7)?),
+        remote_id: row.get(8)?,
     })
 }
 
@@ -78,7 +166,8 @@ fn event_row(row: &Row<'_>) -> rusqlite::Result<StoredEvent> {
     })
 }
 
-const CALENDAR_COLUMNS: &str = "id, account_id, url, name, color";
+const CALENDAR_COLUMNS: &str =
+    "id, account_id, url, name, color, visible, writable, provider, remote_id";
 const EVENT_COLUMNS: &str = "id, calendar_id, href, etag, ics";
 
 /// A new event's `UID`: random, and unique everywhere.
@@ -104,9 +193,21 @@ impl Store {
         let tx = conn.transaction()?;
         for calendar in found {
             tx.execute(
-                "INSERT INTO calendars (id, account_id, url, name, color) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (account_id, url) DO UPDATE SET name = excluded.name, color = excluded.color",
-                params![new_id()?, account_id, calendar.url, calendar.name, calendar.color],
+                "INSERT INTO calendars (id, account_id, url, name, color, writable, provider, remote_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (account_id, url) DO UPDATE SET name = excluded.name,
+                     color = excluded.color, writable = excluded.writable,
+                     provider = excluded.provider, remote_id = excluded.remote_id",
+                params![
+                    new_id()?,
+                    account_id,
+                    calendar.url,
+                    calendar.name,
+                    calendar.color,
+                    calendar.writable,
+                    calendar.provider.as_str(),
+                    calendar.remote_id
+                ],
             )?;
         }
         let keep: Vec<&str> = found.iter().map(|c| c.url.as_str()).collect();
@@ -155,6 +256,38 @@ impl Store {
             )
             .optional()?
             .ok_or(StoreError::NotFound("calendar"))
+    }
+
+    /// Show or hide a calendar in the calendar views (this device only).
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when there is no such calendar.
+    pub fn set_calendar_visible(&self, id: &str, visible: bool) -> Result<()> {
+        let changed = self.conn().execute(
+            "UPDATE calendars SET visible = ?2 WHERE id = ?1",
+            params![id, visible],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound("calendar"));
+        }
+        Ok(())
+    }
+
+    /// The event stored at `href` in a calendar, if any.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn calendar_event_at(&self, calendar_id: &str, href: &str) -> Result<Option<StoredEvent>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events WHERE calendar_id = ?1 AND href = ?2"
+                ),
+                params![calendar_id, href],
+                event_row,
+            )
+            .optional()?)
     }
 
     /// The events known in a calendar: path to version tag.
@@ -273,6 +406,103 @@ impl Store {
         let rows = stmt.query_map(params![from, to], event_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Keep reminders on this device for an event (never sent to the
+    /// server): for one date of a series (`occurrence`, its
+    /// `recurrence_id`), or with `None` for the whole event, which replaces
+    /// any dates' own. Minutes are kept soonest last, each once.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when there is no such event.
+    pub fn set_reminder_override(
+        &self,
+        event_id: &str,
+        occurrence: Option<i64>,
+        minutes: &[u32],
+    ) -> Result<()> {
+        let mut sorted = minutes.to_vec();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted.dedup();
+        let json = serde_json::to_string(&sorted)?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let known = tx
+            .query_row(
+                "SELECT 1 FROM calendar_events WHERE id = ?1",
+                params![event_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if known.is_none() {
+            return Err(StoreError::NotFound("event"));
+        }
+        match occurrence {
+            None => tx.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1",
+                params![event_id],
+            )?,
+            Some(rid) => tx.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1 AND occurrence = ?2",
+                params![event_id, rid],
+            )?,
+        };
+        tx.execute(
+            "INSERT INTO event_reminder_overrides (event_id, occurrence, minutes) VALUES (?1, ?2, ?3)",
+            params![event_id, occurrence, json],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stop keeping reminders here for one date of an event, or with
+    /// `None` for all of it (its own alarms show again).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn clear_reminder_override(&self, event_id: &str, occurrence: Option<i64>) -> Result<()> {
+        let conn = self.conn();
+        match occurrence {
+            None => conn.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1",
+                params![event_id],
+            )?,
+            Some(rid) => conn.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1 AND occurrence = ?2",
+                params![event_id, rid],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Every event's reminders kept on this device.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn reminder_overrides(&self) -> Result<ReminderOverrides> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT event_id, occurrence, minutes FROM event_reminder_overrides")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = ReminderOverrides::default();
+        for row in rows {
+            let (event_id, occurrence, minutes) = row?;
+            // A list that can't be read leaves the event's own alarms.
+            let Ok(minutes) = serde_json::from_str::<Vec<u32>>(&minutes) else {
+                continue;
+            };
+            out.by_event
+                .entry(event_id)
+                .or_default()
+                .push((occurrence, minutes));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -286,7 +516,53 @@ mod tests {
             url: url.into(),
             name: name.into(),
             color: Some("#3A87ADFF".into()),
+            writable: true,
+            ..FoundCalendar::default()
         }
+    }
+
+    #[test]
+    fn visibility_is_kept_across_syncs() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_support::add_account(&store, "me@work.example");
+        let cal = store
+            .set_calendars(&account, &[found("https://x/c/", "Personal")])
+            .unwrap()[0]
+            .clone();
+        assert!(cal.visible && cal.writable);
+        assert_eq!(cal.provider, CalendarProvider::Caldav);
+        store.set_calendar_visible(&cal.id, false).unwrap();
+        let read_only = FoundCalendar {
+            writable: false,
+            provider: CalendarProvider::Google,
+            remote_id: Some("me@gmail.example".into()),
+            ..found("https://x/c/", "Personal")
+        };
+        let again = store.set_calendars(&account, &[read_only]).unwrap();
+        assert!(!again[0].visible);
+        assert!(!again[0].writable);
+        assert_eq!(again[0].provider, CalendarProvider::Google);
+        assert_eq!(again[0].remote_id.as_deref(), Some("me@gmail.example"));
+        assert!(store.set_calendar_visible("nope", true).is_err());
+        let json = serde_json::to_value(&again[0]).unwrap();
+        assert_eq!(json["provider"], "google");
+        assert_eq!(json["visible"], false);
+        assert!(json.get("url").is_none());
+        store
+            .put_calendar_event(&cal.id, "/c/a.ics", None, ONE)
+            .unwrap();
+        assert!(
+            store
+                .calendar_event_at(&cal.id, "/c/a.ics")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .calendar_event_at(&cal.id, "/c/b.ics")
+                .unwrap()
+                .is_none()
+        );
     }
 
     const ONE: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261118T060000Z\r\nDTEND:20261118T070000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -324,6 +600,132 @@ mod tests {
         assert_eq!(next[0].name, "Mine");
         assert_eq!(store.calendar_etags(&personal).unwrap().len(), 1);
         assert!(store.get_calendar(&personal).is_ok());
+    }
+
+    #[test]
+    fn reminders_kept_here_round_trip_and_go_with_the_event() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_support::add_account(&store, "me@work.example");
+        let cal = store
+            .set_calendars(&account, &[found("https://x/c/", "Personal")])
+            .unwrap()[0]
+            .id
+            .clone();
+        let one = store
+            .put_calendar_event(&cal, "/c/a.ics", Some("\"1\""), ONE)
+            .unwrap();
+        let daily = store
+            .put_calendar_event(&cal, "/c/b.ics", None, DAILY)
+            .unwrap();
+        assert_eq!(
+            store.reminder_overrides().unwrap(),
+            ReminderOverrides::default()
+        );
+        assert!(matches!(
+            store.set_reminder_override("nope", None, &[15]),
+            Err(StoreError::NotFound(_))
+        ));
+
+        store
+            .set_reminder_override(&one, None, &[5, 30, 5])
+            .unwrap();
+        let second = 1_767_333_600; // 2026-01-02 06:00 UTC, the series' second date
+        store.set_reminder_override(&daily, None, &[10]).unwrap();
+        store
+            .set_reminder_override(&daily, Some(second), &[])
+            .unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&one, None), Some(&[30, 5][..]));
+        assert_eq!(kept.get(&daily, None), Some(&[10][..]));
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[][..]));
+        // Other dates take the whole series' reminders.
+        assert_eq!(kept.get(&daily, Some(second + 86_400)), Some(&[10][..]));
+        assert_eq!(kept.get("other", None), None);
+
+        // Replacing one date's reminders leaves the rest.
+        store
+            .set_reminder_override(&daily, Some(second), &[60])
+            .unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[60][..]));
+        assert_eq!(kept.get(&daily, None), Some(&[10][..]));
+        // The whole series' reminders replace the dates' own.
+        store.set_reminder_override(&daily, None, &[0]).unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[0][..]));
+        store
+            .set_reminder_override(&daily, Some(second), &[60])
+            .unwrap();
+        store.clear_reminder_override(&daily, Some(second)).unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[0][..]));
+        store.clear_reminder_override(&daily, None).unwrap();
+        assert_eq!(store.reminder_overrides().unwrap().get(&daily, None), None);
+        store.set_reminder_override(&daily, None, &[10]).unwrap();
+
+        // A newer server copy keeps them; the event going removes them.
+        store
+            .put_calendar_event(&cal, "/c/a.ics", Some("\"2\""), ONE)
+            .unwrap();
+        assert!(
+            store
+                .reminder_overrides()
+                .unwrap()
+                .get(&one, None)
+                .is_some()
+        );
+        store.delete_calendar_event(&one).unwrap();
+        assert_eq!(store.reminder_overrides().unwrap().get(&one, None), None);
+        assert!(
+            store
+                .reminder_overrides()
+                .unwrap()
+                .get(&daily, None)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn occurrences_show_the_reminders_kept_here() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_support::add_account(&store, "me@work.example");
+        let cal = store
+            .set_calendars(&account, &[found("https://x/c/", "Personal")])
+            .unwrap()[0]
+            .id
+            .clone();
+        let daily = store
+            .put_calendar_event(&cal, "/c/b.ics", None, DAILY)
+            .unwrap();
+        let first = 1_767_247_200; // 2026-01-01 06:00 UTC
+        let shown = |overrides: &ReminderOverrides| -> Vec<Vec<u32>> {
+            mail_core::ical::occurrences(DAILY, first, first + 3 * 86_400)
+                .into_iter()
+                .map(|mut o| {
+                    overrides.apply(&daily, &mut o);
+                    o.reminders
+                })
+                .collect()
+        };
+        // The event's own (none) until reminders are kept here.
+        assert_eq!(
+            shown(&store.reminder_overrides().unwrap()),
+            vec![Vec::<u32>::new(); 3]
+        );
+        store.set_reminder_override(&daily, None, &[15]).unwrap();
+        store
+            .set_reminder_override(&daily, Some(first + 86_400), &[60, 5])
+            .unwrap();
+        assert_eq!(
+            shown(&store.reminder_overrides().unwrap()),
+            [vec![15], vec![60, 5], vec![15]]
+        );
+        let mut master = mail_core::ical::master(DAILY).unwrap();
+        store
+            .reminder_overrides()
+            .unwrap()
+            .apply(&daily, &mut master);
+        assert_eq!(master.reminders, [15]);
     }
 
     #[test]

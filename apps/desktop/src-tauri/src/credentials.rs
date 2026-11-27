@@ -94,7 +94,8 @@ pub async fn for_account(state: &AppState, account: &Account) -> AppResult<Crede
 /// a fresh token, with no screen shown.
 #[cfg(target_os = "android")]
 async fn android_google(state: &AppState, account: &Account) -> AppResult<Credentials> {
-    let access_token = crate::google_android::token(&account.email).await?;
+    let extra = kept_scopes(state, account);
+    let access_token = crate::google_android::token(&account.email, &extra).await?;
     cache_token(
         state,
         &account.id,
@@ -115,4 +116,17 @@ async fn android_google(_state: &AppState, _account: &Account) -> AppResult<Cred
         "auth",
         "Sign in again to reconnect this account.",
     ))
+}
+
+/// The permissions beyond mail an account was granted when it connected
+/// calendar and contacts, which signing in again (or renewing a token on
+/// Android) must ask for too, so they are never dropped.
+pub fn kept_scopes(state: &AppState, account: &Account) -> Vec<String> {
+    let Some(provider) = provider(account.auth) else {
+        return Vec::new();
+    };
+    match state.store.account_connection(&account.id) {
+        Ok(Some(granted)) => mail_auth::kept_scopes(provider, &granted),
+        _ => Vec::new(),
+    }
 }

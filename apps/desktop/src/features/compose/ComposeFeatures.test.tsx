@@ -27,6 +27,9 @@ const contact = (id: string, name: string, email: string): Contact => ({
   organization: '',
   title: '',
   notes: '',
+  favorite: false,
+  categories: [],
+  photo: null,
   state: 'synced',
 });
 const AMINA_W = contact('c-amina-w', 'Amina Wairimu', 'amina.w@site.example');

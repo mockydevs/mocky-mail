@@ -80,7 +80,6 @@ fn system_roots() -> Vec<Vec<u8>> {
 
 #[cfg(target_os = "android")]
 fn system_roots() -> Vec<Vec<u8>> {
-    use der::Encode as _;
     let mut out = Vec::new();
     for dir in [
         "/apex/com.android.conscrypt/cacerts",
@@ -94,8 +93,9 @@ fn system_roots() -> Vec<Vec<u8>> {
             let Ok(bytes) = std::fs::read(entry.path()) else {
                 continue;
             };
-            if let Ok(certs) = Certificate::load_pem_chain(&bytes) {
-                out.extend(certs.iter().filter_map(|c| c.to_der().ok()));
+            let pem = pem_certificates(&bytes);
+            if !pem.is_empty() {
+                out.extend(pem);
             } else if Certificate::from_der(&bytes).is_ok() {
                 out.push(bytes);
             }
@@ -104,6 +104,73 @@ fn system_roots() -> Vec<Vec<u8>> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The certificates (DER) in a file of PEM blocks, ignoring any text around
+/// them: Android's certificate files follow the PEM block with `openssl x509
+/// -text` output, which a strict PEM chain reader refuses.
+#[cfg(any(test, target_os = "android"))]
+fn pem_certificates(bytes: &[u8]) -> Vec<Vec<u8>> {
+    use der::{DecodePem as _, Encode as _};
+    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    const END: &[u8] = b"-----END CERTIFICATE-----";
+    let find = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    };
+    let mut out = Vec::new();
+    let mut rest = bytes;
+    while let Some(start) = find(rest, BEGIN) {
+        let Some(block) = rest.get(start..) else {
+            break;
+        };
+        let Some(end) = find(block, END).and_then(|end| end.checked_add(END.len())) else {
+            break;
+        };
+        let (Some(pem), Some(after)) = (block.get(..end), block.get(end..)) else {
+            break;
+        };
+        if let Ok(cert) = Certificate::from_pem(pem)
+            && let Ok(der) = cert.to_der()
+        {
+            out.push(der);
+        }
+        rest = after;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use der::{Decode as _, EncodePem as _, pem::LineEnding};
+    use x509_cert::Certificate;
+
+    use super::pem_certificates;
+
+    const CA: &[u8] = include_bytes!("../fixtures/ca.cer");
+
+    #[test]
+    fn pem_files_with_text_after_the_certificate_are_read() {
+        let pem = Certificate::from_der(CA)
+            .unwrap()
+            .to_pem(LineEnding::LF)
+            .unwrap();
+        // As Android keeps them: the PEM block, then the text dump.
+        let android = format!(
+            "{pem}Certificate:\n    Data:\n        Version: 3 (0x2)\nSHA1 Fingerprint=00:11\n"
+        );
+        assert_eq!(pem_certificates(android.as_bytes()), vec![CA.to_vec()]);
+        // Two blocks with text between, and a broken one, which is left out.
+        let two = format!(
+            "intro\n{pem}between\n{pem}-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+        );
+        assert_eq!(
+            pem_certificates(two.as_bytes()),
+            vec![CA.to_vec(), CA.to_vec()]
+        );
+        assert!(pem_certificates(CA).is_empty());
+    }
 }
 
 #[cfg(not(any(windows, target_os = "android")))]

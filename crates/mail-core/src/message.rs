@@ -316,6 +316,75 @@ fn attachment_parts<'a>(message: &'a Message<'a>) -> impl Iterator<Item = &'a Me
         .filter(move |part| matches!(part.body, PartType::Message(_)) || !shown_inline(part, &html))
 }
 
+/// An attachment as listed: a part of the message, or a file packed inside
+/// a `winmail.dat` (TNEF) part, which Outlook sends in place of the files.
+enum Listed<'a> {
+    Part(&'a MessagePart<'a>),
+    Packed(mailcraft_tnef::File),
+}
+
+/// Whether a part is a TNEF stream (`winmail.dat`, `application/ms-tnef`).
+fn is_tnef(part: &MessagePart<'_>) -> bool {
+    let mime = mime_type(part);
+    let named = part
+        .attachment_name()
+        .is_some_and(|n| n.trim().eq_ignore_ascii_case("winmail.dat"));
+    (named || mime == "application/ms-tnef" || mime == "application/vnd.ms-tnef")
+        && mailcraft_tnef::is_tnef(part.contents())
+}
+
+/// What a TNEF part holds, when it can be read.
+fn tnef_of(part: &MessagePart<'_>) -> Option<mailcraft_tnef::Tnef> {
+    if !is_tnef(part) {
+        return None;
+    }
+    mailcraft_tnef::read(part.contents(), &mailcraft_tnef::Limits::default()).ok()
+}
+
+/// The attachments to list, in order. A `winmail.dat` is opened: its files
+/// are listed instead of it, and it stays listed too when something in it
+/// couldn't be turned into a file (an attached message, an OLE object), so
+/// nothing is lost.
+fn listed<'a>(message: &'a Message<'a>) -> Vec<Listed<'a>> {
+    let mut out = Vec::new();
+    for part in attachment_parts(message) {
+        if let Some(tnef) = tnef_of(part).filter(|t| !t.files.is_empty()) {
+            let complete = tnef.is_complete();
+            out.extend(tnef.files.into_iter().map(Listed::Packed));
+            if !complete {
+                out.push(Listed::Part(part));
+            }
+            continue;
+        }
+        out.push(Listed::Part(part));
+    }
+    out
+}
+
+fn listed_info(entry: &Listed<'_>) -> AttachmentInfo {
+    match entry {
+        Listed::Part(part) => attachment_info(part),
+        Listed::Packed(file) => AttachmentInfo {
+            file_name: safe_file_name(file.name.as_deref().unwrap_or_default()),
+            mime_type: file
+                .mime_type
+                .as_deref()
+                .map(|m| m.trim().to_ascii_lowercase())
+                .filter(|m| m.contains('/') && m.len() < 128 && !m.contains(char::is_whitespace))
+                .unwrap_or_else(|| "application/octet-stream".to_owned()),
+            size: u64::try_from(file.data.len()).unwrap_or(u64::MAX),
+        },
+    }
+}
+
+/// The text of a `winmail.dat`'s message, for mail that has no other body.
+fn tnef_body(message: &Message<'_>) -> Option<String> {
+    attachment_parts(message)
+        .filter_map(tnef_of)
+        .find_map(|t| t.body)
+        .filter(|b| !b.trim().is_empty())
+}
+
 fn attachment_info(part: &MessagePart<'_>) -> AttachmentInfo {
     let fallback = if matches!(part.body, PartType::Message(_)) {
         "message.eml"
@@ -373,10 +442,17 @@ pub fn parse_body(raw: &[u8]) -> Result<MessageBody, ParseError> {
         .then(|| message.body_text(0))
         .flatten()
         .map(std::borrow::Cow::into_owned);
+    // Outlook may put the only text in the winmail.dat.
+    let blank = text.as_deref().is_none_or(|t| t.trim().is_empty());
+    let text = if blank && html.is_none() {
+        tnef_body(&message).or(text)
+    } else {
+        text
+    };
     Ok(MessageBody {
         text,
         html,
-        attachments: attachment_parts(&message).map(attachment_info).collect(),
+        attachments: listed(&message).iter().map(listed_info).collect(),
         inline_images: message.parts.iter().filter_map(inline_image).collect(),
         calendar: calendar_part(&message),
     })
@@ -392,9 +468,14 @@ pub fn attachment_bytes(
     index: usize,
 ) -> Result<Option<(AttachmentInfo, Vec<u8>)>, ParseError> {
     let message = parse(raw)?;
-    Ok(attachment_parts(&message)
-        .nth(index)
-        .map(|part| (attachment_info(part), part.contents().to_vec())))
+    Ok(listed(&message).into_iter().nth(index).map(|entry| {
+        let info = listed_info(&entry);
+        let bytes = match entry {
+            Listed::Part(part) => part.contents().to_vec(),
+            Listed::Packed(file) => file.data,
+        };
+        (info, bytes)
+    }))
 }
 
 fn has_real_html(message: &Message<'_>) -> bool {
@@ -426,7 +507,7 @@ pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
             .map(|text| make_preview(&text, PREVIEW_CHARS))
             .unwrap_or_default(),
         has_html: has_real_html(&message),
-        attachments: attachment_parts(&message).map(attachment_info).collect(),
+        attachments: listed(&message).iter().map(listed_info).collect(),
         in_reply_to: id_list(message.in_reply_to()).into_iter().next(),
         references: id_list(message.references()),
         bulk: crate::focus::bulk_headers(
@@ -658,6 +739,122 @@ SGVsbG8=\r\n\
         #[test]
         fn preview_respects_the_limit(text in ".{0,1000}", max in 0usize..200) {
             prop_assert!(make_preview(&text, max).chars().count() <= max);
+        }
+    }
+
+    fn with_winmail(dat: &[u8], body: &str) -> Vec<u8> {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(dat);
+        format!(
+            "From: a@outlook.example\r\nSubject: Report\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\n{body}\r\n--B\r\nContent-Type: application/ms-tnef; name=\"winmail.dat\"\r\nContent-Disposition: attachment; filename=\"winmail.dat\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--B--\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn files_inside_winmail_dat_are_listed_as_attachments() {
+        use mailcraft_tnef::test_writer::Writer;
+        let pdf = b"%PDF-1.4 a small report".to_vec();
+        let dat = Writer::new()
+            .file("Q3 report.pdf", "application/pdf", &pdf)
+            .file("figures.csv", "", b"a,b\n1,2\n")
+            .finish();
+        let raw = with_winmail(&dat, "See attached.");
+        let body = parse_body(&raw).unwrap();
+        let names: Vec<&str> = body
+            .attachments
+            .iter()
+            .map(|a| a.file_name.as_str())
+            .collect();
+        assert_eq!(names, ["Q3 report.pdf", "figures.csv"]);
+        assert_eq!(body.attachments[0].mime_type, "application/pdf");
+        assert_eq!(body.attachments[1].mime_type, "application/octet-stream");
+        assert_eq!(body.attachments[0].size, pdf.len() as u64);
+        let (info, bytes) = attachment_bytes(&raw, 0).unwrap().unwrap();
+        assert_eq!(info.file_name, "Q3 report.pdf");
+        assert_eq!(bytes, pdf);
+        assert_eq!(attachment_bytes(&raw, 1).unwrap().unwrap().1, b"a,b\n1,2\n");
+        assert!(attachment_bytes(&raw, 2).unwrap().is_none());
+        assert_eq!(parse_summary(&raw).unwrap().attachments.len(), 2);
+    }
+
+    #[test]
+    fn a_winmail_dat_that_is_not_all_files_stays_listed() {
+        use mailcraft_tnef::test_writer::{Prop, Writer};
+        let dat = Writer::new()
+            .file("photo.png", "image/png", b"\x89PNG\r\n\x1a\nxx")
+            .attachment(2, &[Prop::Int32(0x3705, 6)])
+            .finish();
+        let body = parse_body(&with_winmail(&dat, "x")).unwrap();
+        let names: Vec<&str> = body
+            .attachments
+            .iter()
+            .map(|a| a.file_name.as_str())
+            .collect();
+        assert_eq!(names, ["photo.png", "winmail.dat"]);
+        // Not TNEF at all: listed as it is.
+        let body = parse_body(&with_winmail(b"not tnef", "x")).unwrap();
+        assert_eq!(body.attachments[0].file_name, "winmail.dat");
+    }
+
+    #[test]
+    fn the_text_of_a_winmail_dat_is_the_body_when_there_is_no_other() {
+        use mailcraft_tnef::test_writer::{Prop, Writer};
+        let dat = Writer::new()
+            .message_props(&[Prop::Unicode(0x1000, "Text only in TNEF".into())])
+            .finish();
+        let body = parse_body(&with_winmail(&dat, "")).unwrap();
+        assert_eq!(body.text.as_deref(), Some("Text only in TNEF"));
+        let body = parse_body(&with_winmail(&dat, "Own text")).unwrap();
+        assert_eq!(body.text.as_deref().map(str::trim), Some("Own text"));
+    }
+
+    #[test]
+    fn legacy_charsets_are_decoded() {
+        let cases: &[(&str, &[u8], &str)] = &[
+            (
+                "windows-1251",
+                b"\xcf\xf0\xe8\xe2\xe5\xf2",
+                "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}",
+            ),
+            (
+                "koi8-r",
+                b"\xf0\xd2\xc9\xd7\xc5\xd4",
+                "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}",
+            ),
+            ("iso-8859-2", b"\xbe\xb9\xe8", "\u{17e}\u{161}\u{10d}"),
+            ("windows-1250", b"\x9e\x9a\xe8", "\u{17e}\u{161}\u{10d}"),
+            ("shift_jis", b"\x93\xfa\x96\x7b", "\u{65e5}\u{672c}"),
+            ("iso-2022-jp", b"\x1b$BF|K\\\x1b(B", "\u{65e5}\u{672c}"),
+            ("gb2312", b"\xd6\xd0\xce\xc4", "\u{4e2d}\u{6587}"),
+            ("gbk", b"\xd6\xd0\xce\xc4", "\u{4e2d}\u{6587}"),
+            ("big5", b"\xa4\xa4\xa4\xe5", "\u{4e2d}\u{6587}"),
+            ("euc-kr", b"\xc7\xd1\xb1\xb9", "\u{d55c}\u{ad6d}"),
+            ("euc-jp", b"\xc6\xfc\xcb\xdc", "\u{65e5}\u{672c}"),
+            (
+                "windows-1256",
+                b"\xe3\xd1\xcd\xc8\xc7",
+                "\u{645}\u{631}\u{62d}\u{628}\u{627}",
+            ),
+        ];
+        for (charset, bytes, text) in cases {
+            let mut raw = format!(
+                "From: a@b.example\r\nSubject: =?{charset}?B?{}?=\r\nContent-Type: text/plain; charset={charset}\r\n\r\n",
+                {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                }
+            )
+            .into_bytes();
+            raw.extend_from_slice(bytes);
+            let summary = parse_summary(&raw).unwrap();
+            assert_eq!(summary.subject, *text, "subject in {charset}");
+            let body = parse_body(&raw).unwrap();
+            assert_eq!(
+                body.text.as_deref().map(str::trim),
+                Some(*text),
+                "body in {charset}"
+            );
         }
     }
 

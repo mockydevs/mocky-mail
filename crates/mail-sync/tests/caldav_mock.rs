@@ -27,6 +27,7 @@ use tokio::net::TcpListener;
 type Items = Arc<Mutex<HashMap<String, (u32, String)>>>;
 
 const BOOK: &str = "/SOGo/dav/me/Calendar/personal/";
+const TASKS: &str = "/SOGo/dav/me/Calendar/tasks/";
 
 fn reply(status: &str, headers: &[(&str, String)], body: &str) -> String {
     let mut out = format!(
@@ -99,7 +100,17 @@ fn handle(
             }
             reply("207 Multi-Status", &[], &multistatus(&items))
         }
-        ("REPORT", BOOK) => {
+        // The to-dos in a collection (calendar-query with a VTODO filter).
+        ("REPORT", path) if body.contains("calendar-query") && body.contains("VTODO") => {
+            let mut items = String::new();
+            for (href, (etag, text)) in cards.iter() {
+                if href.starts_with(path) && text.contains("BEGIN:VTODO") {
+                    items.push_str(&format!("<D:response><D:href>{href}</D:href><D:propstat><D:prop><D:getetag>\"{etag}\"</D:getetag></D:prop></D:propstat></D:response>"));
+                }
+            }
+            reply("207 Multi-Status", &[], &multistatus(&items))
+        }
+        ("REPORT", path) if path == BOOK || path == TASKS => {
             let mut items = String::new();
             for (href, (etag, text)) in cards.iter() {
                 if body.contains(href.as_str()) {
@@ -270,6 +281,7 @@ async fn finds_the_calendar_and_reads_and_writes_events() {
         repeat: mail_core::ical::Repeat::None,
         time_zone: "Africa/Nairobi".into(),
         reminders: Some(vec![15]),
+        ..Default::default()
     };
     let text = mail_core::ical::new_event("new-1@mocky.mail", &input, 1_794_000_000);
     let (new_href, _) = dav
@@ -286,6 +298,90 @@ async fn finds_the_calendar_and_reads_and_writes_events() {
     dav.delete_event(&cal, &new_href, None).await.unwrap();
     dav.delete_event(&cal, &new_href, None).await.unwrap();
     assert_eq!(dav.list_resources(&cal).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn finds_task_lists_and_syncs_to_dos() {
+    let items: Items = Arc::default();
+    // The personal calendar holds an event and a to-do (SOGo keeps both).
+    items.lock().unwrap().insert(
+        format!("{BOOK}standup.ics"),
+        (1, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:standup\r\nDTSTART:20261102T060000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".into()),
+    );
+    items.lock().unwrap().insert(
+        format!("{BOOK}quote.ics"),
+        (1, "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:quote\r\nSUMMARY:Send the quote\r\nDUE;VALUE=DATE:20261120\r\nX-SOGO-COLOR:red\r\nEND:VTODO\r\nEND:VCALENDAR\r\n".into()),
+    );
+    let server = serve(Arc::clone(&items)).await;
+    let dav = client("secret");
+
+    // Both calendars that say they hold to-dos; not the inbox.
+    let lists = dav.discover_task_lists(&server).await.unwrap();
+    assert_eq!(lists.len(), 2);
+    assert!(lists.iter().all(|l| l.writable));
+    let personal = lists
+        .iter()
+        .find(|l| l.url.path() == BOOK)
+        .unwrap()
+        .url
+        .clone();
+    let tasks = lists
+        .iter()
+        .find(|l| l.url.path() == TASKS)
+        .unwrap()
+        .url
+        .clone();
+
+    // Only the to-do is listed, not the event beside it.
+    let listed = dav.list_todos(&personal).await.unwrap();
+    assert_eq!(
+        listed,
+        [(format!("{BOOK}quote.ics"), Some("\"1\"".to_owned()))]
+    );
+    let fetched = dav
+        .fetch_events(&personal, &[listed[0].0.clone()])
+        .await
+        .unwrap();
+    let (uid, fields) = mail_core::ical::parse_todo(&fetched[0].vcard).unwrap();
+    assert_eq!(uid, "quote");
+    assert_eq!(fields.title, "Send the quote");
+
+    // Completed here: what the app doesn't show stays.
+    let done = mail_core::tasks::TaskFields {
+        completed: true,
+        completed_at: Some(1_795_000_000),
+        ..fields
+    };
+    let text = mail_core::ical::write_todo(&uid, &done, Some(&fetched[0].vcard), 1_795_000_000);
+    let (href, etag) = dav
+        .put_event(
+            &personal,
+            Some(&fetched[0].href),
+            &uid,
+            &text,
+            Some("\"1\""),
+        )
+        .await
+        .unwrap();
+    assert_eq!(etag.as_deref(), Some("\"2\""));
+    let stored = items.lock().unwrap()[&href].1.clone();
+    assert!(stored.contains("X-SOGO-COLOR:red"));
+    assert!(mail_core::ical::parse_todo(&stored).unwrap().1.completed);
+
+    // A new one in the task list, then deleted.
+    let fresh = mail_core::tasks::TaskFields {
+        title: "Call Peter".into(),
+        ..Default::default()
+    };
+    let text = mail_core::ical::write_todo("call-1", &fresh, None, 1_795_000_000);
+    let (new_href, _) = dav
+        .put_event(&tasks, None, "call-1", &text, None)
+        .await
+        .unwrap();
+    assert_eq!(new_href, format!("{TASKS}call-1.ics"));
+    assert_eq!(dav.list_todos(&tasks).await.unwrap().len(), 1);
+    dav.delete_event(&tasks, &new_href, None).await.unwrap();
+    assert!(dav.list_todos(&tasks).await.unwrap().is_empty());
 }
 
 #[tokio::test]

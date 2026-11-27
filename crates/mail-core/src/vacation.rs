@@ -34,6 +34,25 @@ pub struct Vacation {
     pub end: Option<String>,
     /// Days before the same sender gets the reply again.
     pub days: u32,
+    /// Microsoft accounts: the reply for people outside the organisation
+    /// (`None`: the same as `message`). Other servers ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_message: Option<String>,
+    /// Microsoft accounts: who outside the organisation gets a reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_audience: Option<ExternalAudience>,
+}
+
+/// Who outside the organisation gets an automatic reply (Microsoft).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExternalAudience {
+    /// Nobody outside.
+    None,
+    /// Only people in your contacts.
+    Contacts,
+    /// Everyone.
+    All,
 }
 
 impl Default for Vacation {
@@ -45,6 +64,8 @@ impl Default for Vacation {
             start: None,
             end: None,
             days: 1,
+            external_message: None,
+            external_audience: None,
         }
     }
 }
@@ -77,6 +98,10 @@ pub fn checked(mut v: Vacation) -> Result<Vacation, &'static str> {
     };
     v.subject = tidy(&v.subject, MAX_SUBJECT, false);
     v.message = tidy(&v.message.replace("\r\n", "\n"), MAX_MESSAGE, true);
+    v.external_message = v
+        .external_message
+        .map(|m| tidy(&m.replace("\r\n", "\n"), MAX_MESSAGE, true))
+        .filter(|m| !m.is_empty());
     v.start = v
         .start
         .map(|s| s.trim().to_owned())
@@ -205,6 +230,7 @@ mod tests {
             start: Some("2026-12-20".into()),
             end: Some("2027-01-04".into()),
             days: 2,
+            ..Vacation::default()
         }
     }
 

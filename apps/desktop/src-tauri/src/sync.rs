@@ -1191,6 +1191,10 @@ pub fn cache_body(state: &AppState, id: &str, raw: &[u8]) -> AppResult<()> {
 /// # Errors
 /// `connect` when offline, `not_found` when it was deleted on the server.
 pub async fn body_now(state: &AppState, id: &str) -> AppResult<Vec<u8>> {
+    // An opened .eml file (ile:<hash>): its own bytes.
+    if let Some(raw) = crate::opened::raw_for_id(id)? {
+        return Ok(raw);
+    }
     if let Some(raw) = state.store.get_raw(id)? {
         return Ok(raw);
     }

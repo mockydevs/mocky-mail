@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 
 import { useMailApi } from '../api/MailApiContext';
 import { toAppError } from '../api/errors';
@@ -22,6 +22,9 @@ import { Welcome } from '../features/accounts/Welcome';
 import { ComposeView, type LeaveCompose } from '../features/compose/ComposeView';
 import { preloadEditor } from '../features/compose/editor/loader';
 import { blankDraft, draftFromMessage, forwardDraft, replyDraft, type ComposeKind } from '../features/compose/seed';
+import { FileTasksProvider, useFileTaskRunner } from '../features/files/FileTasks';
+import { OpenedFiles } from '../features/files/OpenedFiles';
+import { exportFolderTask, exportMessagesTask, importMailTask } from '../features/files/tasks';
 import { FolderPicker } from '../features/mailbox/FolderPicker';
 import { groupRows } from '../features/mailbox/grouping';
 import { ListTools } from '../features/mailbox/ListTools';
@@ -51,7 +54,7 @@ import { playChime } from '../features/notifications/chime';
 import { ReadingPane } from '../features/reader/ReadingPane';
 import { SettingsView } from '../features/settings/SettingsView';
 import { ContactsView } from '../features/contacts/ContactsView';
-import { CalendarView } from '../features/calendar/CalendarView';
+import { RemindersPanel } from '../features/reminders/RemindersPanel';
 import { ManageFolders } from '../features/mailbox/ManageFolders';
 import { RuleEditor } from '../features/rules/RuleEditor';
 import { ruleFromMessages } from '../features/rules/ruleText';
@@ -72,14 +75,23 @@ import { usePhone, usePhoneBack } from './usePhone';
 import { Toast } from './Toast';
 import { TopBar } from './TopBar';
 import { NOTICE_MS, useToasts, type Notice } from './useToasts';
+import { CalendarScreen, preloadScreens, TasksScreen } from './screens';
 
 type Screen =
   | { kind: 'mail' }
   | { kind: 'compose'; draft: Draft; title: string; compose: ComposeKind; attachmentsFrom: string | null; unsaved: boolean }
   | { kind: 'settings'; section?: 'security' }
   | { kind: 'contacts' }
-  | { kind: 'calendar' }
+  | { kind: 'calendar'; focus?: { eventId: string; at: number } }
+  | { kind: 'tasks'; focusTaskId?: string }
   | { kind: 'addAccount' };
+
+/** While a screen's chunk loads. */
+const screenLoading = (
+  <div className="panel panel--center muted" role="status">
+    Loading…
+  </div>
+);
 
 /** The toast for a message the user just sent, if one is being followed. */
 function sendNoticeOf(status: SendStatus | null, undo: (id: string) => void): Notice | null {
@@ -249,6 +261,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       window.cancelIdleCallback(idle);
     };
   }, []);
+  // The calendar and tasks screens are small chunks: fetch them straight away.
+  useEffect(preloadScreens, []);
 
   useEffect(() => {
     api.getSettings().then(setSettings, (e: unknown) => {
@@ -302,6 +316,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
   const currentSettings = settings ?? DEFAULT_SETTINGS;
   const workOffline = currentSettings.workOffline;
+  /** "Open folder" after an import, waiting for a folder the import made to load. */
+  const [pendingFolder, setPendingFolder] = useState<string | null>(null);
+  const files = useFileTaskRunner({
+    onNotice: setNotice,
+    onOpenFolder: (folderId) => {
+      openFolder(folderId);
+    },
+    workOffline,
+  });
 
   const theme = useTheme(settings?.theme ?? 'system');
 
@@ -487,6 +510,28 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       setScreen({ kind: 'mail' });
     });
   };
+
+  /** Show a folder by id; one an import just made may still be loading. */
+  const openFolder = (folderId: string) => {
+    const folder = allFolders.find((f) => f.id === folderId);
+    if (folder) {
+      goTo({ type: 'folder', accountId: folder.accountId, folderId });
+    } else {
+      setPendingFolder(folderId);
+      refresh();
+    }
+  };
+  if (pendingFolder !== null && screen.kind !== 'compose') {
+    const folder = allFolders.find((f) => f.id === pendingFolder);
+    if (folder) {
+      setPendingFolder(null);
+      listView.goTo({ type: 'folder', accountId: folder.accountId, folderId: folder.id });
+      setSelectedId(null);
+      setKept(null);
+      selection.clearChecked();
+      setScreen({ kind: 'mail' });
+    }
+  }
 
   /** The messages an action applies to: the ticked rows, else the open one. */
   const targets = (): MessageListItem[] => (selecting ? checkedRows : active ? [active] : []);
@@ -680,6 +725,61 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     compose(blankDraft(composeFrom()), 'New message', 'new');
   };
 
+  /** Show a message wherever it is (a task's or a reminder's "Open"). */
+  const openMessage = (id: string) => {
+    api.getMessage(id, false).then(
+      (m) => {
+        goTo({ type: 'folder', accountId: m.accountId, folderId: m.folderId });
+        setSelectedId(m.id);
+        setKept(m);
+      },
+      (e: unknown) => {
+        report(toAppError(e), 'Could not open the message');
+      },
+    );
+  };
+
+  /** "Create task" on a message: a task titled with its subject, linked to it. */
+  const createTask = (m: MessageDetail) => {
+    api
+      .listTaskLists()
+      .then((lists) => {
+        const list = lists.find((l) => l.provider === 'device') ?? lists[0];
+        if (!list) throw new Error('There is no task list to add to yet.');
+        return api.saveTask({
+          id: null,
+          listId: list.id,
+          title: m.subject.trim() || '(no subject)',
+          notes: '',
+          due: null,
+          reminder: null,
+          importance: m.importance,
+          completed: false,
+          messageId: m.id,
+          categories: m.categories,
+        });
+      })
+      .then(
+        (task) => {
+          setNotice({
+            tone: 'info',
+            title: 'Task added',
+            text: task.title,
+            action: {
+              label: 'Open',
+              run: () => {
+                setNotice(null);
+                show({ kind: 'tasks', focusTaskId: task.id });
+              },
+            },
+          });
+        },
+        (e: unknown) => {
+          report(toAppError(e), 'Could not add the task');
+        },
+      );
+  };
+
   // mailto: links from other apps and web pages start a new message,
   // once accounts are loaded so it has a From.
   const pendingMailto = useRef<Mailto | null>(null);
@@ -747,6 +847,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           screen.kind === 'settings' ||
           screen.kind === 'contacts' ||
           screen.kind === 'calendar' ||
+          screen.kind === 'tasks' ||
           screen.kind === 'addAccount'
         ) {
           setScreen({ kind: 'mail' });
@@ -917,6 +1018,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       onCreateRule={() => {
         setRuleDraft(ruleFromMessages(checkedRows, allFolders));
       }}
+      onSaveEml={() => {
+        files.tasks.run(exportMessagesTask(api, checkedRows.flatMap((r) => idsOf(r))));
+      }}
     />
   );
 
@@ -999,22 +1103,45 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
             setSelectedId(null);
             setKept(null);
           }}
+          onWriteMany={(to) => {
+            compose({ ...blankDraft(composeFrom()), to }, 'New message', 'new');
+          }}
         />
       );
       break;
     case 'calendar':
       main = (
-        <CalendarView
-          accounts={accounts}
-          phone={phone}
-          defaultReminder={settings?.defaultReminderMins ?? 15}
-          onClose={() => {
-            setScreen({ kind: 'mail' });
-          }}
-          onWrite={(to) => {
-            compose({ ...blankDraft(composeFrom()), to }, 'New message', 'new');
-          }}
-        />
+        <Suspense fallback={screenLoading}>
+          <CalendarScreen
+            accounts={accounts}
+            phone={phone}
+            defaultReminder={settings?.defaultReminderMins ?? 15}
+            focus={screen.focus ?? null}
+            onClose={() => {
+              setScreen({ kind: 'mail' });
+            }}
+            onWrite={(to) => {
+              compose({ ...blankDraft(composeFrom()), to }, 'New message', 'new');
+            }}
+          />
+        </Suspense>
+      );
+      break;
+    case 'tasks':
+      main = (
+        <Suspense fallback={screenLoading}>
+          <TasksScreen
+            accounts={accounts}
+            phone={phone}
+            now={now()}
+            categories={categories}
+            focusTaskId={screen.focusTaskId ?? null}
+            onClose={() => {
+              setScreen({ kind: 'mail' });
+            }}
+            onOpenMessage={openMessage}
+          />
+        </Suspense>
       );
       break;
     case 'addAccount':
@@ -1228,6 +1355,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           onCreateRule={(m) => {
             setRuleDraft(ruleFromMessages([m], allFolders));
           }}
+          onCreateTask={createTask}
         />
       );
       main = pane === 'off' ? (reading ? reader : list) : (
@@ -1245,6 +1373,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     : `panes${screen.kind === 'mail' && pane !== 'right' ? ` panes--${pane}` : ''}`;
 
   return (
+    <FileTasksProvider value={files.tasks}>
     <div className={phone && reading && screen.kind === 'mail' ? 'app app--reading' : 'app'}>
       <TopBar
         search={searchInput}
@@ -1319,6 +1448,14 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
                   report(toAppError(e), favorite ? 'Could not add to Favourites' : 'Could not remove from Favourites');
                 });
               }}
+              onImportInto={(folder) => {
+                setDrawer(false);
+                files.tasks.run(importMailTask(api, folder, refresh));
+              }}
+              onExportFolder={(folder) => {
+                setDrawer(false);
+                files.tasks.run(exportFolderTask(api, folder));
+              }}
               onReorderAccounts={(ids) => {
                 api.reorderAccounts(ids).then(refresh, (e: unknown) => {
                   report(toAppError(e), 'Could not change the order of accounts');
@@ -1343,6 +1480,10 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               onCalendar={() => {
                 setDrawer(false);
                 show({ kind: 'calendar' });
+              }}
+              onTasks={() => {
+                setDrawer(false);
+                show({ kind: 'tasks' });
               }}
               onManageFolders={(accountId) => {
                 setDrawer(false);
@@ -1382,6 +1523,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
         }}
       />
 
+      <RemindersPanel
+        phone={phone}
+        now={now}
+        onOpen={(r) => {
+          if (r.kind === 'event' && r.eventId) show({ kind: 'calendar', focus: { eventId: r.eventId, at: r.at } });
+          else if (r.kind === 'task' && r.taskId) show({ kind: 'tasks', focusTaskId: r.taskId });
+          else if (r.messageId) openMessage(r.messageId);
+        }}
+      />
       {(notice ?? sendNotice) && (
         // A send being followed and another message (Archived, an error) are
         // both shown, stacked, so neither hides the other.
@@ -1469,6 +1619,19 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           }}
         />
       )}
+      <OpenedFiles
+        accounts={accounts}
+        folders={foldersByAccount}
+        theme={theme}
+        workOffline={workOffline}
+        onNotice={setNotice}
+        onOpenFolder={openFolder}
+        onCompose={(draft, title, kind, attachmentsFrom) => {
+          compose(draft, title, kind, { attachmentsFrom });
+        }}
+      />
+      {files.dialog}
     </div>
+    </FileTasksProvider>
   );
 }

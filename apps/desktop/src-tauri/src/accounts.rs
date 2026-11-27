@@ -89,10 +89,17 @@ struct SignedIn {
 
 /// Sign in with the provider. On Android, Google uses the phone's own
 /// accounts; everything else opens the provider's page in the browser.
-async fn sign_in(app: &AppHandle, provider: Provider, typed: &str) -> AppResult<SignedIn> {
+/// `keep` are permissions beyond mail the account was granted before
+/// (calendar, contacts, tasks), asked for again so they aren't dropped.
+async fn sign_in(
+    app: &AppHandle,
+    provider: Provider,
+    typed: &str,
+    keep: &[String],
+) -> AppResult<SignedIn> {
     #[cfg(target_os = "android")]
     if provider == Provider::Google {
-        let granted = crate::google_android::sign_in().await?;
+        let granted = crate::google_android::sign_in(keep).await?;
         return Ok(SignedIn {
             email: clean_email(&granted.email)?,
             access_token: granted.access_token,
@@ -101,7 +108,7 @@ async fn sign_in(app: &AppHandle, provider: Provider, typed: &str) -> AppResult<
         });
     }
     let opener = app.clone();
-    let tokens = mail_auth::authorize(provider, typed, move |url| {
+    let tokens = mail_auth::authorize_keeping(provider, typed, keep, move |url| {
         // The opener plugin works on every platform, Android included.
         match opener.opener().open_url(url, None::<&str>) {
             Ok(()) => true,
@@ -257,7 +264,7 @@ pub async fn add_oauth_account(
         "microsoft" => (Provider::Microsoft, AuthKind::Microsoft),
         _ => return Err(AppError::invalid("Unknown sign-in provider.")),
     };
-    let signed_in = sign_in(&app, provider, typed).await?;
+    let signed_in = sign_in(&app, provider, typed, &[]).await?;
     let email = signed_in.email;
     ensure_new(&state, &email)?;
     let servers = provider.servers();
@@ -385,7 +392,8 @@ pub async fn reconnect_account(
             ));
         }
     };
-    let signed_in = sign_in(&app, provider, &account.email).await?;
+    let keep = crate::credentials::kept_scopes(&state, &account);
+    let signed_in = sign_in(&app, provider, &account.email, &keep).await?;
     // The provider's chooser lets any account be picked; only this one fits.
     if !signed_in.email.eq_ignore_ascii_case(&account.email) {
         return Err(AppError::new(
@@ -428,12 +436,17 @@ pub fn remove_account(
         engine.task.abort();
     }
     lock(&state.access_tokens).remove(&id);
+    lock(&state.access_tokens).remove(&crate::connections::graph_key(&id));
     // The account's row goes first. If that fails, nothing is lost and the
     // account still works; had its password been deleted first, it would
     // be left listed but unable to sign in. A secret that can't be removed
     // afterwards is harmless without its account.
     state.store.delete_account(&id)?;
-    for key in [password_key(&id), oauth_key(&id)] {
+    for key in [
+        password_key(&id),
+        oauth_key(&id),
+        crate::connections::graph_key(&id),
+    ] {
         if let Err(error) = state.secrets.delete(&key) {
             eprintln!("couldn't remove a saved sign-in of a removed account: {error}");
         }

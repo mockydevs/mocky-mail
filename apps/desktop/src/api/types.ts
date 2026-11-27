@@ -151,6 +151,10 @@ export interface Vacation {
   end: string | null;
   /** Days before the same sender gets the reply again. */
   days: number;
+  /** Microsoft accounts: a different reply for people outside your organisation (null: same as `message`). */
+  externalMessage?: string | null;
+  /** Microsoft accounts: who outside your organisation gets a reply. */
+  externalAudience?: 'none' | 'contacts' | 'all';
 }
 
 /** An account's automatic replies. */
@@ -343,6 +347,36 @@ export interface EncryptionCheck {
   ownKey: boolean;
 }
 
+/** What an import brought in. */
+export interface ImportReport {
+  /** Items that came in (messages, events, contacts…). */
+  imported: number;
+  /** Items left out (duplicates, unreadable, too large). */
+  skipped: number;
+  /** Plain-language notes on what was left out and why (at most 50). */
+  problems: string[];
+  /** For a .pst file: how many of each kind came in. */
+  counts?: { messages: number; contacts: number; events: number; tasks: number; notes: number };
+  /** Where imported mail went (a folder created for it), if any. */
+  folderId?: string | null;
+}
+
+/** A long import or export under way (mail://import-progress). */
+export interface ImportProgress {
+  /** What is being done, e.g. "Reading Inbox" or "Uploading messages". */
+  phase: string;
+  done: number;
+  /** 0 while unknown. */
+  total: number;
+}
+
+/** A file the app was asked to open (double-clicked, "Open with", or shared to it on Android). */
+export interface OpenedFile {
+  kind: 'eml' | 'ics' | 'vcf';
+  path: string;
+  name: string;
+}
+
 export interface ImageSender {
   /** An address, or a domain when `wholeDomain`. */
   sender: string;
@@ -422,8 +456,23 @@ export interface Contact {
   organization: string;
   title: string;
   notes: string;
+  /** Shown first in People and in recipient suggestions. */
+  favorite: boolean;
+  /** Category names (the same categories as mail). */
+  categories: string[];
+  /** A small picture as a `data:` URL, or null. */
+  photo: string | null;
   /** `changed` or `deleted`: waiting to be sent to the server. */
   state: 'synced' | 'changed' | 'deleted';
+}
+
+/** A named group of contacts (a contact list). Typing its name in a recipient field adds everyone in it. */
+export interface ContactGroup {
+  id: string;
+  /** null: kept on this device only. */
+  accountId: string | null;
+  name: string;
+  memberIds: string[];
 }
 
 /** A contact as typed in the editor. */
@@ -436,6 +485,10 @@ export interface ContactInput {
   organization: string;
   title: string;
   notes: string;
+  favorite?: boolean;
+  categories?: string[];
+  /** A `data:` URL; null removes it; missing leaves it as it is. */
+  photo?: string | null;
 }
 
 /** Whether an account's contacts sync with its server. */
@@ -443,6 +496,8 @@ export interface AddressBookStatus {
   accountId: string;
   state: 'synced' | 'unavailable' | 'error';
   message: string | null;
+  /** A Gmail or Microsoft account that can be connected with connectCalendarAndContacts. */
+  connectable?: boolean;
 }
 
 /** A calendar on an account's mail server. */
@@ -452,7 +507,34 @@ export interface CalendarInfo {
   name: string;
   /** `#RRGGBB` or `#RRGGBBAA` from the server, if it has one. */
   color: string | null;
+  /** Shown in the calendar views (a choice kept on this device). */
+  visible: boolean;
+  /** Events can be added and changed. */
+  writable: boolean;
+  provider: 'caldav' | 'google' | 'microsoft';
 }
+
+/** A custom repeat rule (RRULE), for the repeat dialog. */
+export interface RepeatRule {
+  freq: 'daily' | 'weekly' | 'monthly' | 'yearly';
+  /** Every N days/weeks/months/years. */
+  interval: number;
+  /** Weekdays for weekly, or with `setPos` for "second Tuesday": `MO`…`SU`. */
+  byDay: string[];
+  /** Day of the month for monthly/yearly by date. */
+  monthDay: number | null;
+  /** Month (1–12) for yearly. */
+  month: number | null;
+  /** 1–4 or -1 (last), with one `byDay`: "the second Tuesday". */
+  setPos: number | null;
+  /** End after this many times, or */
+  count: number | null;
+  /** end on this day (Unix seconds), or neither: forever. */
+  until: number | null;
+}
+
+/** How an event shows you in free/busy. */
+export type ShowAs = 'busy' | 'free' | 'tentative' | 'away';
 
 /** How an event repeats. `custom`: a rule the editor can't show (kept as it is). */
 export type Repeat = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
@@ -490,6 +572,13 @@ export interface CalendarEvent {
   tentative: boolean;
   /** Reminders, minutes before the start (0: at the start). */
   reminders: number[];
+  showAs: ShowAs;
+  /** Others with access to the calendar see only "busy". */
+  private: boolean;
+  /** The full rule, for the repeat dialog; null when not repeating. */
+  repeatRule: RepeatRule | null;
+  /** You organise it (you can change it and invite people). */
+  isOrganizer: boolean;
 }
 
 /** An event from the editor. `repeat: 'keep'` leaves a series' rule alone. */
@@ -507,13 +596,78 @@ export interface EventInput {
   timeZone: string;
   /** Reminders, minutes before; null leaves an edited event's reminders as they are. */
   reminders: number[] | null;
+  /** Used instead of `repeat` when set (a custom rule from the repeat dialog). */
+  repeatRule?: RepeatRule | null;
+  showAs?: ShowAs;
+  private?: boolean;
+  /** Invite these people (addresses). Missing: leave the attendees as they are. */
+  attendees?: string[];
+  /** Send invitations, updates or cancellations to the attendees. */
+  notifyAttendees?: boolean;
+  /** Editing one date of a series: its `recurrenceId`, with `scope`. */
+  occurrence?: number | null;
+  /** `this`: only that date; `all`: the whole series (default). */
+  scope?: 'this' | 'all';
 }
+
+/** When people are busy, for Find a Time. */
+export interface FreeBusy {
+  email: string;
+  /** Busy periods (Unix seconds). `unknown`: their calendar couldn't be read. */
+  busy: { start: number; end: number; showAs: ShowAs }[];
+  unknown: boolean;
+}
+
+/** A reminder that is due (event, task or flagged message). */
+export interface DueReminder {
+  /** Stable while it is due; for dismiss/snooze. */
+  key: string;
+  kind: 'event' | 'task' | 'flag';
+  title: string;
+  /** When the event starts or the task/flag is due (Unix seconds). */
+  at: number;
+  location: string | null;
+  eventId: string | null;
+  recurrenceId: number | null;
+  taskId: string | null;
+  messageId: string | null;
+}
+
+/** A to-do list on an account (CalDAV VTODO, Google Tasks, Microsoft To Do) or on this device. */
+export interface TaskList {
+  id: string;
+  accountId: string | null;
+  name: string;
+  provider: 'device' | 'caldav' | 'google' | 'microsoft';
+}
+
+export interface Task {
+  id: string;
+  listId: string;
+  title: string;
+  notes: string;
+  /** Unix seconds (a day: midnight UTC). */
+  due: number | null;
+  /** Remind at (Unix seconds). */
+  reminder: number | null;
+  importance: Importance;
+  completed: boolean;
+  completedAt: number | null;
+  /** The flagged message it came from. */
+  messageId: string | null;
+  categories: string[];
+  state: 'synced' | 'changed' | 'deleted';
+}
+
+export type TaskInput = Omit<Task, 'id' | 'completedAt' | 'state'> & { id: string | null };
 
 /** Whether an account's calendars sync with its server. */
 export interface CalendarStatus {
   accountId: string;
   state: 'synced' | 'unavailable' | 'error';
   message: string | null;
+  /** A Gmail or Microsoft account that can be connected with connectCalendarAndContacts. */
+  connectable?: boolean;
 }
 
 /** A picture under the signature (PNG, JPEG or GIF), sent inside the message. */
@@ -708,8 +862,16 @@ export interface MailEvents {
   /** The backend also shows the desktop notification when enabled. */
   'mail://new-mail': { accountId: string; count: number };
   'mail://accounts-changed': Record<string, never>;
+  /** Reminders came due (or were dismissed or snoozed elsewhere): the full due list. */
+  'mail://reminders': { reminders: DueReminder[] };
+  /** Tasks changed (a sync, or a change here). */
+  'mail://tasks-changed': Record<string, never>;
   /** A rule's server copy was written, or writing it gave up. */
   'mail://rules-changed': { rules: Rule[] };
+  /** A long import or export moved on. */
+  'mail://import-progress': ImportProgress;
+  /** A file was opened with the app while it runs. */
+  'mail://open-file': { file: OpenedFile };
   'mail://contacts-changed': { books: AddressBookStatus[] };
   /** After a calendar sync (with each account's status) or a change made here (empty). */
   'mail://calendar-changed': { calendars: CalendarStatus[] };
@@ -794,6 +956,54 @@ export interface MailApi {
   setPreferredKind(accountId: string, kind: SecurityKind): Promise<void>;
   /** Before sending encrypted: which recipients' keys are known (looks up OpenPGP keys by WKD as well). */
   checkEncryption(accountId: string, addresses: string[], kind: SecurityKind): Promise<EncryptionCheck>;
+  /** Pick .eml and .mbox files and upload their messages into a folder. null: cancelled. */
+  importMailFiles(folderId: string): Promise<ImportReport | null>;
+  /** Save a folder as one .mbox file, or the given messages as .eml files in a .zip (`ids` with `eml`). Returns where it was saved; null if cancelled. */
+  exportMail(target: { folderId: string } | { ids: string[] }, format: 'mbox' | 'eml'): Promise<string | null>;
+  /** Pick an .ics file and add its events to a calendar. */
+  importCalendarFile(calendarId: string): Promise<ImportReport | null>;
+  /** Save a calendar as an .ics file. */
+  exportCalendar(calendarId: string): Promise<string | null>;
+  /** Pick a .vcf file and add its contacts (accountId null: this device). */
+  importContactsFile(accountId: string | null): Promise<ImportReport | null>;
+  /** Save contacts as one .vcf file (accountId null: this device's; '*': everyone). */
+  exportContacts(accountId: string | null): Promise<string | null>;
+  /**
+   * Pick an Outlook .pst file: its mail is uploaded into a new folder tree
+   * "Imported from Outlook" on the account; contacts, calendar, tasks and notes
+   * go to that account's address book, calendar and task list (or this
+   * device's when it has none). Progress comes as mail://import-progress.
+   */
+  importPst(accountId: string): Promise<ImportReport | null>;
+  /** Files the app was started with (desktop) or that were shared to it (Android), once each. */
+  takeOpenedFiles(): Promise<OpenedFile[]>;
+  /** An opened .eml file, read for showing (it is not added to any folder). */
+  readMessageFile(path: string): Promise<MessageDetail>;
+  /** Add an opened .eml file to a folder. */
+  importMessageFile(path: string, folderId: string): Promise<void>;
+  /** Add an opened .ics or .vcf file's items (calendarId for .ics, accountId for .vcf). */
+  importOpenedFile(path: string, target: { calendarId: string } | { accountId: string | null }): Promise<ImportReport>;
+  /**
+   * Gmail and Microsoft accounts: sign in again in the browser asking for
+   * calendar, contacts, tasks and automatic-reply access (mail access is
+   * unchanged), then start syncing them.
+   */
+  connectCalendarAndContacts(accountId: string): Promise<void>;
+  setCalendarVisible(calendarId: string, visible: boolean): Promise<CalendarInfo[]>;
+  /** For Find a Time: when these people are busy (their servers permitting). */
+  getFreeBusy(accountId: string, emails: string[], from: number, to: number): Promise<FreeBusy[]>;
+  listDueReminders(): Promise<DueReminder[]>;
+  dismissReminder(key: string): Promise<DueReminder[]>;
+  snoozeReminder(key: string, minutes: number): Promise<DueReminder[]>;
+  listTaskLists(): Promise<TaskList[]>;
+  /** `listId` null: every list. */
+  listTasks(listId: string | null, includeCompleted: boolean): Promise<Task[]>;
+  saveTask(task: TaskInput): Promise<Task>;
+  deleteTask(id: string): Promise<void>;
+  syncTasks(): Promise<void>;
+  listContactGroups(): Promise<ContactGroup[]>;
+  saveContactGroup(group: Omit<ContactGroup, 'id'> & { id: string | null }): Promise<ContactGroup[]>;
+  deleteContactGroup(id: string): Promise<ContactGroup[]>;
   /** The mailto: link the app was started with, once (desktop). */
   takeMailto(): Promise<Mailto | null>;
   /** Read a mailto: link (from Android, or the mail://mailto event). */
@@ -865,7 +1075,8 @@ export interface MailApi {
   /** Create or change an event on the server (needs a connection). Returns the event itself. */
   saveEvent(event: EventInput): Promise<CalendarEvent>;
   /** Delete an event or whole series; with `occurrence` (a `recurrenceId`), only that date. */
-  deleteEvent(id: string, occurrence: number | null): Promise<void>;
+  /** `notify`: send cancellations to the attendees (you organise it). Default false. */
+  deleteEvent(id: string, occurrence: number | null, notify?: boolean): Promise<void>;
   /** Sync every account's calendars now. */
   syncCalendars(): Promise<CalendarStatus[]>;
   /** Answer an invitation in a message: saved in your calendar (a decline removes it); with `notify`, the organiser is emailed. */

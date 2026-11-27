@@ -35,6 +35,9 @@ pub struct Granted {
     pub email: String,
     /// Bearer token for IMAP and SMTP (XOAUTH2).
     pub access_token: String,
+    /// The permissions this token carries, as Google listed them.
+    #[serde(default)]
+    pub granted_scopes: Vec<String>,
 }
 
 fn handle() -> AppResult<&'static PluginHandle<Wry>> {
@@ -62,13 +65,16 @@ fn plugin_error(error: tauri::plugin::mobile::PluginInvokeError) -> AppError {
 }
 
 /// Show the account chooser, then Google's consent sheet if needed.
+/// `extra` are permissions beyond mail to ask for as well (an account that
+/// connected calendar and contacts before, signing in again); empty for a
+/// plain mail sign-in.
 ///
 /// # Errors
 /// `auth` when the user cancels or declines; `connect` for Play services
 /// or network failures.
-pub async fn sign_in() -> AppResult<Granted> {
+pub async fn sign_in(extra: &[String]) -> AppResult<Granted> {
     handle()?
-        .run_mobile_plugin_async::<Granted>("signIn", serde_json::json!({}))
+        .run_mobile_plugin_async::<Granted>("signIn", serde_json::json!({ "scopes": extra }))
         .await
         .map_err(plugin_error)
 }
@@ -76,17 +82,50 @@ pub async fn sign_in() -> AppResult<Granted> {
 #[derive(serde::Serialize)]
 struct TokenArgs<'a> {
     email: &'a str,
+    /// Permissions beyond mail.
+    scopes: &'a [String],
+    /// Google's consent sheet may be shown.
+    interactive: bool,
 }
 
 /// A fresh access token for an account that already granted access, with no
-/// screen shown.
+/// screen shown. `extra` are the permissions beyond mail it was granted
+/// (calendar, contacts, tasks), so one token covers everything.
 ///
 /// # Errors
 /// `auth` when access was withdrawn and the user must sign in again.
-pub async fn token(email: &str) -> AppResult<String> {
+pub async fn token(email: &str, extra: &[String]) -> AppResult<String> {
     Ok(handle()?
-        .run_mobile_plugin_async::<Granted>("token", TokenArgs { email })
+        .run_mobile_plugin_async::<Granted>(
+            "token",
+            TokenArgs {
+                email,
+                scopes: extra,
+                interactive: false,
+            },
+        )
         .await
         .map_err(plugin_error)?
         .access_token)
+}
+
+/// Ask for more permissions for an account on the phone (incremental
+/// authorization), showing Google's consent sheet. Returns a token for
+/// mail and them, with what was granted.
+///
+/// # Errors
+/// `auth` when the user cancels or declines; `config` when the app isn't
+/// set up for them in Google's console.
+pub async fn authorize(email: &str, extra: &[String]) -> AppResult<Granted> {
+    handle()?
+        .run_mobile_plugin_async::<Granted>(
+            "token",
+            TokenArgs {
+                email,
+                scopes: extra,
+                interactive: true,
+            },
+        )
+        .await
+        .map_err(plugin_error)
 }

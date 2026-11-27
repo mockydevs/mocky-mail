@@ -46,6 +46,10 @@ impl std::fmt::Debug for DavLogin {
 
 /// One `<response>` of a `207 Multi-Status`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "what the server said, as it said it"
+)]
 pub struct DavResponse {
     /// The resource's path, as the server wrote it.
     pub href: String,
@@ -71,6 +75,25 @@ pub struct DavResponse {
     pub components: Vec<String>,
     /// The resource itself answered 404 (deleted).
     pub missing: bool,
+    /// `current-user-privilege-set` was given.
+    pub has_privileges: bool,
+    /// Its privileges: `read`, `write`, `write-content`, `all`, ...
+    pub privileges: Vec<String>,
+    /// `schedule-outbox-URL` (RFC 6638).
+    pub schedule_outbox: Option<String>,
+}
+
+impl DavResponse {
+    /// Whether this login may add and change items in it (when the server
+    /// says; one that doesn't is taken as writable).
+    #[must_use]
+    pub fn writable(&self) -> bool {
+        !self.has_privileges
+            || self
+                .privileges
+                .iter()
+                .any(|p| matches!(p.as_str(), "write" | "write-content" | "all" | "bind"))
+    }
 }
 
 /// Read a `207 Multi-Status` body. Namespace prefixes vary by server, so
@@ -133,6 +156,7 @@ pub fn parse_multistatus(xml: &str) -> Result<Vec<DavResponse>, SyncError> {
                         ("current-user-principal", "href") => r.principal = Some(value),
                         ("addressbook-home-set", "href") => r.addressbook_home = Some(value),
                         ("calendar-home-set", "href") => r.calendar_home = Some(value),
+                        ("schedule-outbox-url", "href") => r.schedule_outbox = Some(value),
                         (_, "address-data" | "calendar-data") => {
                             // Card text keeps its own line breaks.
                             r.data = Some(text.clone());
@@ -159,6 +183,19 @@ fn local(name: &str) -> String {
 }
 
 fn mark_type(r: &mut DavResponse, path: &[String], name: &str) {
+    if name == "current-user-privilege-set" {
+        r.has_privileges = true;
+    }
+    if path.last().map(String::as_str) == Some("privilege")
+        && path
+            .iter()
+            .rev()
+            .nth(1)
+            .is_some_and(|p| p == "current-user-privilege-set")
+        && !r.privileges.iter().any(|p| p == name)
+    {
+        r.privileges.push(name.to_owned());
+    }
     if path.last().map(String::as_str) == Some("resourcetype") {
         match name {
             "addressbook" => r.is_addressbook = true,
@@ -237,7 +274,25 @@ fn reference_char(name: &str) -> Option<char> {
 #[derive(Debug, Clone)]
 pub struct DavClient {
     http: Client,
-    login: DavLogin,
+    auth: DavAuth,
+}
+
+/// How requests sign in.
+#[derive(Clone)]
+enum DavAuth {
+    /// HTTP Basic with the mail password.
+    Basic(DavLogin),
+    /// An OAuth access token (Google's `CalDAV` and `CardDAV`).
+    Bearer(String),
+}
+
+impl std::fmt::Debug for DavAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Basic(login) => f.debug_tuple("Basic").field(login).finish(),
+            Self::Bearer(_) => f.write_str("Bearer(..)"),
+        }
+    }
 }
 
 /// An address book on the server.
@@ -258,6 +313,88 @@ pub struct CalendarCollection {
     pub name: Option<String>,
     /// Its colour (`#RRGGBB` or `#RRGGBBAA`), if the server gave one.
     pub color: Option<String>,
+    /// What it holds (`VEVENT`, `VTODO`); empty when the server didn't say.
+    pub components: Vec<String>,
+    /// Items can be added and changed.
+    pub writable: bool,
+}
+
+/// One recipient's part of a scheduling answer (RFC 6638 `schedule-response`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleAnswer {
+    /// The recipient's address (without `mailto:`).
+    pub recipient: String,
+    /// `request-status`, such as `2.0;Success`.
+    pub status: String,
+    /// The calendar data returned (a `VFREEBUSY`).
+    pub data: Option<String>,
+}
+
+/// Read a `schedule-response`: each recipient with its status and data.
+///
+/// # Errors
+/// [`SyncError::Protocol`] for XML that can't be read.
+pub fn parse_schedule_response(xml: &str) -> Result<Vec<ScheduleAnswer>, SyncError> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut out = Vec::new();
+    let mut current: Option<ScheduleAnswer> = None;
+    let mut path: Vec<String> = Vec::new();
+    let mut text = String::new();
+    loop {
+        let event = reader
+            .read_event()
+            .map_err(|e| SyncError::Protocol(format!("unreadable reply from the server: {e}")))?;
+        match event {
+            Event::Start(e) => {
+                let name = local(e.local_name().as_ref());
+                if name == "response" {
+                    current = Some(ScheduleAnswer {
+                        recipient: String::new(),
+                        status: String::new(),
+                        data: None,
+                    });
+                }
+                path.push(name);
+                text.clear();
+            }
+            Event::Text(t) => text.push_str(&unescape_xml(t.as_ref())),
+            Event::GeneralRef(r) => {
+                let name: &str = r.as_ref();
+                text.push_str(&unescape_xml(&format!("&{name};")));
+            }
+            Event::CData(c) => text.push_str(c.as_ref()),
+            Event::End(_) => {
+                let name = path.pop().unwrap_or_default();
+                let parent = path.last().map_or("", String::as_str);
+                if let Some(answer) = current.as_mut() {
+                    match (parent, name.as_str()) {
+                        ("recipient", "href") => {
+                            let value = text.trim();
+                            value
+                                .get(..7)
+                                .filter(|p| p.eq_ignore_ascii_case("mailto:"))
+                                .and_then(|_| value.get(7..))
+                                .unwrap_or(value)
+                                .clone_into(&mut answer.recipient);
+                        }
+                        (_, "request-status") => text.trim().clone_into(&mut answer.status),
+                        (_, "calendar-data") => answer.data = Some(text.clone()),
+                        _ => {}
+                    }
+                }
+                if name == "response"
+                    && let Some(answer) = current.take()
+                {
+                    out.push(answer);
+                }
+                text.clear();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// A card as read from the server.
@@ -354,13 +491,26 @@ impl DavClient {
     /// # Errors
     /// When the HTTP client can't be set up.
     pub fn new(login: DavLogin) -> Result<Self, SyncError> {
+        Self::with_auth(DavAuth::Basic(login))
+    }
+
+    /// A client that signs in with an OAuth access token (`Authorization:
+    /// Bearer`), for Google's `CalDAV` and `CardDAV`.
+    ///
+    /// # Errors
+    /// When the HTTP client can't be set up.
+    pub fn bearer(access_token: String) -> Result<Self, SyncError> {
+        Self::with_auth(DavAuth::Bearer(access_token))
+    }
+
+    fn with_auth(auth: DavAuth) -> Result<Self, SyncError> {
         let http = Client::builder()
             .timeout(TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("Mocky Mail")
             .build()
             .map_err(|e| SyncError::Config(e.to_string()))?;
-        Ok(Self { http, login })
+        Ok(Self { http, auth })
     }
 
     /// Send one request, following redirects by hand with the same method.
@@ -373,11 +523,12 @@ impl DavClient {
     ) -> Result<(Url, StatusCode, HeaderMap, String), SyncError> {
         for _ in 0..=MAX_REDIRECTS {
             check_scheme(&url)?;
-            let mut request = self
-                .http
-                .request(method.clone(), url.clone())
-                .basic_auth(&self.login.username, Some(&self.login.password))
-                .headers(headers.clone());
+            let request = self.http.request(method.clone(), url.clone());
+            let mut request = match &self.auth {
+                DavAuth::Basic(login) => request.basic_auth(&login.username, Some(&login.password)),
+                DavAuth::Bearer(token) => request.bearer_auth(token),
+            }
+            .headers(headers.clone());
             if let Some(body) = &body {
                 request = request.body(body.clone());
             }
@@ -409,6 +560,18 @@ impl DavClient {
             // collection, or a web server with no address book or calendar.
             // The password is not the problem.
             if status == StatusCode::FORBIDDEN {
+                if matches!(self.auth, DavAuth::Bearer(_)) {
+                    let body: String = response
+                        .text()
+                        .await
+                        .unwrap_or_default()
+                        .chars()
+                        .take(4000)
+                        .collect();
+                    if let Some(setup) = crate::google::setup_problem(&body) {
+                        return Err(setup);
+                    }
+                }
                 return Err(SyncError::Refused(
                     "the server doesn't allow that here (403 Forbidden)".to_owned(),
                 ));
@@ -545,21 +708,194 @@ impl DavClient {
         &self,
         server: &Url,
     ) -> Result<Vec<CalendarCollection>, SyncError> {
+        Ok(self
+            .discover_collections(server)
+            .await?
+            .into_iter()
+            .filter(|c| c.components.is_empty() || c.components.iter().any(|x| x == "VEVENT"))
+            .collect())
+    }
+
+    /// Find the calendars that hold to-dos (`VTODO`) for this login. Only
+    /// those the server says hold to-dos count, so a server that doesn't
+    /// say gets no task lists rather than one per calendar.
+    ///
+    /// # Errors
+    /// As [`Self::discover_calendars`].
+    pub async fn discover_task_lists(
+        &self,
+        server: &Url,
+    ) -> Result<Vec<CalendarCollection>, SyncError> {
+        Ok(self
+            .discover_collections(server)
+            .await?
+            .into_iter()
+            .filter(|c| c.components.iter().any(|x| x == "VTODO"))
+            .collect())
+    }
+
+    /// Every calendar collection in this login's calendar home.
+    ///
+    /// # Errors
+    /// As [`Self::discover_calendars`].
+    pub async fn discover_collections(
+        &self,
+        server: &Url,
+    ) -> Result<Vec<CalendarCollection>, SyncError> {
         let (at, found) = self
             .home_collections(server, "caldav", "calendars", |r| r.calendar_home.clone())
             .await?;
         Ok(found
             .into_iter()
             .filter(|r| r.is_calendar)
-            .filter(|r| r.components.is_empty() || r.components.iter().any(|c| c == "VEVENT"))
             .filter_map(|r| {
                 Some(CalendarCollection {
                     url: at.join(&r.href).ok()?,
+                    writable: r.writable(),
                     name: r.display_name,
                     color: r.color,
+                    components: r.components,
                 })
             })
             .collect())
+    }
+
+    /// The paths and version tags of the to-dos in a calendar
+    /// (`calendar-query` for `VTODO`), so its events are not fetched again.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn list_todos(
+        &self,
+        collection: &Url,
+    ) -> Result<Vec<(String, Option<String>)>, SyncError> {
+        let (_, found) = self
+            .xml_request("REPORT", collection.clone(), "1", TODO_QUERY)
+            .await?;
+        let own_path = collection.path().trim_end_matches('/').to_owned();
+        Ok(found
+            .into_iter()
+            .filter(|r| !r.missing && !r.is_calendar)
+            .filter(|r| r.href.trim_end_matches('/') != own_path && !r.href.ends_with('/'))
+            .map(|r| (r.href, r.etag))
+            .collect())
+    }
+
+    /// The login's scheduling outbox (RFC 6638), where free/busy requests
+    /// go, if the server has one.
+    ///
+    /// # Errors
+    /// Network errors; a server without scheduling gives `Ok(None)`.
+    pub async fn scheduling_outbox(&self, server: &Url) -> Result<Option<Url>, SyncError> {
+        let start = server
+            .join("/.well-known/caldav")
+            .map_err(|e| SyncError::Config(e.to_string()))?;
+        let (at, found) = match self
+            .xml_request("PROPFIND", start, "0", PROPFIND_PRINCIPAL)
+            .await
+        {
+            Ok(found) => found,
+            Err(SyncError::Protocol(_) | SyncError::Refused(_) | SyncError::Config(_)) => {
+                return Ok(None);
+            }
+            Err(other) => return Err(other),
+        };
+        let Some(principal) = found
+            .iter()
+            .find_map(|r| r.principal.clone())
+            .and_then(|p| at.join(&p).ok())
+        else {
+            return Ok(None);
+        };
+        let (at, found) = match self
+            .xml_request("PROPFIND", principal, "0", PROPFIND_OUTBOX)
+            .await
+        {
+            Ok(found) => found,
+            Err(SyncError::Protocol(_) | SyncError::Refused(_)) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        Ok(found
+            .iter()
+            .find_map(|r| r.schedule_outbox.clone())
+            .and_then(|o| at.join(&o).ok()))
+    }
+
+    /// Ask the scheduling outbox when people are busy: `request` is a
+    /// `VFREEBUSY` `METHOD:REQUEST` from `originator`. Returns each
+    /// recipient's answer.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn schedule_free_busy(
+        &self,
+        outbox: &Url,
+        originator: &str,
+        recipients: &[String],
+        request: &str,
+    ) -> Result<Vec<ScheduleAnswer>, SyncError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/calendar; charset=utf-8; method=REQUEST"),
+        );
+        let value = |text: String| {
+            HeaderValue::from_str(&text).map_err(|e| SyncError::Invalid(e.to_string()))
+        };
+        headers.insert("Originator", value(format!("mailto:{originator}"))?);
+        for recipient in recipients {
+            headers.append("Recipient", value(format!("mailto:{recipient}"))?);
+        }
+        let (_, status, _, text) = self
+            .send(
+                &Method::POST,
+                outbox.clone(),
+                headers,
+                Some(request.to_owned()),
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(SyncError::Refused(format!(
+                "the server didn't answer the free/busy request ({status})"
+            )));
+        }
+        parse_schedule_response(&text)
+    }
+
+    /// When this login is busy in one calendar (`free-busy-query`, RFC 4791
+    /// 7.10): the `VFREEBUSY` text.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn free_busy_query(
+        &self,
+        calendar: &Url,
+        from: &str,
+        to: &str,
+    ) -> Result<String, SyncError> {
+        let body = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?><c:free-busy-query xmlns:c="urn:ietf:params:xml:ns:caldav"><c:time-range start="{}" end="{}"/></c:free-busy-query>"#,
+            escape_xml(from),
+            escape_xml(to)
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("Depth", HeaderValue::from_static("1"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/xml; charset=utf-8"),
+        );
+        let method =
+            Method::from_bytes(b"REPORT").map_err(|e| SyncError::Invalid(e.to_string()))?;
+        let (_, status, _, text) = self
+            .send(&method, calendar.clone(), headers, Some(body))
+            .await?;
+        if status.is_success() {
+            Ok(text)
+        } else {
+            Err(SyncError::Refused(format!(
+                "the server didn't answer the free/busy query ({status})"
+            )))
+        }
     }
 
     /// Every card's path and version tag in an address book.
@@ -945,7 +1281,9 @@ fn escape_xml(text: &str) -> String {
 
 const PROPFIND_PRINCIPAL: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#;
 const PROPFIND_HOMES: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav" xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:prop><card:addressbook-home-set/><cal:calendar-home-set/></d:prop></d:propfind>"#;
-const PROPFIND_COLLECTIONS: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:resourcetype/><d:displayname/><a:calendar-color/><cal:supported-calendar-component-set/></d:prop></d:propfind>"#;
+const PROPFIND_COLLECTIONS: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:resourcetype/><d:displayname/><a:calendar-color/><cal:supported-calendar-component-set/><d:current-user-privilege-set/></d:prop></d:propfind>"#;
+const PROPFIND_OUTBOX: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:prop><cal:schedule-outbox-URL/></d:prop></d:propfind>"#;
+const TODO_QUERY: &str = r#"<?xml version="1.0" encoding="utf-8"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VTODO"/></c:comp-filter></c:filter></c:calendar-query>"#;
 const PROPFIND_ETAGS: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><d:resourcetype/></d:prop></d:propfind>"#;
 const CALENDAR_MULTIGET_HEAD: &str = r#"<?xml version="1.0" encoding="utf-8"?><c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop>"#;
 const MULTIGET_HEAD: &str = r#"<?xml version="1.0" encoding="utf-8"?><c:addressbook-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:prop><d:getetag/><c:address-data/></d:prop>"#;
@@ -1150,6 +1488,37 @@ mod tests {
         assert!(fits_in_memory(MAX_RESPONSE_BYTES as u64));
         assert!(!fits_in_memory(MAX_RESPONSE_BYTES as u64 + 1));
         assert!(!fits_in_memory(u64::MAX));
+    }
+
+    #[test]
+    fn reads_privileges_and_the_scheduling_outbox() {
+        let xml = r#"<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:response><D:href>/c/shared/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/><C:calendar/></D:resourcetype><D:current-user-privilege-set><D:privilege><D:read/></D:privilege><D:privilege><D:read-free-busy/></D:privilege></D:current-user-privilege-set></D:prop></D:propstat></D:response><D:response><D:href>/c/mine/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/><C:calendar/></D:resourcetype><D:current-user-privilege-set><D:privilege><D:all/></D:privilege></D:current-user-privilege-set></D:prop></D:propstat></D:response><D:response><D:href>/c/plain/</D:href><D:propstat><D:prop><D:resourcetype><C:calendar/></D:resourcetype></D:prop></D:propstat></D:response><D:response><D:href>/p/</D:href><D:propstat><D:prop><C:schedule-outbox-URL><D:href>/c/outbox/</D:href></C:schedule-outbox-URL></D:prop></D:propstat></D:response></D:multistatus>"#;
+        let r = parse_multistatus(xml).unwrap();
+        assert_eq!(r[0].privileges, ["read", "read-free-busy"]);
+        assert!(!r[0].writable());
+        assert!(r[1].writable());
+        // A server that doesn't say: writable.
+        assert!(r[2].writable());
+        assert_eq!(r[3].schedule_outbox.as_deref(), Some("/c/outbox/"));
+    }
+
+    #[test]
+    fn reads_a_schedule_response() {
+        let xml = "<?xml version=\"1.0\"?><C:schedule-response xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\"><C:response><C:recipient><D:href>mailto:peter@client.example</D:href></C:recipient><C:request-status>2.0;Success</C:request-status><C:calendar-data>BEGIN:VCALENDAR&#13;\nBEGIN:VFREEBUSY&#13;\nFREEBUSY:20261118T060000Z/20261118T070000Z&#13;\nEND:VFREEBUSY&#13;\nEND:VCALENDAR&#13;\n</C:calendar-data></C:response><C:response><C:recipient><D:href>mailto:who@elsewhere.example</D:href></C:recipient><C:request-status>3.7;Invalid calendar user</C:request-status></C:response></C:schedule-response>";
+        let answers = parse_schedule_response(xml).unwrap();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].recipient, "peter@client.example");
+        assert!(answers[0].status.starts_with("2.0"));
+        let busy = mail_core::ical::free_busy_periods(answers[0].data.as_deref().unwrap());
+        assert_eq!(busy.len(), 1);
+        assert!(answers[1].data.is_none());
+        assert!(answers[1].status.starts_with("3.7"));
+    }
+
+    #[test]
+    fn a_bearer_token_is_never_printed() {
+        let client = DavClient::bearer("ya29.secret".into()).unwrap();
+        assert!(!format!("{client:?}").contains("ya29"));
     }
 
     #[test]

@@ -10,8 +10,8 @@ use mail_core::folders::FolderRole;
 use mail_core::ical::{self, Answer, Invitation};
 use mail_core::message::{Mailbox, make_preview, parse_body};
 use mail_core::outbox::OutboxItem;
-use mail_store::{Account, NewOutbox, StoredEvent};
-use mail_sync::outgoing::build_calendar_reply;
+use mail_store::{Account, CalendarProvider, NewOutbox, StoredEvent};
+use mail_sync::outgoing::{build_calendar_message, build_calendar_reply};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -94,26 +94,42 @@ fn current(state: &AppState, account: &Account, calendar: &str) -> AppResult<Inv
 }
 
 /// The calendar to save an answered invitation in: the one already
-/// holding it, else the account's main ("personal") calendar.
+/// holding it, else the account's main ("personal") calendar. Microsoft
+/// calendars are left out: Exchange puts invitations in them itself, so
+/// for those only the answer is emailed.
 fn target_calendar(
     state: &AppState,
     account: &Account,
     existing: Option<&StoredEvent>,
 ) -> AppResult<Option<mail_store::Calendar>> {
     if let Some(e) = existing {
-        return Ok(Some(state.store.get_calendar(&e.calendar_id)?));
+        let calendar = state.store.get_calendar(&e.calendar_id)?;
+        return Ok((calendar.provider != CalendarProvider::Microsoft).then_some(calendar));
     }
     let calendars: Vec<_> = state
         .store
         .list_calendars()?
         .into_iter()
         .filter(|c| c.account_id == account.id)
+        .filter(|c| c.provider != CalendarProvider::Microsoft && c.writable)
         .collect();
     Ok(calendars
         .iter()
         .find(|c| c.url.trim_end_matches('/').ends_with("/personal"))
+        // Google: the calendar named after the account is the main one.
+        .or_else(|| {
+            calendars
+                .iter()
+                .find(|c| c.remote_id.as_deref() == Some(account.email.as_str()))
+        })
         .or_else(|| calendars.first())
         .cloned())
+}
+
+/// Whether a stored event is in a calendar Microsoft keeps up to date
+/// itself.
+fn kept_by_microsoft(state: &AppState, event: &StoredEvent) -> AppResult<bool> {
+    Ok(state.store.get_calendar(&event.calendar_id)?.provider == CalendarProvider::Microsoft)
 }
 
 /// `answer_invitation`: accept, maybe or decline. Saves it in your
@@ -262,7 +278,9 @@ pub async fn remove_cancelled_event(
     if invitation.invitation.method != "CANCEL" {
         return Err(AppError::invalid("This event wasn't cancelled."));
     }
-    if let Some(stored) = stored_event(&state, &account.id, &invitation.invitation.event.uid)? {
+    if let Some(stored) = stored_event(&state, &account.id, &invitation.invitation.event.uid)?
+        && !kept_by_microsoft(&state, &stored)?
+    {
         let target = state.store.get_calendar(&stored.calendar_id)?;
         let (client, url) = crate::calendar::client_for(&state, &target).await?;
         client
@@ -286,7 +304,9 @@ pub async fn apply_invitation_reply(
     let invitation = current(&state, &account, &calendar)?;
     let stored = stored_event(&state, &account.id, &invitation.invitation.event.uid)?
         .ok_or_else(|| AppError::invalid("This event isn't in your calendar."))?;
-    if let Some(updated) = ical::apply_reply(&stored.ics, &calendar) {
+    if !kept_by_microsoft(&state, &stored)?
+        && let Some(updated) = ical::apply_reply(&stored.ics, &calendar)
+    {
         let target = state.store.get_calendar(&stored.calendar_id)?;
         let (client, url) = crate::calendar::client_for(&state, &target).await?;
         let uid = invitation.invitation.event.uid.clone();
@@ -305,4 +325,43 @@ pub async fn apply_invitation_reply(
         crate::calendar::changed(&app, &[]);
     }
     current(&state, &account, &calendar)
+}
+
+/// Queue an invitation, update or cancellation email (iMIP `REQUEST` or
+/// `CANCEL`) to the people on an event, through the Outbox, to send at
+/// once.
+#[allow(clippy::too_many_arguments, reason = "the parts of one message")]
+pub(crate) fn queue_calendar_mail(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    account: &Account,
+    to: Vec<Mailbox>,
+    subject: &str,
+    note: &str,
+    ics: &str,
+    method: &str,
+) -> AppResult<()> {
+    let name = Some(account.display_name.as_str()).filter(|n| !n.trim().is_empty());
+    let from = Mailbox {
+        name: name.map(str::to_owned),
+        address: account.email.clone(),
+    };
+    let built = build_calendar_message(&from, &to, subject, note, ics, method)?;
+    let created_at = now();
+    state.store.insert_outbox(&NewOutbox {
+        account_id: account.id.clone(),
+        created_at,
+        to,
+        subject: subject.to_owned(),
+        preview: make_preview(note, mail_core::message::PREVIEW_CHARS),
+        raw: built.raw,
+        recipients: built.recipients,
+        message_id_header: Some(built.message_id),
+        reply_to_message_id: None,
+        sent_folder_hint: crate::outbox::folder_path(state, &account.id, FolderRole::Sent)?,
+        item: OutboxItem::scheduled(created_at, 0),
+    })?;
+    state.outbox_wake.notify_one();
+    events::outbox_changed(app, state);
+    Ok(())
 }

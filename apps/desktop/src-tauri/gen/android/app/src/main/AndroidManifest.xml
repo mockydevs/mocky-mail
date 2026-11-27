@@ -32,6 +32,33 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="mailto" />
             </intent-filter>
+            <!-- .eml, .ics and .vcf files opened with the app (a file manager,
+                 a download, "Open with"): shown, then added if the user asks. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="message/rfc822" />
+                <data android:mimeType="text/calendar" />
+                <data android:mimeType="text/x-vcalendar" />
+                <data android:mimeType="application/ics" />
+                <data android:mimeType="text/vcard" />
+                <data android:mimeType="text/x-vcard" />
+                <data android:mimeType="text/directory" />
+            </intent-filter>
+            <!-- Calendar and contact files shared to the app. (SEND of
+                 message/rfc822 is left out: apps use it to ask for an email
+                 app to write a message, not to hand over a file.) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/calendar" />
+                <data android:mimeType="text/x-vcalendar" />
+                <data android:mimeType="application/ics" />
+                <data android:mimeType="text/vcard" />
+                <data android:mimeType="text/x-vcard" />
+            </intent-filter>
         </activity>
 
         <provider

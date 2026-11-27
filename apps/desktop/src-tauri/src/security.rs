@@ -237,12 +237,35 @@ pub fn open_message(state: &AppState, stored: &StoredMessage, raw: &[u8]) -> App
         Opened::default()
     };
     keep_found(state, &opened);
+    remember_decrypted(state, &stored.item.id, &opened);
+    Ok(opened)
+}
+
+/// Open an opened `.eml` file (`file:<hash>`, in no folder): decrypt it and
+/// check its signature as for a received message. The keys it carries are
+/// not kept: the file was only looked at, not added to the mailbox.
+///
+/// # Errors
+/// Database errors.
+pub fn open_file(state: &AppState, id: &str, raw: &[u8]) -> AppResult<Opened> {
+    let flags = mail_core::message::parse_summary(raw).ok();
+    let secure = flags.is_some_and(|f| f.signed || f.encrypted)
+        || mime::find(raw, b"-----BEGIN PGP").is_some();
+    if !secure {
+        return Ok(Opened::default());
+    }
+    let opened = open_with_keys(state, raw)?;
+    remember_decrypted(state, id, &opened);
+    Ok(opened)
+}
+
+/// Keep a decrypted message in memory, so its attachments match what was shown.
+fn remember_decrypted(state: &AppState, id: &str, opened: &Opened) {
     if let (Some(shown), Some(encryption)) = (&opened.shown, &opened.encryption)
         && encryption.state == sec::EncryptionState::Decrypted
     {
-        state.security.remember(&stored.item.id, shown);
+        state.security.remember(id, shown);
     }
-    Ok(opened)
 }
 
 /// Open `raw` with every key here.
@@ -303,6 +326,10 @@ pub fn open_own_copy(
 pub fn shown_bytes(state: &AppState, id: &str, raw: Vec<u8>) -> AppResult<Vec<u8>> {
     if let Some(shown) = state.security.recall(id) {
         return Ok(shown.to_vec());
+    }
+    // An opened .eml file is in no folder: there is no stored message.
+    if crate::opened::is_file_id(id) {
+        return Ok(open_file(state, id, &raw)?.shown.unwrap_or(raw));
     }
     let stored = state.store.get_message(id)?;
     if !(stored.item.signed

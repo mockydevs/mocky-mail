@@ -150,3 +150,34 @@ pub async fn print_html(html: &str, title: &str) -> AppResult<()> {
         .map_err(plugin_error)?;
     Ok(())
 }
+
+/// A file shared to the app (or opened with it), copied into the cache by
+/// `MainActivity`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shared {
+    /// Its copy in the cache.
+    pub path: PathBuf,
+    /// Its name.
+    pub name: String,
+    /// `eml`, `ics` or `vcf`.
+    pub kind: String,
+}
+
+#[derive(Deserialize)]
+struct SharedList {
+    files: Vec<Shared>,
+}
+
+/// Wait until files are shared to the app (those waiting already come at
+/// once). Called in a loop for as long as the app runs.
+///
+/// # Errors
+/// When the plugin isn't there.
+pub async fn wait_shared_files() -> AppResult<Vec<Shared>> {
+    Ok(handle()?
+        .run_mobile_plugin_async::<SharedList>("waitSharedFiles", ())
+        .await
+        .map_err(plugin_error)?
+        .files)
+}

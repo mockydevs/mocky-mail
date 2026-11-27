@@ -16,6 +16,7 @@ import { playChime } from '../notifications/chime';
 import { accountErrorCopy } from '../accounts/providers';
 import { SignatureEditor } from './SignatureEditor';
 import { SecuritySection } from '../security/SecuritySection';
+import { ImportExportSection } from '../files/ImportExportSection';
 
 const MARK_READ: readonly [MarkReadSetting, string][] = [
   ['open', 'Mark as read as soon as I open a message'],
@@ -433,6 +434,8 @@ export function SettingsView({
               {...(onNotice ? { onNotice } : {})}
             />
           )}
+
+          {folders && accounts.length > 0 && <ImportExportSection accounts={accounts} folders={folders} />}
 
           <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`}>
             <h2 id={`${id}-accounts`} className="settings__legend">

@@ -5,6 +5,7 @@ import '@fontsource/inter/700.css';
 import '@fontsource/fraunces/600.css';
 import './theme/tokens.css';
 import './app/app.css';
+import './app/planner.css';
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -28,6 +29,7 @@ const api =
     : createMockMailApi({
         now: () => Math.floor(Date.now() / 1000),
         simulateDelivery: true,
+        reminders: true,
         // Signed and encrypted samples, so every security state can be seen.
         messages: [...MOCK_MESSAGES, ...MOCK_SECURITY_MESSAGES],
       });
