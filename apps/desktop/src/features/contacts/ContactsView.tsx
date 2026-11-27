@@ -6,7 +6,11 @@ import type { Account, AddressBookStatus, AppError, Contact, ContactInput, Mailb
 import { useDebounced } from '../../lib/useDebounced';
 import { Avatar } from '../../ui/Avatar';
 import { Icon } from '../../ui/Icon';
+import { MenuButton, MenuItem } from '../../ui/Menu';
 import { ConfirmDialog } from '../../ui/Modal';
+import { AddressBookPicker } from '../files/AddressBookPicker';
+import { useFileTasks } from '../files/FileTasks';
+import { exportContactsTask, importContactsTask } from '../files/tasks';
 
 interface Props {
   accounts: readonly Account[];
@@ -58,6 +62,9 @@ export function ContactsView({ accounts, phone, onClose, onWrite, onFindMail }: 
   const [error, setError] = useState<AppError | null>(null);
   // Syncing starts as soon as the screen opens.
   const [syncing, setSyncing] = useState(true);
+  const files = useFileTasks();
+  /** Import or export is asking which address book. */
+  const [transfer, setTransfer] = useState<'import' | 'export' | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -151,6 +158,24 @@ export function ContactsView({ accounts, phone, onClose, onWrite, onFindMail }: 
         >
           <Icon name="sync" />
         </button>
+        <MenuButton label="More contact options" icon="more" title="Import and export">
+          <MenuItem
+            icon="upload"
+            onSelect={() => {
+              setTransfer('import');
+            }}
+          >
+            Import contacts (.vcf)…
+          </MenuItem>
+          <MenuItem
+            icon="download"
+            onSelect={() => {
+              setTransfer('export');
+            }}
+          >
+            Export contacts…
+          </MenuItem>
+        </MenuButton>
         <button
           type="button"
           className="btn btn--primary contacts__new"
@@ -311,6 +336,29 @@ export function ContactsView({ accounts, phone, onClose, onWrite, onFindMail }: 
           </div>
         )}
       </div>
+
+      {transfer && (
+        <AddressBookPicker
+          mode={transfer}
+          title={transfer === 'import' ? 'Import contacts (.vcf)' : 'Export contacts'}
+          accounts={accounts}
+          initial={syncedBooks[0]?.id ?? null}
+          onClose={() => {
+            setTransfer(null);
+          }}
+          onPick={(accountId) => {
+            const mode = transfer;
+            setTransfer(null);
+            files.run(
+              mode === 'import'
+                ? importContactsTask(api, accounts, accountId, () => {
+                    setRevision((r) => r + 1);
+                  })
+                : exportContactsTask(api, accounts, accountId),
+            );
+          }}
+        />
+      )}
     </section>
   );
 }

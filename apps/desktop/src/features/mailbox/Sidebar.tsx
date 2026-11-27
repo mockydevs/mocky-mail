@@ -2,7 +2,7 @@ import { useState, type CSSProperties, type DragEvent, type MouseEvent } from 'r
 
 import type { Account, Folder, FolderRole } from '../../api/types';
 import { Icon, type IconName } from '../../ui/Icon';
-import { ContextMenu, MenuItem } from '../../ui/Menu';
+import { ContextMenu, MenuItem, MenuSeparator } from '../../ui/Menu';
 import { buildFolderTree, type FolderNode } from './folderTree';
 import { folderLabel, sameView, unifiedCounts, type MailView } from './selectors';
 import { useCollapsedFolders } from './useCollapsedFolders';
@@ -33,6 +33,10 @@ interface Props {
   onFavorite?: (folder: Folder, favorite: boolean) => void;
   /** Every account id in the new order, after dragging one. */
   onReorderAccounts?: (ids: string[]) => void;
+  /** "Import messages into this folder…" in a folder's menu. */
+  onImportInto?: (folder: Folder) => void;
+  /** "Export folder as .mbox…" in a folder's menu. */
+  onExportFolder?: (folder: Folder) => void;
 }
 
 const ROLE_ICONS: Readonly<Record<FolderRole, IconName>> = {
@@ -281,6 +285,8 @@ export function Sidebar({
   onDropFolder,
   onFavorite,
   onReorderAccounts,
+  onImportInto,
+  onExportFolder,
 }: Props) {
   const collapsed = useCollapsedFolders();
   const [openAccountId, setOpenAccountId] = useOpenAccount(view, accounts);
@@ -582,6 +588,27 @@ export function Sidebar({
           >
             Manage folders
           </MenuItem>
+          {(onImportInto ?? onExportFolder) && <MenuSeparator />}
+          {onImportInto && (
+            <MenuItem
+              icon="upload"
+              onSelect={() => {
+                onImportInto(menu.folder);
+              }}
+            >
+              Import messages into this folder…
+            </MenuItem>
+          )}
+          {onExportFolder && (
+            <MenuItem
+              icon="download"
+              onSelect={() => {
+                onExportFolder(menu.folder);
+              }}
+            >
+              Export folder as .mbox…
+            </MenuItem>
+          )}
         </ContextMenu>
       )}
     </nav>
