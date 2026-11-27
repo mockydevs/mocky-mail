@@ -14,6 +14,9 @@ const PETER: Contact = {
   organization: 'Westlands Fit-out',
   title: 'Site manager',
   notes: 'Calls before 10.',
+  favorite: false,
+  categories: [],
+  photo: null,
   state: 'synced',
 };
 

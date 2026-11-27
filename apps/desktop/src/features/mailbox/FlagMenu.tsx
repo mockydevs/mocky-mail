@@ -10,11 +10,13 @@ interface Props {
   due: number | null;
   now: number;
   onFlag: (flag: FlagValue) => void;
+  /** "Add task": a task for this message. */
+  onAddTask?: () => void;
   className?: string;
 }
 
 /** The small menu beside the flag button: flag with a due date, without one, or clear it. */
-export function FlagMenu({ flagged, due, now, onFlag, className }: Props) {
+export function FlagMenu({ flagged, due, now, onFlag, onAddTask, className }: Props) {
   const [picking, setPicking] = useState(false);
   return (
     <>
@@ -52,6 +54,14 @@ export function FlagMenu({ flagged, due, now, onFlag, className }: Props) {
         >
           Clear flag
         </MenuItem>
+        {onAddTask && (
+          <>
+            <MenuSeparator />
+            <MenuItem icon="check" onSelect={onAddTask}>
+              Add task
+            </MenuItem>
+          </>
+        )}
       </MenuButton>
       {picking && (
         <DueDateDialog

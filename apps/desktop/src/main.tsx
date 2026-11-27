@@ -5,6 +5,7 @@ import '@fontsource/inter/700.css';
 import '@fontsource/fraunces/600.css';
 import './theme/tokens.css';
 import './app/app.css';
+import './app/planner.css';
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -20,7 +21,7 @@ if (!root) throw new Error('Missing #root element');
 
 // Inside the desktop app talk to the Rust backend; in a plain browser
 // (vite dev) use the in-memory mock so the interface can be worked on alone.
-const api = '__TAURI_INTERNALS__' in window ? createTauriMailApi() : createMockMailApi({ now: () => Math.floor(Date.now() / 1000), simulateDelivery: true });
+const api = '__TAURI_INTERNALS__' in window ? createTauriMailApi() : createMockMailApi({ now: () => Math.floor(Date.now() / 1000), simulateDelivery: true, reminders: true });
 
 createRoot(root).render(
   <StrictMode>

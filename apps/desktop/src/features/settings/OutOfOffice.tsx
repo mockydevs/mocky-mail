@@ -3,6 +3,7 @@ import { useEffect, useId, useState, type SyntheticEvent } from 'react';
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
 import type { Account, AppError, OutOfOffice as Status, Vacation } from '../../api/types';
+import { ConnectCards, useConnectable } from '../connect/ConnectCard';
 
 interface Props {
   accounts: readonly Account[];
@@ -32,6 +33,8 @@ function summary(status: Status): string {
 export function OutOfOffice({ accounts }: Props) {
   const id = useId();
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? '');
+  const statuses = useConnectable();
+  const account = accounts.find((a) => a.id === accountId);
   return (
     <section className="settings__group" aria-labelledby={`${id}-title`}>
       <h2 id={`${id}-title`} className="settings__legend">
@@ -55,13 +58,14 @@ export function OutOfOffice({ accounts }: Props) {
           </select>
         </label>
       )}
-      {accountId && <AccountReplies key={accountId} accountId={accountId} />}
+      <ConnectCards accounts={accounts} statuses={statuses} />
+      {account && <AccountReplies key={account.id} accountId={account.id} microsoft={account.auth === 'microsoft'} />}
     </section>
   );
 }
 
 /** One account's automatic replies. */
-function AccountReplies({ accountId }: { accountId: string }) {
+function AccountReplies({ accountId, microsoft }: { accountId: string; microsoft: boolean }) {
   const api = useMailApi();
   const [status, setStatus] = useState<Status | null>(null);
   const [form, setForm] = useState<Vacation | null>(null);
@@ -187,6 +191,39 @@ function AccountReplies({ accountId }: { accountId: string }) {
               }}
             />
           </label>
+          {microsoft && (
+            <fieldset className="ooo__outside">
+              <legend className="form-field__label">People outside my organisation</legend>
+              <label className="form-field">
+                <span className="form-field__label">Reply to people outside my organisation</span>
+                <select
+                  className="field"
+                  value={form.externalAudience ?? 'all'}
+                  onChange={(e) => {
+                    set('externalAudience', e.target.value as NonNullable<Vacation['externalAudience']>);
+                  }}
+                >
+                  <option value="none">Don't reply to them</option>
+                  <option value="contacts">Only people in my contacts</option>
+                  <option value="all">Everyone outside</option>
+                </select>
+              </label>
+              {(form.externalAudience ?? 'all') !== 'none' && (
+                <label className="form-field">
+                  <span className="form-field__label">Message for people outside</span>
+                  <textarea
+                    className="field ooo__message"
+                    rows={4}
+                    value={form.externalMessage ?? ''}
+                    placeholder="The same as the message above"
+                    onChange={(e) => {
+                      set('externalMessage', e.target.value === '' ? null : e.target.value);
+                    }}
+                  />
+                </label>
+              )}
+            </fieldset>
+          )}
           <label className="form-field">
             <span className="form-field__label">Reply to the same person</span>
             <select
