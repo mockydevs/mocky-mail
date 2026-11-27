@@ -22,6 +22,8 @@ interface Props {
   onSettings: () => void;
   onContacts: () => void;
   onCalendar: () => void;
+  /** Open Tasks; missing: no Tasks entry. */
+  onTasks?: () => void;
   /** Open "Manage folders" for an account. */
   onManageFolders: (accountId: string) => void;
   onAddAccount: () => void;
@@ -279,6 +281,7 @@ export function Sidebar({
   onSettings,
   onContacts,
   onCalendar,
+  onTasks,
   onManageFolders,
   onAddAccount,
   drag = null,
@@ -552,6 +555,12 @@ export function Sidebar({
             <Icon name="calendar" />
             Calendar
           </button>
+          {onTasks && (
+            <button type="button" className="nav__item" onClick={onTasks}>
+              <Icon name="check" />
+              Tasks
+            </button>
+          )}
           <button type="button" className="nav__item" onClick={onContacts}>
             <Icon name="people" />
             Contacts

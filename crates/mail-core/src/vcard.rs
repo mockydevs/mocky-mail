@@ -31,11 +31,56 @@ pub struct ContactCard {
     pub title: String,
     /// Free text (`NOTE`).
     pub notes: String,
+    /// Shown first (`X-MOCKY-FAVORITE`).
+    #[serde(default)]
+    pub favorite: bool,
+    /// Category names (`CATEGORIES`).
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// A small picture as a `data:` URL (`PHOTO`, when the card holds the
+    /// picture itself and it is at most [`MAX_PHOTO_BYTES`]).
+    #[serde(default)]
+    pub photo: Option<String>,
+}
+
+/// Largest picture kept with a contact, bytes (before base64).
+pub const MAX_PHOTO_BYTES: usize = 200 * 1024;
+
+/// Picture types a contact photo may be.
+const PHOTO_TYPES: &[(&str, &str)] = &[
+    ("image/jpeg", "JPEG"),
+    ("image/png", "PNG"),
+    ("image/gif", "GIF"),
+    ("image/webp", "WEBP"),
+];
+
+/// A contact group (a list): its `UID`, name and members' `UID`s.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupCard {
+    /// Stable id inside the card.
+    pub uid: String,
+    /// The group's name.
+    pub name: String,
+    /// Members, by their cards' `UID`.
+    pub members: Vec<String>,
 }
 
 /// Properties [`write`] owns; everything else in an original card is kept.
 const MANAGED: &[&str] = &[
-    "FN", "N", "EMAIL", "TEL", "ORG", "TITLE", "NOTE", "UID", "VERSION", "PRODID", "REV",
+    "FN",
+    "N",
+    "EMAIL",
+    "TEL",
+    "ORG",
+    "TITLE",
+    "NOTE",
+    "UID",
+    "VERSION",
+    "PRODID",
+    "REV",
+    "CATEGORIES",
+    "X-MOCKY-FAVORITE",
 ];
 
 /// One content line: name (no group, upper case), parameters, raw value.
@@ -207,6 +252,30 @@ pub fn parse(text: &str) -> Option<ContactCard> {
             }
             "TITLE" => card.title = clean(&unescape(line.value)),
             "NOTE" => unescape(line.value).trim().clone_into(&mut card.notes),
+            "CATEGORIES" => {
+                for name in split_list(line.value) {
+                    if !card
+                        .categories
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(&name))
+                    {
+                        card.categories.push(name);
+                    }
+                }
+            }
+            "X-MOCKY-FAVORITE" => {
+                card.favorite = matches!(
+                    line.value.trim().to_ascii_uppercase().as_str(),
+                    "1" | "TRUE" | "YES"
+                );
+            }
+            "PHOTO" if card.photo.is_none() => card.photo = photo_of(line.params, line.value),
+            "KIND" | "X-ADDRESSBOOKSERVER-KIND"
+                if line.value.trim().eq_ignore_ascii_case("group") =>
+            {
+                // A group, not a person: see [`parse_group`].
+                return None;
+            }
             _ => {}
         }
     }
@@ -217,6 +286,208 @@ pub fn parse(text: &str) -> Option<ContactCard> {
         return None;
     }
     Some(card)
+}
+
+/// Values of a comma-separated text list (`CATEGORIES`), unescaped.
+fn split_list(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push('\\');
+                    current.push(next);
+                }
+            }
+            ',' => out.push(std::mem::take(&mut current)),
+            c => current.push(c),
+        }
+    }
+    out.push(current);
+    out.into_iter()
+        .map(|c| clean(&unescape(&c)))
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// The MIME type of a picture from its first bytes, if it is one the app
+/// keeps (JPEG, PNG, GIF, WebP).
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() > 12
+        && bytes.get(..4) == Some(b"RIFF")
+        && bytes.get(8..12) == Some(b"WEBP")
+    {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// A `PHOTO` line's picture as a `data:` URL, when the card holds the
+/// picture itself (base64, vCard 3 or 4) and it is small enough. Pictures
+/// given by address (`https:`) aren't fetched.
+fn photo_of(params: &str, value: &str) -> Option<String> {
+    use base64::Engine as _;
+    let value = value.trim();
+    let data: String = if let Some(rest) = value.strip_prefix("data:") {
+        let (head, data) = rest.split_once(',')?;
+        if !head.to_ascii_lowercase().contains(";base64") {
+            return None;
+        }
+        data.to_owned()
+    } else {
+        let upper = params.to_ascii_uppercase();
+        if !(upper.contains("ENCODING=B") || upper.contains("ENCODING=BASE64")) {
+            return None;
+        }
+        value.to_owned()
+    };
+    let data: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    if data.len() > MAX_PHOTO_BYTES.div_ceil(3).saturating_mul(4) {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .ok()?;
+    let kind = sniff_image(&bytes)?;
+    Some(format!("data:{kind};base64,{data}"))
+}
+
+/// Check a picture from the editor: a `data:` URL of a JPEG, PNG, GIF or
+/// WebP of at most [`MAX_PHOTO_BYTES`]. Returns it tidied.
+///
+/// # Errors
+/// A message for the user.
+pub fn checked_photo(url: &str) -> Result<String, &'static str> {
+    let url = url.trim();
+    let Some(rest) = url.strip_prefix("data:") else {
+        return Err("Choose a picture file for the contact.");
+    };
+    let Some((head, data)) = rest.split_once(',') else {
+        return Err("Choose a picture file for the contact.");
+    };
+    if !head.to_ascii_lowercase().ends_with(";base64") {
+        return Err("Choose a picture file for the contact.");
+    }
+    if data.len() > MAX_PHOTO_BYTES.div_ceil(3).saturating_mul(4) {
+        return Err("That picture is too large. Choose one under 200 KB.");
+    }
+    photo_of("", &format!("data:{head},{data}"))
+        .ok_or("That picture can't be used. Choose a JPEG, PNG, GIF or WebP.")
+}
+
+/// The `PHOTO` line for a picture (`data:` URL) in a vCard 3.0.
+fn photo_line(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("data:")?;
+    let (head, data) = rest.split_once(',')?;
+    let mime = head.split(';').next().unwrap_or_default();
+    let kind = PHOTO_TYPES
+        .iter()
+        .find(|(m, _)| m.eq_ignore_ascii_case(mime))
+        .map(|(_, k)| *k)?;
+    Some(format!("PHOTO;ENCODING=b;TYPE={kind}:{data}"))
+}
+
+/// Whether a card is a group (`KIND:group`, or Apple's
+/// `X-ADDRESSBOOKSERVER-KIND:group`).
+#[must_use]
+pub fn is_group(text: &str) -> bool {
+    card_lines(&unfold(text)).iter().any(|(line, _)| {
+        matches!(line.name.as_str(), "KIND" | "X-ADDRESSBOOKSERVER-KIND")
+            && line.value.trim().eq_ignore_ascii_case("group")
+    })
+}
+
+/// Read a group card. Members are named by `MEMBER` (vCard 4) or
+/// `X-ADDRESSBOOKSERVER-MEMBER` (Apple), as `urn:uuid:<UID>`.
+#[must_use]
+pub fn parse_group(text: &str) -> Option<GroupCard> {
+    if text.len() > MAX_VCARD_BYTES || !is_group(text) {
+        return None;
+    }
+    let unfolded = unfold(text);
+    let mut group = GroupCard::default();
+    for (line, _) in card_lines(&unfolded) {
+        match line.name.as_str() {
+            "UID" => unescape(line.value).trim().clone_into(&mut group.uid),
+            "FN" => group.name = clean(&unescape(line.value)),
+            "N" if group.name.is_empty() => {
+                group.name = components(line.value)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+            }
+            "MEMBER" | "X-ADDRESSBOOKSERVER-MEMBER" => {
+                let value = unescape(line.value);
+                let value = value.trim();
+                let uid = value
+                    .get(..9)
+                    .filter(|p| p.eq_ignore_ascii_case("urn:uuid:"))
+                    .and_then(|_| value.get(9..))
+                    .unwrap_or(value)
+                    .trim();
+                if !uid.is_empty() && !group.members.iter().any(|m| m == uid) {
+                    group.members.push(uid.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    (!group.name.is_empty()).then_some(group)
+}
+
+/// Write a group card, Apple style (vCard 3.0 with
+/// `X-ADDRESSBOOKSERVER-KIND:group`, which `CardDAV` servers and Apple,
+/// Thunderbird and `SOGo` clients read). With `original`, properties the
+/// app doesn't own are kept.
+#[must_use]
+pub fn write_group(group: &GroupCard, original: Option<&str>) -> String {
+    const OWNED: &[&str] = &[
+        "FN",
+        "N",
+        "UID",
+        "VERSION",
+        "PRODID",
+        "REV",
+        "KIND",
+        "X-ADDRESSBOOKSERVER-KIND",
+        "MEMBER",
+        "X-ADDRESSBOOKSERVER-MEMBER",
+    ];
+    let unfolded = original.map(unfold).unwrap_or_default();
+    let mut out = String::new();
+    fold("BEGIN:VCARD", &mut out);
+    fold("VERSION:3.0", &mut out);
+    fold("PRODID:-//Mocky Digital//Mocky Mail//EN", &mut out);
+    fold(&format!("UID:{}", escape(&group.uid)), &mut out);
+    let name = clean(&group.name);
+    fold(&format!("FN:{}", escape(&name)), &mut out);
+    fold(&format!("N:{};;;;", escape(&name)), &mut out);
+    fold("X-ADDRESSBOOKSERVER-KIND:group", &mut out);
+    for member in &group.members {
+        let member: String = member.chars().filter(|c| !c.is_control()).collect();
+        if !member.trim().is_empty() {
+            fold(
+                &format!("X-ADDRESSBOOKSERVER-MEMBER:urn:uuid:{}", member.trim()),
+                &mut out,
+            );
+        }
+    }
+    for (line, raw) in card_lines(&unfolded) {
+        if !OWNED.contains(&line.name.as_str()) {
+            fold(raw, &mut out);
+        }
+    }
+    fold("END:VCARD", &mut out);
+    out
 }
 
 /// One line of text: control characters dropped, spaces collapsed.
@@ -321,6 +592,7 @@ pub(crate) fn fold(line: &str, out: &mut String) {
 /// name is the same, and each address and number that is still there
 /// keeps its line as written, with its type and group.
 #[must_use]
+#[allow(clippy::too_many_lines, reason = "one property after another")]
 pub fn write(card: &ContactCard, original: Option<&str>) -> String {
     let unfolded = original.map(unfold).unwrap_or_default();
     let old_lines = card_lines(&unfolded);
@@ -415,9 +687,32 @@ pub fn write(card: &ContactCard, original: Option<&str>) -> String {
     if !card.notes.trim().is_empty() {
         fold(&format!("NOTE:{}", escape(card.notes.trim())), &mut out);
     }
-    // Everything else the original had (photos, addresses, birthdays…).
+    let categories: Vec<String> = card
+        .categories
+        .iter()
+        .map(|c| clean(c))
+        .filter(|c| !c.is_empty())
+        .map(|c| escape(&c))
+        .collect();
+    if !categories.is_empty() {
+        fold(&format!("CATEGORIES:{}", categories.join(",")), &mut out);
+    }
+    if card.favorite {
+        fold("X-MOCKY-FAVORITE:1", &mut out);
+    }
+    // The picture: the server's line while it is the same picture; a new
+    // one in its place; none when it was removed here. A picture the app
+    // doesn't hold (given by address, or too large) stays as it was.
+    let old_photo = original.and_then(parse).and_then(|c| c.photo);
+    let photo_unchanged = card.photo.is_some() && card.photo == old_photo;
+    let keep_old_photos = photo_unchanged || (card.photo.is_none() && old_photo.is_none());
+    if !photo_unchanged && let Some(line) = card.photo.as_deref().and_then(photo_line) {
+        fold(&line, &mut out);
+    }
+    // Everything else the original had (addresses, birthdays…).
     for (line, raw) in &old_lines {
-        if !MANAGED.contains(&line.name.as_str()) {
+        let photo = line.name == "PHOTO";
+        if (!photo && !MANAGED.contains(&line.name.as_str())) || (photo && keep_old_photos) {
             fold(raw, &mut out);
         }
     }
@@ -530,6 +825,7 @@ mod tests {
             organization: "Kamau; Sons".into(),
             title: String::new(),
             notes: "Line one\nLine, two".into(),
+            ..ContactCard::default()
         };
         let out = write(&c, None);
         assert!(out.starts_with("BEGIN:VCARD\r\nVERSION:3.0\r\n"));
@@ -538,6 +834,84 @@ mod tests {
         assert!(out.contains("ORG:Kamau\\; Sons\r\n"));
         assert!(out.contains("NOTE:Line one\\nLine\\, two\r\n"));
         assert_eq!(parse(&out).unwrap(), c);
+    }
+
+    /// A 1x1 PNG.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn favourites_categories_and_photos() {
+        let photo = format!("data:image/png;base64,{PNG}");
+        let c = ContactCard {
+            uid: "p-1".into(),
+            name: "Amina Hassan".into(),
+            emails: vec!["amina@studio.example".into()],
+            favorite: true,
+            categories: vec!["Clients".into(), "Red, urgent".into()],
+            photo: Some(photo.clone()),
+            ..ContactCard::default()
+        };
+        let out = write(&c, None);
+        assert!(out.contains("X-MOCKY-FAVORITE:1\r\n"));
+        assert!(out.contains("CATEGORIES:Clients,Red\\, urgent\r\n"));
+        assert!(unfold(&out).contains(&format!("PHOTO;ENCODING=b;TYPE=PNG:{PNG}")));
+        assert_eq!(parse(&out).unwrap(), c);
+
+        // vCard 4 data URLs are read too; pictures by address are not
+        // fetched, and stay on the card when it is edited.
+        let v4 = format!(
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:A\r\nPHOTO:data:image/png;base64,{PNG}\r\nEND:VCARD\r\n"
+        );
+        assert_eq!(parse(&v4).unwrap().photo.as_deref(), Some(photo.as_str()));
+        let by_address = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:A\r\nPHOTO;VALUE=uri:https://lh3.example/p.jpg\r\nEND:VCARD\r\n";
+        let read = parse(by_address).unwrap();
+        assert_eq!(read.photo, None);
+        assert!(
+            write(&read, Some(by_address)).contains("PHOTO;VALUE=uri:https://lh3.example/p.jpg")
+        );
+        // Removed here: gone from the card; replaced: only the new one.
+        let removed = ContactCard {
+            photo: None,
+            ..parse(&v4).unwrap()
+        };
+        assert!(!write(&removed, Some(&v4)).contains("PHOTO"));
+        let replaced = ContactCard {
+            photo: Some(format!("data:image/png;base64,{PNG}")),
+            ..parse(by_address).unwrap()
+        };
+        assert_eq!(
+            write(&replaced, Some(by_address)).matches("PHOTO").count(),
+            1
+        );
+
+        // Pictures from the editor are checked.
+        assert_eq!(checked_photo(&photo).unwrap(), photo);
+        assert!(checked_photo("https://x.example/a.png").is_err());
+        assert!(checked_photo("data:image/png;base64,bm90IGEgcGljdHVyZQ==").is_err());
+        let huge = format!("data:image/png;base64,{}", "A".repeat(300_000));
+        assert!(checked_photo(&huge).is_err());
+    }
+
+    #[test]
+    fn group_cards() {
+        let apple = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:g-1\r\nFN:Site team\r\nN:Site team;;;;\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:p-1\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:p-2\r\nEND:VCARD\r\n";
+        assert!(is_group(apple));
+        // A group is not a person.
+        assert_eq!(parse(apple), None);
+        let g = parse_group(apple).unwrap();
+        assert_eq!(g.uid, "g-1");
+        assert_eq!(g.name, "Site team");
+        assert_eq!(g.members, ["p-1", "p-2"]);
+        let v4 = "BEGIN:VCARD\r\nVERSION:4.0\r\nKIND:group\r\nFN:Board\r\nUID:g-2\r\nMEMBER:urn:uuid:p-9\r\nEND:VCARD\r\n";
+        assert_eq!(parse_group(v4).unwrap().members, ["p-9"]);
+        let edited = GroupCard {
+            members: vec!["p-2".into(), "p-3".into()],
+            ..g
+        };
+        let out = write_group(&edited, Some(apple));
+        assert_eq!(parse_group(&out).unwrap(), edited);
+        assert_eq!(out.matches("X-ADDRESSBOOKSERVER-KIND").count(), 1);
+        assert!(parse_group(SOGO).is_none());
     }
 
     #[test]

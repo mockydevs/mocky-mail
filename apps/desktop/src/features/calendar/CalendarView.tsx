@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
@@ -6,35 +6,35 @@ import type { Account, AppError, CalendarEvent, CalendarInfo, CalendarStatus, Ev
 import { Icon } from '../../ui/Icon';
 import { MenuButton, MenuGroup, MenuItem } from '../../ui/Menu';
 import { Modal } from '../../ui/Modal';
+import { ConnectCards } from '../connect/ConnectCard';
 import { useFileTasks } from '../files/FileTasks';
 import { exportCalendarTask, importCalendarTask } from '../files/tasks';
+import { CalendarList, MiniMonth } from './CalendarSide';
 import {
   addDays,
   addMonths,
   byDay,
   cssColor,
-  DAY,
   dayKey,
   dayText,
-  deviceZone,
   eventDays,
   fromDayKey,
-  fromInputs,
   monthGrid,
-  reminderText,
-  repeatText,
   seconds,
   startOfDay,
   timeText,
-  timeValue,
-  utcMidnight,
-  whenText,
+  viewDays,
+  weekdayNames,
   type DayKey,
 } from './calendarTime';
+import { EventCard } from './EventCard';
+import { EventEditor } from './EventEditor';
+import { copiedInput, formFrom, movedInput, newForm, toInput, type Form } from './eventForm';
+import { TimeGrid, type GridColumn, type SlotRange } from './TimeGrid';
 
 interface Props {
   accounts: readonly Account[];
-  /** Phone layout: the agenda, and details or the editor fill the screen. */
+  /** Phone layout: day, month and agenda; details or the editor fill the screen. */
   phone: boolean;
   onClose: () => void;
   /** Start a message to these people. */
@@ -43,119 +43,61 @@ interface Props {
   defaultReminder: number;
   /** Today, for tests. */
   today?: Date;
+  /** Open this event (from a reminder): its id and when that date starts. */
+  focus?: { eventId: string; at: number } | null;
 }
 
-/** Reminder choices in the editor, minutes before (-1: none). */
-const REMINDERS = [-1, 0, 5, 10, 15, 30, 60, 120, 1440, 10080];
+type Mode = 'day' | 'workweek' | 'week' | 'month' | 'agenda';
 
-type Mode = 'month' | 'agenda';
+const MODE_LABEL: Record<Mode, string> = {
+  day: 'Day',
+  workweek: 'Work week',
+  week: 'Week',
+  month: 'Month',
+  agenda: 'Agenda',
+};
+const COMPUTER_MODES: Mode[] = ['day', 'workweek', 'week', 'month', 'agenda'];
+const PHONE_MODES: Mode[] = ['day', 'month', 'agenda'];
 
-/** What the editor holds: dates and times as the inputs show them. */
-interface Form {
-  id?: string;
-  calendarId: string;
-  title: string;
-  location: string;
-  notes: string;
-  allDay: boolean;
-  startDay: DayKey;
-  startTime: string;
-  endDay: DayKey;
-  endTime: string;
-  repeat: EventInput['repeat'];
-  /** The series had a rule the editor can't show. */
-  customRule: boolean;
-  /** Minutes before (-1: none), or 'keep' for reminders set elsewhere. */
-  reminder: number | 'keep';
+type Pane =
+  | { kind: 'day' }
+  | { kind: 'view'; event: CalendarEvent }
+  | { kind: 'edit'; form: Form; series: boolean; event?: CalendarEvent; readOnly: string | null };
+
+/** A question before saving or deleting. */
+type Ask =
+  | { kind: 'scope'; event: CalendarEvent; run: (scope: 'this' | 'all') => void }
+  | { kind: 'notify'; title: string; description: string; yes: string; no: string; run: (notify: boolean) => void };
+
+const MONTH = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' });
+const MONTH_ONLY = new Intl.DateTimeFormat(undefined, { month: 'long' });
+const DAY_TITLE = new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+/** "November 2026", or "November – December 2026" for a week across two months. */
+function rangeTitle(days: readonly Date[]): string {
+  const first = days[0] ?? new Date();
+  const last = days[days.length - 1] ?? first;
+  if (first.getMonth() === last.getMonth()) return MONTH.format(first);
+  if (first.getFullYear() === last.getFullYear()) return `${MONTH_ONLY.format(first)} – ${MONTH.format(last)}`;
+  return `${MONTH.format(first)} – ${MONTH.format(last)}`;
 }
 
-type Pane = { kind: 'day' } | { kind: 'view'; event: CalendarEvent } | { kind: 'edit'; form: Form; series: boolean };
-
-const MONTH = new Intl.DateTimeFormat(undefined, {
-  month: 'long',
-  year: 'numeric',
-});
-const WEEKDAYS = Array.from({ length: 7 }, (_, i) =>
-  new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(new Date(2024, 0, 1 + i)),
-);
-
-function formFrom(e: CalendarEvent): Form {
-  const [first, last] = eventDays(e);
-  return {
-    id: e.id,
-    calendarId: e.calendarId,
-    title: e.title,
-    location: e.location,
-    notes: e.notes,
-    allDay: e.allDay,
-    startDay: dayKey(first),
-    startTime: e.allDay ? '09:00' : timeValue(new Date(e.start * 1000)),
-    endDay: dayKey(last),
-    endTime: e.allDay ? '10:00' : timeValue(new Date(e.end * 1000)),
-    repeat: e.repeat === 'custom' ? 'keep' : e.repeat,
-    customRule: e.repeat === 'custom',
-    reminder: reminderChoice(e.reminders),
-  };
-}
-
-/** An event's reminders as one editor choice, or 'keep' when it can't show them. */
-function reminderChoice(reminders: readonly number[]): Form['reminder'] {
-  const [only, ...rest] = reminders;
-  if (only === undefined) return -1;
-  return rest.length === 0 && REMINDERS.includes(only) ? only : 'keep';
-}
-
-function newForm(day: Date, calendarId: string, now: Date, reminder: number): Form {
-  // Today: the next whole hour; another day: 9:00.
-  const isToday = dayKey(day) === dayKey(now);
-  const hour = isToday ? Math.min(now.getHours() + 1, 23) : 9;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return {
-    calendarId,
-    title: '',
-    location: '',
-    notes: '',
-    allDay: false,
-    startDay: dayKey(day),
-    startTime: `${pad(hour)}:00`,
-    endDay: dayKey(day),
-    endTime: `${pad(Math.min(hour + 1, 23))}:${hour === 23 ? '59' : '00'}`,
-    repeat: 'none',
-    customRule: false,
-    reminder,
-  };
-}
-
-function toInput(form: Form): EventInput | string {
-  const start = form.allDay ? utcMidnight(form.startDay) : fromInputs(form.startDay, form.startTime);
-  const end = form.allDay ? utcMidnight(form.endDay) + DAY : fromInputs(form.endDay, form.endTime);
-  if (!form.startDay || !form.endDay) return 'Choose a date for the event.';
-  if (end < start || (form.allDay && end <= start)) return 'The event ends before it starts.';
-  return {
-    ...(form.id ? { id: form.id } : {}),
-    calendarId: form.calendarId,
-    title: form.title,
-    location: form.location,
-    notes: form.notes,
-    allDay: form.allDay,
-    start,
-    end,
-    repeat: form.repeat,
-    timeZone: deviceZone(),
-    reminders: form.reminder === 'keep' ? null : form.reminder < 0 ? [] : [form.reminder],
-  };
-}
+const typing = (target: EventTarget) =>
+  target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
 
 /**
- * The calendar: each account's calendars on its mail server (CalDAV, for
- * example SOGo), kept on the device so they show offline. A month view and
- * an agenda; add, edit and delete events (one date of a series, or all).
+ * The calendar: each account's calendars (CalDAV, Google or Microsoft),
+ * kept on the device so they show offline. Day, work week, week, month and
+ * agenda views; calendars shown or hidden from a list beside them; add,
+ * edit, drag and delete events (one date of a series, or all); invite
+ * people and find a time that suits them.
  */
-export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminder, today }: Props) {
+export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminder, today, focus }: Props) {
   const api = useMailApi();
   const files = useFileTasks();
   const id = useId();
-  const now = useMemo(() => today ?? new Date(), [today]);
+  const [clock, setClock] = useState(() => today ?? new Date());
+  const now = today ?? clock;
   const [mode, setMode] = useState<Mode>(phone ? 'agenda' : 'month');
   const [month, setMonth] = useState(() => new Date(now.getFullYear(), now.getMonth(), 1));
   const [selected, setSelected] = useState<Date>(() => startOfDay(now));
@@ -171,6 +113,21 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(true);
   const [deleting, setDeleting] = useState<CalendarEvent | null>(null);
+  const [ask, setAsk] = useState<Ask | null>(null);
+  const [sideBySide, setSideBySide] = useState(false);
+  const [drawer, setDrawer] = useState(false);
+  const [pendingFocus, setPendingFocus] = useState<{ eventId: string; at: number } | null>(null);
+
+  // The now-line and "today" move on by themselves.
+  useEffect(() => {
+    if (today) return;
+    const timer = window.setInterval(() => {
+      setClock(new Date());
+    }, 60_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [today]);
 
   // Escape (and the phone's Back) closes an event or the editor first.
   const open = useRef(false);
@@ -181,7 +138,7 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     // Heard on the way down from the document, wherever focus is (the
     // sidebar, the page itself), and before the app's own Esc, which would
     // close the whole calendar and with it the event being edited.
-    const onKey = (ev: KeyboardEvent) => {
+    const onKey = (ev: globalThis.KeyboardEvent) => {
       if (ev.key !== 'Escape' || !open.current) return;
       // Another dialog on top answers Esc itself.
       if (document.querySelector('[aria-modal="true"]')) return;
@@ -196,14 +153,34 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     };
   }, []);
 
+  // A reminder's "Open": go to that date, then open the event once it's loaded.
+  const focusKey = focus ? `${focus.eventId}:${String(focus.at)}` : '';
+  const [seenFocus, setSeenFocus] = useState('');
+  if (focus && focusKey !== seenFocus) {
+    setSeenFocus(focusKey);
+    const day = startOfDay(new Date(focus.at * 1000));
+    setSelected(day);
+    setMonth(new Date(day.getFullYear(), day.getMonth(), 1));
+    if (mode === 'agenda') setMode(phone ? 'day' : 'month');
+    setPendingFocus(focus);
+  }
+
+  const gridMode = mode === 'day' || mode === 'workweek' || mode === 'week';
+  const selectedKey = dayKey(selected);
+  const days = useMemo(
+    () => (mode === 'day' || mode === 'workweek' || mode === 'week' ? viewDays(mode, fromDayKey(selectedKey)) : []),
+    [mode, selectedKey],
+  );
   const grid = useMemo(() => monthGrid(month), [month]);
   const first = grid[0] ?? month;
   const last = grid[grid.length - 1] ?? month;
+  const from = seconds(gridMode ? (days[0] ?? selected) : mode === 'month' ? first : month);
+  const to = seconds(
+    gridMode ? addDays(days[days.length - 1] ?? selected, 1) : mode === 'month' ? addDays(last, 1) : addMonths(month, 1),
+  );
 
   useEffect(() => {
     let live = true;
-    const from = seconds(mode === 'month' ? first : month);
-    const to = seconds(mode === 'month' ? addDays(last, 1) : addMonths(month, 1));
     api.listEvents(from, to).then(
       (list) => {
         if (!live) return;
@@ -223,7 +200,7 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     return () => {
       live = false;
     };
-  }, [api, mode, month, first, last, revision]);
+  }, [api, from, to, revision]);
 
   // Sync when opened; refresh whenever a sync or a change finishes.
   useEffect(() => {
@@ -244,36 +221,71 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     return off;
   }, [api]);
 
-  const days = useMemo(() => byDay(events ?? []), [events]);
-  const calendarName = (calendarId: string) => calendars.find((c) => c.id === calendarId)?.name ?? 'Calendar';
-  const writable = calendars.filter((c) => accounts.some((a) => a.id === c.accountId));
+  const known = calendars.filter((c) => accounts.some((a) => a.id === c.accountId));
+  const hiddenKey = known
+    .filter((c) => !c.visible)
+    .map((c) => c.id)
+    .join(' ');
+  const hidden = new Set(hiddenKey.split(' '));
+  const shown = (events ?? []).filter((e) => !hidden.has(e.calendarId));
+  const byDays = byDay(shown);
+  const calendarOf = (calendarId: string) => calendars.find((c) => c.id === calendarId);
+  const calendarName = (calendarId: string) => calendarOf(calendarId)?.name ?? 'Calendar';
+  const writable = known.filter((c) => c.writable);
+  const defaultCalendar = writable.find((c) => c.visible) ?? writable[0];
   /** A calendar's name, with its account's address when that tells two apart. */
   const calendarTitle = (c: CalendarInfo) => {
     const email = accounts.find((a) => a.id === c.accountId)?.email;
     return email ? `${c.name} (${email})` : c.name;
   };
+  const ownEmails = accounts.map((a) => a.email);
 
-  const startNew = (day: Date) => {
-    const target = writable[0];
+  // Once the reminder's event is loaded, open it.
+  const focused =
+    pendingFocus && events
+      ? (events.find((e) => e.id === pendingFocus.eventId && e.start === pendingFocus.at) ??
+        events.find((e) => e.id === pendingFocus.eventId))
+      : undefined;
+  if (focused) {
+    setPendingFocus(null);
+    setPane({ kind: 'view', event: focused });
+  }
+
+  /** Why an event can't be changed here, or null. */
+  const readOnlyReason = (e: CalendarEvent): string | null => {
+    const cal = calendarOf(e.calendarId);
+    if (cal && !cal.writable) return `${cal.name} is read-only. You can change your own reminders.`;
+    if (!e.isOrganizer) {
+      const who = e.organizer ? (e.organizer.name ?? e.organizer.email) : 'Someone else';
+      return `${who} organises this event, so only they can change it. You can change your own reminders; answer from the invitation email.`;
+    }
+    return null;
+  };
+  const canEdit = (e: CalendarEvent) => readOnlyReason(e) === null;
+
+  const startNew = (day: Date, startMins?: number, lengthMins?: number, allDay = false, calendarId?: string | null, title = '') => {
+    const target = (calendarId ? writable.find((c) => c.id === calendarId) : undefined) ?? defaultCalendar;
     if (!target) return;
     setError(null);
-    setPane({
-      kind: 'edit',
-      form: newForm(day, target.id, now, defaultReminder),
-      series: false,
-    });
+    const form = newForm(day, target.id, now, defaultReminder, startMins, lengthMins, allDay);
+    setPane({ kind: 'edit', form: { ...form, title }, series: false, readOnly: null });
   };
 
-  const openEditor = (e: CalendarEvent) => {
+  const openEditor = (e: CalendarEvent, onlyThisDate = false) => {
     setError(null);
+    const readOnly = readOnlyReason(e);
+    if (onlyThisDate && e.recurrenceId !== null) {
+      setPane({ kind: 'edit', form: formFrom(e, ownEmails, e.recurrenceId), series: false, event: e, readOnly });
+      return;
+    }
     if (!e.recurring) {
-      setPane({ kind: 'edit', form: formFrom(e), series: false });
+      setPane({ kind: 'edit', form: formFrom(e, ownEmails), series: false, event: e, readOnly });
       return;
     }
     // A series is edited from its first date.
     api.getEvent(e.id).then(
       (master) => {
-        setPane({ kind: 'edit', form: formFrom(master), series: true });
+        setPane({ kind: 'edit', form: formFrom(master, ownEmails), series: true, event: master, readOnly });
       },
       (err: unknown) => {
         setError(toAppError(err));
@@ -281,19 +293,17 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     );
   };
 
-  const save = (form: Form) => {
-    const input = toInput(form);
-    if (typeof input === 'string') {
-      setError({ kind: 'invalid', message: input });
-      return;
-    }
+  /** Save, then show the event (`show`) or stay where the user is. */
+  const commit = (input: EventInput, show: boolean) => {
     setBusy(true);
     setError(null);
     api.saveEvent(input).then(
       (saved) => {
         setBusy(false);
-        setSelected(eventDays(saved)[0]);
-        setPane({ kind: 'view', event: saved });
+        if (show) {
+          setSelected(eventDays(saved)[0]);
+          setPane({ kind: 'view', event: saved });
+        }
         setRevision((r) => r + 1);
       },
       (e: unknown) => {
@@ -303,7 +313,94 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     );
   };
 
-  const remove = (e: CalendarEvent, onlyThisDate: boolean) => {
+  /**
+   * Whether to email the people invited: Microsoft sends invitations and
+   * updates itself, so it isn't asked there.
+   */
+  const withNotify = (
+    input: EventInput,
+    people: number,
+    isNew: boolean,
+    then: (input: EventInput) => void,
+  ) => {
+    const provider = calendarOf(input.calendarId)?.provider;
+    if (people === 0) {
+      then(input);
+      return;
+    }
+    if (provider === 'microsoft') {
+      then({ ...input, notifyAttendees: true });
+      return;
+    }
+    const n = people === 1 ? 'the person' : `the ${String(people)} people`;
+    setAsk({
+      kind: 'notify',
+      title: isNew ? 'Send invitations?' : 'Send updates?',
+      description: isNew
+        ? `Email an invitation to ${n} you invited?`
+        : `Let ${n} invited know about the change?`,
+      yes: 'Send',
+      no: "Don't send",
+      run: (notify) => {
+        then({ ...input, notifyAttendees: notify });
+      },
+    });
+  };
+
+  const save = (form: Form, current: Extract<Pane, { kind: 'edit' }>) => {
+    const editable = current.readOnly === null;
+    const input = toInput(form, editable);
+    if (typeof input === 'string') {
+      setError({ kind: 'invalid', message: input });
+      return;
+    }
+    const invited = input.attendees ?? [];
+    const added = invited.some((a) => !form.invited.includes(a.toLowerCase()));
+    const removed = form.invited.some((a) => !invited.some((b) => b.toLowerCase() === a));
+    const people = editable ? Math.max(invited.length, removed ? form.invited.length : 0) : 0;
+    withNotify(input, people, !form.id || added, (next) => {
+      commit(next, true);
+    });
+  };
+
+  /** An event was dragged or resized in the time grid. */
+  const moveEvent = (e: CalendarEvent, start: number, end: number, copy: boolean) => {
+    if (copy) {
+      commit(copiedInput(e, start, end), false);
+      return;
+    }
+    const people = e.isOrganizer ? e.attendees.filter((p) => !ownEmails.includes(p.email)).length : 0;
+    const go = (input: EventInput) => {
+      withNotify(input, people, false, (next) => {
+        commit(next, false);
+      });
+    };
+    if (e.recurring && e.recurrenceId !== null) {
+      const occurrence = e.recurrenceId;
+      setAsk({
+        kind: 'scope',
+        event: e,
+        run: (scope) => {
+          if (scope === 'this') {
+            go({ ...movedInput(e, start, end), occurrence, scope: 'this' });
+            return;
+          }
+          api.getEvent(e.id).then(
+            (master) => {
+              go({ ...movedInput(master, master.start + (start - e.start), master.end + (end - e.end)), scope: 'all' });
+            },
+            (err: unknown) => {
+              setError(toAppError(err));
+            },
+          );
+        },
+      });
+      return;
+    }
+    go(movedInput(e, start, end));
+  };
+
+  const remove = (e: CalendarEvent, onlyThisDate: boolean, notify: boolean) => {
     setDeleting(null);
     setBusy(true);
     // Without a date to remove, "only this date" must never reach the
@@ -313,41 +410,116 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
       setError({ kind: 'invalid', message: 'Open the date you want to remove from the calendar, then delete it there.' });
       return;
     }
-    api.deleteEvent(e.id, onlyThisDate ? e.recurrenceId : null).then(
-      () => {
-        setBusy(false);
-        setPane({ kind: 'day' });
-        setRevision((r) => r + 1);
-      },
-      (err: unknown) => {
-        setBusy(false);
-        setError(toAppError(err));
-      },
-    );
+    const done = () => {
+      setBusy(false);
+      setPane({ kind: 'day' });
+      setRevision((r) => r + 1);
+    };
+    const failed = (err: unknown) => {
+      setBusy(false);
+      setError(toAppError(err));
+    };
+    if (notify) api.deleteEvent(e.id, onlyThisDate ? e.recurrenceId : null, true).then(done, failed);
+    else api.deleteEvent(e.id, onlyThisDate ? e.recurrenceId : null).then(done, failed);
   };
 
-  const goMonth = (n: number) => {
-    setMonth((m) => addMonths(m, n));
+  /** Delete, asking which dates of a series, and whether to tell the people invited. */
+  const removeAsking = (e: CalendarEvent, onlyThisDate: boolean) => {
+    const people = e.isOrganizer ? e.attendees.filter((p) => !ownEmails.includes(p.email)).length : 0;
+    if (people === 0) {
+      remove(e, onlyThisDate, false);
+      return;
+    }
+    if (calendarOf(e.calendarId)?.provider === 'microsoft') {
+      remove(e, onlyThisDate, true);
+      return;
+    }
+    setDeleting(null);
+    setAsk({
+      kind: 'notify',
+      title: 'Send cancellations?',
+      description: `Tell ${people === 1 ? 'the person' : `the ${String(people)} people`} invited that it's cancelled?`,
+      yes: 'Send',
+      no: "Don't send",
+      run: (notify) => {
+        remove(e, onlyThisDate, notify);
+      },
+    });
+  };
+
+  const requestDelete = (e: CalendarEvent) => {
+    const cal = calendarOf(e.calendarId);
+    if (cal && !cal.writable) {
+      setError({ kind: 'invalid', message: `${cal.name} is read-only.` });
+      return;
+    }
+    if (e.recurring) setDeleting(e);
+    else removeAsking(e, false);
+  };
+
+  const toggleCalendar = (c: CalendarInfo, visible: boolean) => {
+    setCalendars((list) => list.map((x) => (x.id === c.id ? { ...x, visible } : x)));
+    api.setCalendarVisible(c.id, visible).then(setCalendars, (e: unknown) => {
+      setError(toAppError(e));
+      setCalendars((list) => list.map((x) => (x.id === c.id ? { ...x, visible: !visible } : x)));
+    });
+  };
+
+  const step = (n: number) => {
     setPane({ kind: 'day' });
+    if (mode === 'month' || mode === 'agenda') {
+      setMonth((m) => addMonths(m, n));
+      return;
+    }
+    const next = addDays(selected, n * (mode === 'day' ? 1 : 7));
+    setSelected(next);
+    setMonth(new Date(next.getFullYear(), next.getMonth(), 1));
   };
 
-  const selectedKey = dayKey(selected);
+  const pick = (day: Date) => {
+    setSelected(startOfDay(day));
+    setMonth(new Date(day.getFullYear(), day.getMonth(), 1));
+    setPane({ kind: 'day' });
+    setDrawer(false);
+  };
+
+  const unit = mode === 'month' || mode === 'agenda' ? 'month' : mode === 'day' ? 'day' : 'week';
   const todayKey = dayKey(now);
-  const notes = statuses.filter((s) => s.state !== 'synced');
+  const notes = statuses.filter((s) => s.state !== 'synced' && !s.connectable);
   const showMain = !phone || pane.kind === 'day';
   const showSide = !phone || pane.kind !== 'day';
+  const modes = phone ? PHONE_MODES : COMPUTER_MODES;
+  const title = gridMode
+    ? mode === 'day'
+      ? phone
+        ? dayText(selected)
+        : DAY_TITLE.format(selected)
+      : rangeTitle(days)
+    : MONTH.format(month);
+  const visibleCalendars = known.filter((c) => c.visible);
+  const splitDay = mode === 'day' && sideBySide && !phone && visibleCalendars.length > 1;
+  const columns: GridColumn[] = splitDay
+    ? visibleCalendars.map((c) => ({ key: c.id, day: selected, calendarId: c.id, label: c.name, color: c.color }))
+    : days.map((d) => ({ key: dayKey(d), day: d, calendarId: null }));
 
   const eventButton = (e: CalendarEvent, compact: boolean) => (
     <button
       key={`${e.id}:${String(e.start)}`}
       type="button"
-      className={`cal-event${compact ? ' cal-event--chip' : ''}${e.allDay ? ' cal-event--allday' : ''}`}
+      className={`cal-event${compact ? ' cal-event--chip' : ''}${e.allDay ? ' cal-event--allday' : ''}${e.showAs === 'tentative' ? ' cal-event--tentative' : ''}`}
       style={{ ['--event-color' as string]: cssColor(e.color) }}
       onClick={(ev) => {
         ev.stopPropagation();
         setError(null);
         setSelected(eventDays(e)[0]);
         setPane({ kind: 'view', event: e });
+      }}
+      onKeyDown={(ev) => {
+        if (ev.key === 'Delete') {
+          ev.preventDefault();
+          ev.stopPropagation();
+          requestDelete(e);
+        }
       }}
     >
       {!e.allDay && <span className="cal-event__time">{timeText(e.start)}</span>}
@@ -356,19 +528,46 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
     </button>
   );
 
+  const onSectionKey = (ev: KeyboardEvent<HTMLElement>) => {
+    if ((ev.key !== 'n' && ev.key !== 'N') || ev.ctrlKey || ev.metaKey || ev.altKey || typing(ev.target)) return;
+    if (pane.kind === 'edit' || document.querySelector('[aria-modal="true"]')) return;
+    ev.preventDefault();
+    startNew(selected);
+  };
+
+  const onGridDay = (day: Date, n: number) => {
+    let next = day;
+    if (mode === 'workweek') {
+      const d = next.getDay();
+      if (d === 6) next = addDays(next, n > 0 ? 2 : -1);
+      else if (d === 0) next = addDays(next, n > 0 ? 1 : -2);
+    }
+    setSelected(startOfDay(next));
+    setMonth(new Date(next.getFullYear(), next.getMonth(), 1));
+  };
+
+  const side = (
+    <>
+      <MiniMonth selected={selected} todayKey={todayKey} onPick={pick} />
+      <CalendarList accounts={accounts} calendars={known} onToggle={toggleCalendar} />
+    </>
+  );
+
   return (
-    <section className="calendar" aria-labelledby={`${id}-title`}>
+    // The section hears N for a new event; the keys themselves belong to its controls.
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+    <section className="calendar" aria-labelledby={`${id}-title`} onKeyDown={onSectionKey}>
       <header className="calendar__head">
         <h1 id={`${id}-title`} className="calendar__title">
-          {MONTH.format(month)}
+          {title}
         </h1>
         <div className="calendar__nav">
           <button
             type="button"
             className="icon-btn"
-            aria-label="Previous month"
+            aria-label={`Previous ${unit}`}
             onClick={() => {
-              goMonth(-1);
+              step(-1);
             }}
           >
             <Icon name="left" />
@@ -387,29 +586,55 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
           <button
             type="button"
             className="icon-btn"
-            aria-label="Next month"
+            aria-label={`Next ${unit}`}
             onClick={() => {
-              goMonth(1);
+              step(1);
             }}
           >
             <Icon name="right" />
           </button>
         </div>
-        <div className="segmented" role="group" aria-label="View">
-          {(['month', 'agenda'] as const).map((m) => (
+        <div className="segmented calendar__views" role="group" aria-label="View">
+          {modes.map((m) => (
             <button
               key={m}
               type="button"
               className={`segmented__item${mode === m ? ' segmented__item--on' : ''}`}
               aria-pressed={mode === m}
               onClick={() => {
+                if (m === 'month' || m === 'agenda') setMonth(new Date(selected.getFullYear(), selected.getMonth(), 1));
                 setMode(m);
               }}
             >
-              {m === 'month' ? 'Month' : 'Agenda'}
+              {MODE_LABEL[m]}
             </button>
           ))}
         </div>
+        {mode === 'day' && !phone && visibleCalendars.length > 1 && (
+          <button
+            type="button"
+            className={`btn btn--secondary btn--small${sideBySide ? ' btn--on' : ''}`}
+            aria-pressed={sideBySide}
+            title="Show each calendar in a column of its own"
+            onClick={() => {
+              setSideBySide((on) => !on);
+            }}
+          >
+            Side by side
+          </button>
+        )}
+        {phone && (
+          <button
+            type="button"
+            className="icon-btn calendar__calendars"
+            aria-label="Calendars"
+            onClick={() => {
+              setDrawer(true);
+            }}
+          >
+            <Icon name="menu" />
+          </button>
+        )}
         <button
           type="button"
           className="icon-btn calendar__sync"
@@ -433,23 +658,26 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
         >
           <Icon name="sync" />
         </button>
-        {writable.length > 0 && (
+        {known.length > 0 && (
           <MenuButton label="Import and export calendars" icon="more" title="Import and export">
-            {writable.map((c) => {
+            {known.map((c) => {
+              // Events can only be imported into a calendar the account can change.
               const items = (
                 <>
-                  <MenuItem
-                    icon="upload"
-                    onSelect={() => {
-                      files.run(
-                        importCalendarTask(api, c, () => {
-                          setRevision((r) => r + 1);
-                        }),
-                      );
-                    }}
-                  >
-                    Import .ics…
-                  </MenuItem>
+                  {c.writable && (
+                    <MenuItem
+                      icon="upload"
+                      onSelect={() => {
+                        files.run(
+                          importCalendarTask(api, c, () => {
+                            setRevision((r) => r + 1);
+                          }),
+                        );
+                      }}
+                    >
+                      Import .ics…
+                    </MenuItem>
+                  )}
                   <MenuItem
                     icon="download"
                     onSelect={() => {
@@ -460,7 +688,7 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
                   </MenuItem>
                 </>
               );
-              return writable.length > 1 ? (
+              return known.length > 1 ? (
                 <MenuGroup key={c.id} label={calendarTitle(c)}>
                   {items}
                 </MenuGroup>
@@ -496,10 +724,18 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
           ))}
         </ul>
       )}
+      <ConnectCards
+        accounts={accounts}
+        statuses={statuses}
+        onConnected={() => {
+          setRevision((r) => r + 1);
+        }}
+      />
 
       <div className="calendar__body">
+        {!phone && <aside className="calendar__nav-pane" aria-label="Dates and calendars">{side}</aside>}
         {showMain && (
-          <div className="calendar__main">
+          <div className={`calendar__main${gridMode ? ' calendar__main--grid' : ''}`}>
             {loadError && (
               <p className="form-error" role="alert">
                 Your events could not be loaded. {loadError.message}
@@ -511,80 +747,67 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
                   Loading events…
                 </p>
               )
+            ) : gridMode ? (
+              <TimeGrid
+                columns={columns}
+                events={shown}
+                now={now}
+                selectedKey={selectedKey}
+                interactive={!phone}
+                canAdd={writable.length > 0}
+                canEdit={canEdit}
+                label={mode === 'day' ? dayText(selected) : `${MODE_LABEL[mode]} of ${dayText(days[0] ?? selected)}`}
+                onOpen={(e) => {
+                  setError(null);
+                  setPane({ kind: 'view', event: e });
+                }}
+                onCreate={(r: SlotRange, text) => {
+                  startNew(r.column.day, r.allDay ? undefined : r.start, r.end - r.start, r.allDay, r.column.calendarId, text);
+                }}
+                onQuickSave={(r, text) => {
+                  if (!text.trim()) return;
+                  const target =
+                    (r.column.calendarId ? writable.find((c) => c.id === r.column.calendarId) : undefined) ?? defaultCalendar;
+                  if (!target) return;
+                  const form = newForm(r.column.day, target.id, now, defaultReminder, r.start, r.end - r.start, r.allDay);
+                  const input = toInput({ ...form, title: text.trim() });
+                  if (typeof input === 'string') setError({ kind: 'invalid', message: input });
+                  else commit(input, false);
+                }}
+                onChange={moveEvent}
+                onDelete={requestDelete}
+                onSelectDay={onGridDay}
+                onDayHeader={
+                  mode === 'day'
+                    ? undefined
+                    : (d) => {
+                        setSelected(startOfDay(d));
+                        setMode('day');
+                      }
+                }
+              />
             ) : mode === 'month' ? (
-              <div className="month" role="grid" aria-label={MONTH.format(month)}>
-                <div className="month__row month__row--head" role="row">
-                  {WEEKDAYS.map((w) => (
-                    <span key={w} className="month__weekday" role="columnheader">
-                      {w}
-                    </span>
-                  ))}
-                </div>
-                {Array.from({ length: 6 }, (_, week) => (
-                  <div key={week} className="month__row" role="row">
-                    {grid.slice(week * 7, week * 7 + 7).map((day) => {
-                      const key = dayKey(day);
-                      const list = days.get(key) ?? [];
-                      const shown = list.slice(0, 3);
-                      return (
-                        <div
-                          key={key}
-                          role="gridcell"
-                          aria-selected={key === selectedKey}
-                          aria-label={`${dayText(day)}, ${list.length === 0 ? 'no events' : `${String(list.length)} event${list.length === 1 ? '' : 's'}`}`}
-                          tabIndex={key === selectedKey ? 0 : -1}
-                          className={[
-                            'month__day',
-                            day.getMonth() === month.getMonth() ? '' : 'month__day--other',
-                            key === todayKey ? 'month__day--today' : '',
-                            key === selectedKey ? 'month__day--selected' : '',
-                          ]
-                            .filter(Boolean)
-                            .join(' ')}
-                          onClick={() => {
-                            setSelected(day);
-                            setPane({ kind: 'day' });
-                          }}
-                          onDoubleClick={() => {
-                            startNew(day);
-                          }}
-                          onKeyDown={(ev) => {
-                            const move = {
-                              ArrowLeft: -1,
-                              ArrowRight: 1,
-                              ArrowUp: -7,
-                              ArrowDown: 7,
-                            }[ev.key];
-                            if (move !== undefined) {
-                              ev.preventDefault();
-                              const next = addDays(day, move);
-                              setSelected(next);
-                              if (next.getMonth() !== month.getMonth())
-                                setMonth(new Date(next.getFullYear(), next.getMonth(), 1));
-                              requestAnimationFrame(() => {
-                                document.querySelector<HTMLElement>('.month__day[tabindex="0"]')?.focus();
-                              });
-                            } else if (ev.key === 'Enter') {
-                              setSelected(day);
-                              setPane({ kind: 'day' });
-                            }
-                          }}
-                        >
-                          <span className="month__date">{day.getDate()}</span>
-                          <span className="month__events">
-                            {shown.map((e) => eventButton(e, true))}
-                            {list.length > shown.length && (
-                              <span className="month__more">+{list.length - shown.length} more</span>
-                            )}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
+              <MonthGrid
+                month={month}
+                grid={grid}
+                days={byDays}
+                selectedKey={selectedKey}
+                todayKey={todayKey}
+                render={(e) => eventButton(e, true)}
+                onSelect={(day) => {
+                  setSelected(day);
+                  setPane({ kind: 'day' });
+                }}
+                onMoveTo={(next) => {
+                  setSelected(next);
+                  if (next.getMonth() !== month.getMonth()) setMonth(new Date(next.getFullYear(), next.getMonth(), 1));
+                }}
+                onNew={(day) => {
+                  startNew(day);
+                }}
+              />
             ) : (
-              <Agenda days={days} month={month} todayKey={todayKey} render={(e) => eventButton(e, false)} />
+              <Agenda days={byDays} month={month} todayKey={todayKey} render={(e) => eventButton(e, false)} />
             )}
           </div>
         )}
@@ -599,7 +822,7 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
             {pane.kind === 'day' && (
               <DayList
                 day={selected}
-                events={days.get(selectedKey) ?? []}
+                events={byDays.get(selectedKey) ?? []}
                 canAdd={writable.length > 0}
                 render={(e) => eventButton(e, false)}
                 onAdd={() => {
@@ -612,37 +835,73 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
                 event={pane.event}
                 calendarName={calendarName(pane.event.calendarId)}
                 busy={busy}
+                readOnly={readOnlyReason(pane.event)}
+                canDelete={calendarOf(pane.event.calendarId)?.writable !== false}
                 onBack={() => {
                   setPane({ kind: 'day' });
                 }}
                 onEdit={() => {
                   openEditor(pane.event);
                 }}
+                onEditDate={
+                  pane.event.recurring && pane.event.recurrenceId !== null
+                    ? () => {
+                        openEditor(pane.event, true);
+                      }
+                    : undefined
+                }
                 onDelete={() => {
-                  if (pane.event.recurring) setDeleting(pane.event);
-                  else remove(pane.event, false);
+                  requestDelete(pane.event);
                 }}
                 onWrite={onWrite}
               />
             )}
             {pane.kind === 'edit' && (
               <EventEditor
-                key={pane.form.id ?? 'new'}
+                key={`${pane.form.id ?? 'new'}:${String(pane.form.occurrence)}`}
                 initial={pane.form}
                 series={pane.series}
-                calendars={writable}
+                calendars={pane.readOnly ? known : writable}
                 accounts={accounts}
+                readOnly={pane.readOnly}
+                event={pane.event}
                 busy={busy}
+                now={seconds(now)}
                 onCancel={() => {
                   setError(null);
                   setPane({ kind: 'day' });
                 }}
-                onSave={save}
+                onSave={(form) => {
+                  save(form, pane);
+                }}
               />
             )}
           </aside>
         )}
       </div>
+
+      {phone && drawer && (
+        <Modal
+          title="Calendars"
+          size="large"
+          onClose={() => {
+            setDrawer(false);
+          }}
+        >
+          <div className="cal-drawer">{side}</div>
+          <div className="modal__actions">
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => {
+                setDrawer(false);
+              }}
+            >
+              Done
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {deleting && (
         <Modal
@@ -672,7 +931,7 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
                 type="button"
                 className="btn btn--secondary"
                 onClick={() => {
-                  remove(deleting, true);
+                  removeAsking(deleting, true);
                 }}
               >
                 Only this date
@@ -682,7 +941,7 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
               type="button"
               className="btn btn--danger"
               onClick={() => {
-                remove(deleting, false);
+                removeAsking(deleting, false);
               }}
             >
               Every date
@@ -690,7 +949,184 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
           </div>
         </Modal>
       )}
+
+      {ask?.kind === 'scope' && (
+        <Modal
+          title="Just this one or the whole series?"
+          description={`“${ask.event.title || '(No title)'}” repeats. Change only ${dayText(eventDays(ask.event)[0])}, or every date?`}
+          size="small"
+          onClose={() => {
+            setAsk(null);
+          }}
+        >
+          <div className="modal__actions">
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                setAsk(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                setAsk(null);
+                ask.run('all');
+              }}
+            >
+              The whole series
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => {
+                setAsk(null);
+                ask.run('this');
+              }}
+            >
+              Just this one
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {ask?.kind === 'notify' && (
+        <Modal
+          title={ask.title}
+          description={ask.description}
+          size="small"
+          onClose={() => {
+            setAsk(null);
+          }}
+        >
+          <div className="modal__actions">
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                setAsk(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                setAsk(null);
+                ask.run(false);
+              }}
+            >
+              {ask.no}
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => {
+                setAsk(null);
+                ask.run(true);
+              }}
+            >
+              {ask.yes}
+            </button>
+          </div>
+        </Modal>
+      )}
     </section>
+  );
+}
+
+function MonthGrid({
+  month,
+  grid,
+  days,
+  selectedKey,
+  todayKey,
+  render,
+  onSelect,
+  onMoveTo,
+  onNew,
+}: {
+  month: Date;
+  grid: Date[];
+  days: Map<DayKey, CalendarEvent[]>;
+  selectedKey: DayKey;
+  todayKey: DayKey;
+  render: (e: CalendarEvent) => ReactNode;
+  onSelect: (day: Date) => void;
+  onMoveTo: (day: Date) => void;
+  onNew: (day: Date) => void;
+}) {
+  return (
+    <div className="month" role="grid" aria-label={MONTH.format(month)}>
+      <div className="month__row month__row--head" role="row">
+        {weekdayNames().map((w) => (
+          <span key={w} className="month__weekday" role="columnheader">
+            {w}
+          </span>
+        ))}
+      </div>
+      {Array.from({ length: 6 }, (_, week) => (
+        <div key={week} className="month__row" role="row">
+          {grid.slice(week * 7, week * 7 + 7).map((day) => {
+            const key = dayKey(day);
+            const list = days.get(key) ?? [];
+            const shownList = list.slice(0, 3);
+            return (
+              <div
+                key={key}
+                role="gridcell"
+                aria-selected={key === selectedKey}
+                aria-label={`${dayText(day)}, ${list.length === 0 ? 'no events' : `${String(list.length)} event${list.length === 1 ? '' : 's'}`}`}
+                tabIndex={key === selectedKey ? 0 : -1}
+                className={[
+                  'month__day',
+                  day.getMonth() === month.getMonth() ? '' : 'month__day--other',
+                  key === todayKey ? 'month__day--today' : '',
+                  key === selectedKey ? 'month__day--selected' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => {
+                  onSelect(day);
+                }}
+                onDoubleClick={() => {
+                  onNew(day);
+                }}
+                onKeyDown={(ev) => {
+                  const move = {
+                    ArrowLeft: -1,
+                    ArrowRight: 1,
+                    ArrowUp: -7,
+                    ArrowDown: 7,
+                  }[ev.key];
+                  if (move !== undefined) {
+                    ev.preventDefault();
+                    onMoveTo(addDays(day, move));
+                    requestAnimationFrame(() => {
+                      document.querySelector<HTMLElement>('.month__day[tabindex="0"]')?.focus();
+                    });
+                  } else if (ev.key === 'Enter') {
+                    onSelect(day);
+                  }
+                }}
+              >
+                <span className="month__date">{day.getDate()}</span>
+                <span className="month__events">
+                  {shownList.map(render)}
+                  {list.length > shownList.length && (
+                    <span className="month__more">+{list.length - shownList.length} more</span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -757,321 +1193,5 @@ function DayList({
         </button>
       )}
     </div>
-  );
-}
-
-const STATUS: Record<string, string> = {
-  accepted: 'Accepted',
-  declined: 'Declined',
-  tentative: 'Maybe',
-  'needs-action': 'No answer yet',
-};
-
-function EventCard({
-  event,
-  calendarName,
-  busy,
-  onBack,
-  onEdit,
-  onDelete,
-  onWrite,
-}: {
-  event: CalendarEvent;
-  calendarName: string;
-  busy: boolean;
-  onBack: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-  onWrite: (to: string) => void;
-}) {
-  const people = [...(event.organizer ? [event.organizer] : []), ...event.attendees].filter(
-    (p, i, all) => all.findIndex((q) => q.email.toLowerCase() === p.email.toLowerCase()) === i,
-  );
-  return (
-    <article className="event-card" aria-label={event.title || '(No title)'}>
-      <button type="button" className="phone-back event-card__back" onClick={onBack}>
-        <Icon name="back" />
-        Back
-      </button>
-      <h2 className="event-card__title">
-        <span className="event-card__dot" style={{ background: cssColor(event.color) }} aria-hidden="true" />
-        {event.title || '(No title)'}
-      </h2>
-      <p className="event-card__line">
-        <Icon name="clock" size={16} />
-        {whenText(event)}
-      </p>
-      {event.recurring && (
-        <p className="event-card__line">
-          <Icon name="repeat" size={16} />
-          {repeatText(event.repeat, new Date(event.start * 1000))}
-        </p>
-      )}
-      {event.location && (
-        <p className="event-card__line">
-          <Icon name="pin" size={16} />
-          {event.location}
-        </p>
-      )}
-      {event.reminders.length > 0 && (
-        <p className="event-card__line">
-          <Icon name="bell" size={16} />
-          {event.reminders.map(reminderText).join(', ')}
-        </p>
-      )}
-      <p className="event-card__line muted">
-        <Icon name="calendar" size={16} />
-        {calendarName}
-        {event.tentative ? ' · Tentative' : ''}
-      </p>
-      {event.notes && <p className="event-card__notes">{event.notes}</p>}
-      {people.length > 0 && (
-        <>
-          <h3 className="event-card__subhead">People</h3>
-          <ul className="event-card__people">
-            {people.map((p) => (
-              <li key={p.email}>
-                <span>
-                  {p.name ?? p.email}
-                  {event.organizer?.email.toLowerCase() === p.email.toLowerCase() ? ' (organiser)' : ''}
-                </span>
-                <span className="muted small">{STATUS[p.status ?? ''] ?? ''}</span>
-              </li>
-            ))}
-          </ul>
-          <button
-            type="button"
-            className="btn btn--secondary btn--small"
-            onClick={() => {
-              onWrite(people.map((p) => p.email).join(', '));
-            }}
-          >
-            Email everyone
-          </button>
-        </>
-      )}
-      <div className="event-card__actions">
-        <button type="button" className="btn btn--primary" disabled={busy} onClick={onEdit}>
-          Edit
-        </button>
-        <button type="button" className="btn btn--danger" disabled={busy} onClick={onDelete}>
-          Delete
-        </button>
-      </div>
-    </article>
-  );
-}
-
-function EventEditor({
-  initial,
-  series,
-  calendars,
-  accounts,
-  busy,
-  onCancel,
-  onSave,
-}: {
-  initial: Form;
-  series: boolean;
-  calendars: CalendarInfo[];
-  accounts: readonly Account[];
-  busy: boolean;
-  onCancel: () => void;
-  onSave: (form: Form) => void;
-}) {
-  const id = useId();
-  const [form, setForm] = useState(initial);
-  const set = <K extends keyof Form>(key: K, value: Form[K]) => {
-    setForm((f) => ({ ...f, [key]: value }));
-  };
-  const start = fromDayKey(form.startDay);
-  const submit = (e: SyntheticEvent) => {
-    e.preventDefault();
-    onSave(form);
-  };
-  const label = (c: CalendarInfo) => {
-    const email = accounts.find((a) => a.id === c.accountId)?.email;
-    return calendars.filter((x) => x.accountId === c.accountId).length > 1 || !email
-      ? `${c.name} (${email ?? ''})`
-      : email;
-  };
-  return (
-    <form className="event-editor" aria-label={form.id ? 'Edit event' : 'New event'} onSubmit={submit}>
-      <h2 className="event-editor__title">{form.id ? 'Edit event' : 'New event'}</h2>
-      {series && <p className="form-hint">This event repeats. Changes apply to every date.</p>}
-      <label className="form-field">
-        <span className="form-field__label">Title</span>
-        <input
-          className="field"
-          value={form.title}
-          maxLength={500}
-          // The first field of a form the user just opened.
-          // eslint-disable-next-line jsx-a11y/no-autofocus
-          autoFocus
-          onChange={(e) => {
-            set('title', e.target.value);
-          }}
-        />
-      </label>
-      {calendars.length > 1 && (
-        <label className="form-field">
-          <span className="form-field__label">Calendar</span>
-          <select
-            className="field"
-            value={form.calendarId}
-            onChange={(e) => {
-              set('calendarId', e.target.value);
-            }}
-          >
-            {calendars.map((c) => (
-              <option key={c.id} value={c.id}>
-                {label(c)}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      <label className="choice">
-        <input
-          type="checkbox"
-          checked={form.allDay}
-          onChange={(e) => {
-            set('allDay', e.target.checked);
-          }}
-        />
-        All day
-      </label>
-      <div className="event-editor__times">
-        <label className="form-field">
-          <span className="form-field__label">Starts</span>
-          <input
-            className="field"
-            type="date"
-            required
-            value={form.startDay}
-            onChange={(e) => {
-              const next = e.target.value;
-              // Moving the start moves the end with it.
-              const shift = (fromDayKey(next).getTime() - fromDayKey(form.startDay).getTime()) / 86_400_000;
-              setForm((f) => ({
-                ...f,
-                startDay: next,
-                endDay: next && f.endDay ? dayKey(addDays(fromDayKey(f.endDay), Math.round(shift))) : next,
-              }));
-            }}
-          />
-        </label>
-        {!form.allDay && (
-          <label className="form-field">
-            <span className="form-field__label">
-              <span className="visually-hidden">Start </span>Time
-            </span>
-            <input
-              className="field"
-              type="time"
-              required
-              value={form.startTime}
-              onChange={(e) => {
-                set('startTime', e.target.value);
-              }}
-            />
-          </label>
-        )}
-        <label className="form-field">
-          <span className="form-field__label">Ends</span>
-          <input
-            className="field"
-            type="date"
-            required
-            min={form.startDay}
-            value={form.endDay}
-            onChange={(e) => {
-              set('endDay', e.target.value);
-            }}
-          />
-        </label>
-        {!form.allDay && (
-          <label className="form-field">
-            <span className="form-field__label">
-              <span className="visually-hidden">End </span>Time
-            </span>
-            <input
-              className="field"
-              type="time"
-              required
-              value={form.endTime}
-              onChange={(e) => {
-                set('endTime', e.target.value);
-              }}
-            />
-          </label>
-        )}
-      </div>
-      <label className="form-field">
-        <span className="form-field__label">Repeat</span>
-        <select
-          className="field"
-          value={form.repeat}
-          onChange={(e) => {
-            set('repeat', e.target.value as Form['repeat']);
-          }}
-        >
-          {form.customRule && <option value="keep">{repeatText('keep', start)}</option>}
-          {(['none', 'daily', 'weekly', 'monthly', 'yearly'] as const).map((r) => (
-            <option key={r} value={r}>
-              {repeatText(r, start)}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="form-field">
-        <span className="form-field__label">Reminder</span>
-        <select
-          className="field"
-          value={String(form.reminder)}
-          onChange={(e) => {
-            set('reminder', e.target.value === 'keep' ? 'keep' : Number(e.target.value));
-          }}
-        >
-          {form.reminder === 'keep' && <option value="keep">As set elsewhere</option>}
-          {REMINDERS.map((m) => (
-            <option key={m} value={m}>
-              {reminderText(m)}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="form-field">
-        <span className="form-field__label">Location</span>
-        <input
-          className="field"
-          value={form.location}
-          maxLength={500}
-          onChange={(e) => {
-            set('location', e.target.value);
-          }}
-        />
-      </label>
-      <label className="form-field">
-        <span className="form-field__label">Notes</span>
-        <textarea
-          id={`${id}-notes`}
-          className="field event-editor__notes"
-          rows={4}
-          value={form.notes}
-          onChange={(e) => {
-            set('notes', e.target.value);
-          }}
-        />
-      </label>
-      <div className="event-editor__actions">
-        <button type="button" className="btn btn--secondary" onClick={onCancel}>
-          Cancel
-        </button>
-        <button type="submit" className="btn btn--primary" disabled={busy}>
-          {busy ? 'Saving…' : 'Save'}
-        </button>
-      </div>
-    </form>
   );
 }

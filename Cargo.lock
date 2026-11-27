@@ -2832,6 +2832,8 @@ dependencies = [
  "android-native-keyring-store",
  "async-imap",
  "base64 0.23.1",
+ "chrono",
+ "chrono-tz",
  "futures",
  "getrandom 0.4.3",
  "hickory-resolver",
@@ -2968,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "mocky-mail-desktop"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "android-bridge",
  "base64 0.23.1",

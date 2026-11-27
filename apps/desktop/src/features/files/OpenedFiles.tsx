@@ -406,7 +406,8 @@ function CalendarFileDialog({ file, accounts, onClose }: { file: OpenedFile; acc
     let live = true;
     api.listCalendars().then(
       (list) => {
-        if (live) setCalendars(list.filter((c) => accounts.some((a) => a.id === c.accountId)));
+        // Only calendars events can be added to.
+        if (live) setCalendars(list.filter((c) => c.writable && accounts.some((a) => a.id === c.accountId)));
       },
       () => {
         if (live) setCalendars([]);

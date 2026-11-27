@@ -16,16 +16,19 @@ mod contacts;
 mod error;
 mod files;
 mod folders;
+mod groups;
 mod ids;
 mod messages;
 mod ops;
 mod outbox;
 mod receipts;
+mod reminders;
 mod rules;
 mod schema;
 mod search;
 mod settings;
 mod sync_support;
+mod tasks;
 #[cfg(test)]
 mod test_support;
 
@@ -36,12 +39,15 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub use accounts::{Account, AuthKind, NewAccount, Security, ServerConfig};
-pub use calendar::{Calendar, FoundCalendar, StoredEvent, new_event_uid};
+pub use calendar::{
+    Calendar, CalendarProvider, FoundCalendar, ReminderOverrides, StoredEvent, new_event_uid,
+};
 pub use categories::Category;
 pub use contacts::{Contact, ContactState, ContactSync, MAX_CONTACTS};
 pub use error::{Result, StoreError};
 pub use files::{Book, ContactKeys, ExportRow, message_id_key, person_key};
 pub use folders::{Folder, NewFolder};
+pub use groups::{ContactGroup, GroupSync, MAX_GROUP_MEMBERS, MAX_GROUPS};
 pub use messages::{
     ListFilter, ListQuery, ListSort, MAX_PAGE_SIZE, MAX_SUGGESTIONS, MAX_THREAD_MESSAGES,
     MessageFlags, MessageListItem, MessagePage, StoredMessage,
@@ -50,6 +56,7 @@ pub use ops::{OpKind, PendingOp};
 pub use outbox::{NewOutbox, OutboxEntry, OutboxMessage};
 pub use receipts::read_receipt_key;
 pub use rules::{ImageSender, RuleSubject, image_sender_key};
+pub use tasks::{DEVICE_TASK_LIST, MAX_TASKS, ServerTask, Task, TaskList, TaskProvider, TaskSync};
 
 /// How long a writer waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);

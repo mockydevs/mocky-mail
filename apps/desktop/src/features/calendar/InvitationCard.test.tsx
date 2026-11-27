@@ -31,6 +31,10 @@ const EVENT: InvitationView['event'] = {
   ],
   tentative: false,
   reminders: [],
+  showAs: 'busy',
+  private: false,
+  repeatRule: null,
+  isOrganizer: false,
 };
 
 function invite(partial: Partial<InvitationView>, subject: string): MockMessage {

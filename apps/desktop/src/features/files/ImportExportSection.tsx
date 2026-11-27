@@ -99,6 +99,8 @@ export function ImportExportSection({
             <button
               type="button"
               className="btn btn--secondary btn--small"
+              disabled={!calendar.writable}
+              title={calendar.writable ? undefined : `${calendar.name} is read-only.`}
               onClick={() => {
                 files.run(importCalendarTask(api, calendar));
               }}

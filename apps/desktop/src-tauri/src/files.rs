@@ -900,6 +900,11 @@ pub async fn import_ics(
     bytes: &[u8],
 ) -> AppResult<ImportReport> {
     let calendar = state.store.get_calendar(calendar_id)?;
+    if !calendar.writable {
+        return Err(AppError::invalid(
+            "Events can't be added to this calendar. Choose another one.",
+        ));
+    }
     if settings::working_offline(state) {
         return Err(AppError::new(
             "connect",

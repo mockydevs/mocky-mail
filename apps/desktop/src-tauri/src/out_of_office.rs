@@ -7,10 +7,11 @@ use std::sync::Arc;
 use mail_core::vacation::{self, SCRIPT_NAME, Vacation};
 use mail_store::{Account, AuthKind};
 use mail_sync::sieve::SieveClient;
-use mail_sync::{Credentials, SyncError};
+use mail_sync::{Credentials, SyncError, google, graph};
 use serde::Serialize;
 use tauri::State;
 
+use crate::connections::{self, Service};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
@@ -84,13 +85,14 @@ async fn connect(state: &AppState, account: &Account) -> AppResult<Result<SieveC
             ))
         }
         Err(NoSieve::NotPassword) => Ok(Err(
-            "Automatic replies for Gmail and Microsoft accounts are set in their own web pages for now.".to_owned(),
+            "Connect this account's calendar and contacts to set its automatic replies here."
+                .to_owned(),
         )),
         Err(NoSieve::NoPassword) => Ok(Err(
             "This account has no password to sign in with.".to_owned()
         )),
         Err(NoSieve::NotOffered) => Ok(Err(
-            "The mail server doesn't offer automatic replies.".to_owned(),
+            "The mail server doesn't offer automatic replies.".to_owned()
         )),
     }
 }
@@ -113,6 +115,63 @@ async fn status(account: &Account, client: &mut SieveClient) -> AppResult<OutOfO
     })
 }
 
+/// Whether replies set like this are going out today.
+fn active_today(v: &Vacation) -> bool {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    v.enabled
+        && v.start.as_deref().is_none_or(|s| s <= today.as_str())
+        && v.end.as_deref().is_none_or(|e| e >= today.as_str())
+}
+
+fn provider_status(account: &Account, settings: Vacation) -> OutOfOffice {
+    OutOfOffice {
+        account_id: account.id.clone(),
+        available: true,
+        message: None,
+        active: active_today(&settings),
+        settings,
+    }
+}
+
+/// Gmail and Microsoft accounts' replies, through Google's or Microsoft's
+/// own settings once connected. `None` for other accounts.
+async fn from_provider(
+    state: &AppState,
+    account: &Account,
+    change: Option<&Vacation>,
+) -> AppResult<Option<Result<OutOfOffice, String>>> {
+    let offset = connections::local_offset();
+    match connections::service(state, account)? {
+        Service::Dav => Ok(None),
+        Service::NotConnected => Ok(Some(Err(
+            "Connect this account's calendar and contacts to set its automatic replies here."
+                .to_owned(),
+        ))),
+        Service::Google => {
+            if !connections::granted(state, account, "gmail.settings.basic") {
+                return Ok(Some(Err(
+                    "Connect this account's calendar and contacts again to set its automatic replies here.".to_owned(),
+                )));
+            }
+            let client = connections::google_client(state, account).await?;
+            let settings = match change {
+                Some(v) => google::set_vacation(&client, v, offset).await?,
+                None => google::get_vacation(&client, offset).await?,
+            };
+            Ok(Some(Ok(provider_status(account, settings))))
+        }
+        Service::Microsoft => {
+            let client = connections::graph_client(state, account).await?;
+            let now = i64::try_from(crate::state::now()).unwrap_or(0);
+            let settings = match change {
+                Some(v) => graph::set_auto_replies(&client, v, offset, now).await?,
+                None => graph::get_auto_replies(&client, offset).await?,
+            };
+            Ok(Some(Ok(provider_status(account, settings))))
+        }
+    }
+}
+
 /// `get_out_of_office`: an account's automatic replies.
 #[tauri::command]
 pub async fn get_out_of_office(
@@ -120,6 +179,11 @@ pub async fn get_out_of_office(
     account_id: String,
 ) -> AppResult<OutOfOffice> {
     let account = state.store.get_account(&account_id)?;
+    match from_provider(&state, &account, None).await? {
+        Some(Ok(status)) => return Ok(status),
+        Some(Err(why)) => return Ok(unavailable(&account, &why)),
+        None => {}
+    }
     let mut client = match connect(&state, &account).await? {
         Ok(client) => client,
         Err(why) => return Ok(unavailable(&account, &why)),
@@ -138,6 +202,11 @@ pub async fn set_out_of_office(
 ) -> AppResult<OutOfOffice> {
     let settings = vacation::checked(settings).map_err(AppError::invalid)?;
     let account = state.store.get_account(&account_id)?;
+    match from_provider(&state, &account, Some(&settings)).await? {
+        Some(Ok(status)) => return Ok(status),
+        Some(Err(why)) => return Err(AppError::invalid(why)),
+        None => {}
+    }
     let mut client = match connect(&state, &account).await? {
         Ok(client) => client,
         Err(why) => return Err(AppError::invalid(why)),

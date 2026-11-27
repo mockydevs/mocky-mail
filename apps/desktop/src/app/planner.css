@@ -1,0 +1,1205 @@
+/* 0.8.0: calendar views, Find a Time, reminders, tasks, people and the connect card. */
+
+.badge--due.badge--overdue {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.category-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--category) 16%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  box-shadow: inset 3px 0 0 var(--category);
+  list-style: none;
+}
+
+.btn--on {
+  background: var(--sel-bg);
+  color: var(--sel-text);
+}
+
+/* The calendar's left column: a small month and the list of calendars. */
+.calendar__nav-pane {
+  display: flex;
+  flex: 0 0 232px;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  padding: 14px 12px;
+  border-right: 1px solid var(--border);
+  overflow: auto;
+}
+
+.calendar__main--grid {
+  overflow: hidden;
+}
+
+.mini-month__head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.mini-month__title {
+  flex: 1 1 auto;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.mini-month__grid {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.mini-month__grid th {
+  padding: 4px 0;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.mini-month__grid td {
+  padding: 1px;
+  text-align: center;
+}
+
+.mini-month__day {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.mini-month__day:hover {
+  background: var(--row-hover);
+}
+
+.mini-month__day--other {
+  color: var(--faint);
+}
+
+.mini-month__day--on {
+  background: var(--sel-bg);
+  color: var(--sel-text);
+  font-weight: 700;
+}
+
+.mini-month__day--today {
+  background: var(--primary);
+  color: #fff;
+  font-weight: 700;
+}
+
+.cal-list__account {
+  margin: 0 0 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.cal-list__group + .cal-list__group {
+  margin-top: 12px;
+}
+
+.cal-list__items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cal-list__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.cal-list__item:hover {
+  background: var(--row-hover);
+}
+
+.cal-list__check {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--event-color);
+}
+
+.cal-list__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-list__lock {
+  color: var(--muted);
+}
+
+.cal-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Time grid: day, work week and week. */
+.tgrid {
+  --tgrid-gutter: 56px;
+  --tgrid-row: 24px;
+  user-select: none;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tgrid__head,
+.tgrid__allday {
+  display: flex;
+  flex: none;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--border);
+  scrollbar-gutter: stable;
+}
+
+.tgrid__corner {
+  flex: 0 0 var(--tgrid-gutter);
+}
+
+.tgrid__corner--label {
+  padding: 6px 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.tgrid__heads,
+.tgrid__cols {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: var(--tgrid-cols);
+  min-width: 0;
+}
+
+.tgrid__heading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 4px;
+  overflow: hidden;
+  border-left: 1px solid var(--border-soft);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tgrid__heading--today {
+  color: var(--primary);
+}
+
+.tgrid__day-btn {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tgrid__day-btn:hover {
+  background: var(--row-hover);
+}
+
+.tgrid__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.tgrid__allday-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.tgrid__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.tgrid__inner {
+  position: relative;
+}
+
+.tgrid__rows {
+  display: block;
+}
+
+.tgrid__row {
+  display: flex;
+  height: var(--tgrid-row);
+}
+
+.tgrid__row--hour .tgrid__cell {
+  border-top: 1px solid var(--border-soft);
+}
+
+.tgrid__time {
+  flex: 0 0 var(--tgrid-gutter);
+  padding-right: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+  transform: translateY(-7px);
+  font-variant-numeric: tabular-nums;
+}
+
+.tgrid__row > .tgrid__cell {
+  flex: 1 1 0;
+  min-width: 0;
+  border-left: 1px solid var(--border-soft);
+  outline: none;
+}
+
+.tgrid__cell:hover {
+  background: var(--row-hover);
+}
+
+.tgrid__cell:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+.tgrid__cell--chosen {
+  background: var(--sel-bg);
+}
+
+.tgrid__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  pointer-events: none;
+}
+
+.tgrid__gutter {
+  flex: 0 0 var(--tgrid-gutter);
+}
+
+.tgrid__col {
+  position: relative;
+  min-width: 0;
+}
+
+.cal-block {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-height: 12px;
+  overflow: hidden;
+  border-left: 3px solid var(--event-color);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--event-color) 18%, var(--surface));
+  pointer-events: auto;
+  box-shadow: 0 0 0 1px var(--surface);
+}
+
+.tgrid--dragging .cal-block {
+  pointer-events: none;
+}
+
+.cal-block--tentative {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--event-color) 18%, var(--surface)) 0 6px,
+    var(--surface) 6px 10px
+  );
+}
+
+.cal-block--free {
+  background: var(--surface);
+}
+
+.cal-block__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 0;
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.cal-block__main:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.cal-block--short .cal-block__main {
+  flex-direction: row;
+  gap: 6px;
+  padding-block: 0;
+  line-height: 1.2;
+}
+
+.cal-block--short .cal-block__place {
+  display: none;
+}
+
+.cal-block__title {
+  max-width: 100%;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-block__time,
+.cal-block__place {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-block__resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 6px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.cal-block--ghost {
+  --event-color: var(--primary);
+  border-style: dashed;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.cal-block--copy {
+  --event-color: var(--hue-teal);
+}
+
+.cal-event--tentative {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--event-color) 14%, transparent) 0 6px,
+    transparent 6px 10px
+  );
+}
+
+.tgrid__now {
+  position: absolute;
+  right: 0;
+  left: -4px;
+  height: 2px;
+  background: var(--brand-mark);
+  pointer-events: none;
+}
+
+.tgrid__now::before {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--brand-mark);
+  content: "";
+}
+
+.quick-create {
+  position: absolute;
+  z-index: 5;
+  left: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(280px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+  pointer-events: auto;
+}
+
+.tgrid__allday-cell .quick-create {
+  top: 100%;
+}
+
+.quick-create--right {
+  right: 4px;
+  left: auto;
+}
+
+.quick-create .field {
+  user-select: text;
+}
+
+.quick-create__when {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.quick-create__actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Event editor additions. */
+.event-editor__zone {
+  margin-top: -4px;
+}
+
+.event-editor__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.event-editor__private {
+  padding-bottom: 8px;
+}
+
+.event-editor__reminders {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.event-editor__reminders .form-field {
+  width: 100%;
+}
+
+.event-editor__people {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.event-editor__recipients {
+  position: relative;
+  padding: 4px 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+}
+
+.event-editor__find {
+  align-self: flex-start;
+}
+
+.event-editor__answer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: 13px;
+}
+
+.event-editor--locked .field[readonly] {
+  background: var(--list);
+  color: var(--muted);
+}
+
+/* Custom repeat. */
+.repeat-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.repeat-dialog__every,
+.repeat-dialog__end-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.repeat-dialog__number {
+  width: 80px;
+}
+
+.repeat-dialog__days,
+.repeat-dialog__on,
+.repeat-dialog__end {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.repeat-dialog__on,
+.repeat-dialog__end {
+  flex-direction: column;
+}
+
+.day-toggle {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.day-toggle--on {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+/* Find a Time. */
+.find-time {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.find-time__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.find-time__range {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.find-time__scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.find-time__grid {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.find-time__who {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 160px;
+  max-width: 220px;
+  padding: 6px 8px;
+  overflow: hidden;
+  background: var(--surface);
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-time__time {
+  padding: 0;
+  font-weight: 500;
+}
+
+.find-time__slot {
+  position: relative;
+  width: 22px;
+  min-width: 22px;
+  height: 28px;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.find-time__slot--day {
+  border-left: 2px solid var(--border);
+}
+
+.find-time__slot:hover,
+.find-time__slot--chosen {
+  background: var(--sel-bg);
+  color: var(--sel-text);
+}
+
+.find-time__cell {
+  width: 22px;
+  height: 24px;
+  border-top: 1px solid var(--border-soft);
+  border-left: 1px solid var(--border-soft);
+}
+
+.find-time__cell--busy {
+  background: var(--primary);
+}
+
+.find-time__cell--tentative {
+  background: repeating-linear-gradient(-45deg, var(--primary) 0 3px, transparent 3px 6px);
+}
+
+.find-time__cell--away {
+  background: var(--hue-purple);
+}
+
+.find-time__cell--unknown {
+  background: repeating-linear-gradient(45deg, var(--border) 0 2px, transparent 2px 6px);
+}
+
+.find-time__cell--chosen {
+  box-shadow: inset 0 0 0 2px var(--hue-teal);
+}
+
+.find-time__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  list-style: none;
+}
+
+.find-time__swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.find-time__subhead {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.find-time__suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* "Connect your Google calendar, contacts and tasks". */
+.connect-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 20px 0;
+}
+
+.contacts__list-pane .connect-cards,
+.settings__group .connect-cards {
+  padding: 8px 0;
+}
+
+.connect-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--info-border);
+  border-radius: 10px;
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.connect-card--done {
+  border-color: var(--border);
+  background: var(--list);
+  color: var(--text);
+}
+
+.connect-card__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.connect-card__title {
+  margin: 0 0 2px;
+  font-size: 14px;
+}
+
+.connect-card .muted {
+  color: inherit;
+  opacity: 0.85;
+}
+
+.connect-card .form-error {
+  margin: 6px 0 0;
+}
+
+/* Reminders. */
+.reminders {
+  position: fixed;
+  z-index: 60;
+  right: 20px;
+  bottom: 48px;
+  display: flex;
+  flex-direction: column;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.22);
+}
+
+.reminders--sheet {
+  inset: 0;
+  width: auto;
+  max-height: none;
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  border: 0;
+  border-radius: 0;
+}
+
+.reminders__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.reminders__title {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 15px;
+}
+
+.reminders__list {
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.reminders__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  padding: 10px 16px;
+}
+
+.reminders__item + .reminders__item {
+  border-top: 1px solid var(--border-soft);
+}
+
+.reminders__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.reminders__icon--flag {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.reminders__icon--task {
+  background: color-mix(in srgb, var(--hue-teal) 14%, transparent);
+  color: var(--hue-teal);
+}
+
+.reminders__what {
+  margin: 0;
+  font-weight: 600;
+}
+
+.reminders__text p.small {
+  margin: 2px 0 0;
+}
+
+.reminders__actions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 2;
+  gap: 6px;
+}
+
+/* Tasks. */
+.tasks {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.tasks__head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tasks__title {
+  flex: 1 1 auto;
+  margin: 0;
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600;
+  font-size: 22px;
+}
+
+.tasks__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tasks__nav {
+  flex: 0 0 230px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.tasks__filters {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tasks__group {
+  margin-top: 14px;
+}
+
+.tasks__group-title {
+  margin: 0 10px 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tasks__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.tasks__heading {
+  margin: 0;
+  font-size: 18px;
+}
+
+.tasks__add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.tasks__add .field {
+  flex: 1 1 auto;
+  border: 0;
+  background: transparent;
+}
+
+.tasks__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+
+.task-row--active {
+  background: var(--row-sel);
+}
+
+.task-row__check {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.task-row__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-row__title {
+  max-width: 100%;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-row--done .task-row__title {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.task-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-row__important {
+  color: var(--error-text);
+}
+
+.tasks__detail {
+  flex: 0 0 360px;
+  padding: 16px 20px;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.task-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.task-editor__row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.task-editor__notes {
+  resize: vertical;
+}
+
+.task-editor__categories,
+.contact-editor__categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.task-editor__message {
+  align-self: flex-start;
+}
+
+/* People. */
+.avatar--photo {
+  flex: none;
+  border-radius: 999px;
+  object-fit: cover;
+}
+
+.avatar--group {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: var(--sel-bg);
+  color: var(--sel-text);
+}
+
+.avatar--big {
+  width: 64px;
+  height: 64px;
+}
+
+.contact-row__star,
+.contact-card__star--on {
+  color: #c58a00;
+}
+
+.contact-card__name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.contact-card__categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.contacts__subhead--row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.contacts__hint {
+  padding: 0 12px;
+}
+
+.contact-editor__photo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.group-card__add {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.group-card__add .form-field {
+  flex: 1 1 auto;
+}
+
+/* Out of office: Microsoft's replies outside the organisation. */
+.ooo__outside {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+@media (max-width: 640px) {
+  .connect-cards {
+    padding: 8px 12px 0;
+  }
+
+  .connect-card {
+    flex-wrap: wrap;
+  }
+
+  .tasks__head {
+    padding: calc(10px + var(--safe-top)) 12px 10px;
+  }
+
+  .tasks__main {
+    padding: 12px;
+  }
+
+  .tasks__detail {
+    flex: 1 1 auto;
+    padding: 12px 16px calc(16px + var(--safe-bottom));
+    border-left: 0;
+  }
+
+  .tgrid {
+    --tgrid-gutter: 44px;
+  }
+
+  .calendar__views {
+    order: 1;
+  }
+}
+
+@media (forced-colors: active) {
+  .cal-block,
+  .find-time__cell--busy {
+    border: 1px solid CanvasText;
+  }
+
+  .tgrid__now {
+    background: Highlight;
+  }
+}
