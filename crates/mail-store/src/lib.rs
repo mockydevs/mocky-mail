@@ -38,7 +38,9 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub use accounts::{Account, AuthKind, NewAccount, Security, ServerConfig};
-pub use calendar::{Calendar, CalendarProvider, FoundCalendar, StoredEvent, new_event_uid};
+pub use calendar::{
+    Calendar, CalendarProvider, FoundCalendar, ReminderOverrides, StoredEvent, new_event_uid,
+};
 pub use categories::Category;
 pub use contacts::{Contact, ContactState, ContactSync, MAX_CONTACTS};
 pub use error::{Result, StoreError};

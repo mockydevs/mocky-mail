@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use mail_core::ical::Occurrence;
 use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
@@ -106,6 +107,39 @@ pub struct StoredEvent {
     pub etag: Option<String>,
     /// The iCalendar text.
     pub ics: String,
+}
+
+/// One event's reminders kept here: (`recurrence_id` of one date or `None`
+/// for the whole event, minutes before).
+type KeptReminders = Vec<(Option<i64>, Vec<u32>)>;
+
+/// Reminders chosen on this device for events that can't be changed on
+/// the server (a read-only calendar, or a meeting someone else organises).
+/// They take the place of the event's own alarms here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReminderOverrides {
+    /// By event id.
+    by_event: HashMap<String, KeptReminders>,
+}
+
+impl ReminderOverrides {
+    /// The reminders kept here for an event's occurrence: that date's own,
+    /// else the whole event's. `None` when the event's alarms stand.
+    #[must_use]
+    pub fn get(&self, event_id: &str, recurrence_id: Option<i64>) -> Option<&[u32]> {
+        let all = self.by_event.get(event_id)?;
+        recurrence_id
+            .and_then(|rid| all.iter().find(|(o, _)| *o == Some(rid)))
+            .or_else(|| all.iter().find(|(o, _)| o.is_none()))
+            .map(|(_, minutes)| minutes.as_slice())
+    }
+
+    /// Put the reminders kept here (if any) on an occurrence of the event.
+    pub fn apply(&self, event_id: &str, occurrence: &mut Occurrence) {
+        if let Some(minutes) = self.get(event_id, occurrence.recurrence_id) {
+            minutes.clone_into(&mut occurrence.reminders);
+        }
+    }
 }
 
 fn calendar_row(row: &Row<'_>) -> rusqlite::Result<Calendar> {
@@ -372,6 +406,103 @@ impl Store {
         let rows = stmt.query_map(params![from, to], event_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Keep reminders on this device for an event (never sent to the
+    /// server): for one date of a series (`occurrence`, its
+    /// `recurrence_id`), or with `None` for the whole event, which replaces
+    /// any dates' own. Minutes are kept soonest last, each once.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] when there is no such event.
+    pub fn set_reminder_override(
+        &self,
+        event_id: &str,
+        occurrence: Option<i64>,
+        minutes: &[u32],
+    ) -> Result<()> {
+        let mut sorted = minutes.to_vec();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted.dedup();
+        let json = serde_json::to_string(&sorted)?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let known = tx
+            .query_row(
+                "SELECT 1 FROM calendar_events WHERE id = ?1",
+                params![event_id],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if known.is_none() {
+            return Err(StoreError::NotFound("event"));
+        }
+        match occurrence {
+            None => tx.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1",
+                params![event_id],
+            )?,
+            Some(rid) => tx.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1 AND occurrence = ?2",
+                params![event_id, rid],
+            )?,
+        };
+        tx.execute(
+            "INSERT INTO event_reminder_overrides (event_id, occurrence, minutes) VALUES (?1, ?2, ?3)",
+            params![event_id, occurrence, json],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stop keeping reminders here for one date of an event, or with
+    /// `None` for all of it (its own alarms show again).
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn clear_reminder_override(&self, event_id: &str, occurrence: Option<i64>) -> Result<()> {
+        let conn = self.conn();
+        match occurrence {
+            None => conn.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1",
+                params![event_id],
+            )?,
+            Some(rid) => conn.execute(
+                "DELETE FROM event_reminder_overrides WHERE event_id = ?1 AND occurrence = ?2",
+                params![event_id, rid],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Every event's reminders kept on this device.
+    ///
+    /// # Errors
+    /// Database errors.
+    pub fn reminder_overrides(&self) -> Result<ReminderOverrides> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT event_id, occurrence, minutes FROM event_reminder_overrides")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = ReminderOverrides::default();
+        for row in rows {
+            let (event_id, occurrence, minutes) = row?;
+            // A list that can't be read leaves the event's own alarms.
+            let Ok(minutes) = serde_json::from_str::<Vec<u32>>(&minutes) else {
+                continue;
+            };
+            out.by_event
+                .entry(event_id)
+                .or_default()
+                .push((occurrence, minutes));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +600,132 @@ mod tests {
         assert_eq!(next[0].name, "Mine");
         assert_eq!(store.calendar_etags(&personal).unwrap().len(), 1);
         assert!(store.get_calendar(&personal).is_ok());
+    }
+
+    #[test]
+    fn reminders_kept_here_round_trip_and_go_with_the_event() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_support::add_account(&store, "me@work.example");
+        let cal = store
+            .set_calendars(&account, &[found("https://x/c/", "Personal")])
+            .unwrap()[0]
+            .id
+            .clone();
+        let one = store
+            .put_calendar_event(&cal, "/c/a.ics", Some("\"1\""), ONE)
+            .unwrap();
+        let daily = store
+            .put_calendar_event(&cal, "/c/b.ics", None, DAILY)
+            .unwrap();
+        assert_eq!(
+            store.reminder_overrides().unwrap(),
+            ReminderOverrides::default()
+        );
+        assert!(matches!(
+            store.set_reminder_override("nope", None, &[15]),
+            Err(StoreError::NotFound(_))
+        ));
+
+        store
+            .set_reminder_override(&one, None, &[5, 30, 5])
+            .unwrap();
+        let second = 1_767_333_600; // 2026-01-02 06:00 UTC, the series' second date
+        store.set_reminder_override(&daily, None, &[10]).unwrap();
+        store
+            .set_reminder_override(&daily, Some(second), &[])
+            .unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&one, None), Some(&[30, 5][..]));
+        assert_eq!(kept.get(&daily, None), Some(&[10][..]));
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[][..]));
+        // Other dates take the whole series' reminders.
+        assert_eq!(kept.get(&daily, Some(second + 86_400)), Some(&[10][..]));
+        assert_eq!(kept.get("other", None), None);
+
+        // Replacing one date's reminders leaves the rest.
+        store
+            .set_reminder_override(&daily, Some(second), &[60])
+            .unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[60][..]));
+        assert_eq!(kept.get(&daily, None), Some(&[10][..]));
+        // The whole series' reminders replace the dates' own.
+        store.set_reminder_override(&daily, None, &[0]).unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[0][..]));
+        store
+            .set_reminder_override(&daily, Some(second), &[60])
+            .unwrap();
+        store.clear_reminder_override(&daily, Some(second)).unwrap();
+        let kept = store.reminder_overrides().unwrap();
+        assert_eq!(kept.get(&daily, Some(second)), Some(&[0][..]));
+        store.clear_reminder_override(&daily, None).unwrap();
+        assert_eq!(store.reminder_overrides().unwrap().get(&daily, None), None);
+        store.set_reminder_override(&daily, None, &[10]).unwrap();
+
+        // A newer server copy keeps them; the event going removes them.
+        store
+            .put_calendar_event(&cal, "/c/a.ics", Some("\"2\""), ONE)
+            .unwrap();
+        assert!(
+            store
+                .reminder_overrides()
+                .unwrap()
+                .get(&one, None)
+                .is_some()
+        );
+        store.delete_calendar_event(&one).unwrap();
+        assert_eq!(store.reminder_overrides().unwrap().get(&one, None), None);
+        assert!(
+            store
+                .reminder_overrides()
+                .unwrap()
+                .get(&daily, None)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn occurrences_show_the_reminders_kept_here() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_support::add_account(&store, "me@work.example");
+        let cal = store
+            .set_calendars(&account, &[found("https://x/c/", "Personal")])
+            .unwrap()[0]
+            .id
+            .clone();
+        let daily = store
+            .put_calendar_event(&cal, "/c/b.ics", None, DAILY)
+            .unwrap();
+        let first = 1_767_247_200; // 2026-01-01 06:00 UTC
+        let shown = |overrides: &ReminderOverrides| -> Vec<Vec<u32>> {
+            mail_core::ical::occurrences(DAILY, first, first + 3 * 86_400)
+                .into_iter()
+                .map(|mut o| {
+                    overrides.apply(&daily, &mut o);
+                    o.reminders
+                })
+                .collect()
+        };
+        // The event's own (none) until reminders are kept here.
+        assert_eq!(
+            shown(&store.reminder_overrides().unwrap()),
+            vec![Vec::<u32>::new(); 3]
+        );
+        store.set_reminder_override(&daily, None, &[15]).unwrap();
+        store
+            .set_reminder_override(&daily, Some(first + 86_400), &[60, 5])
+            .unwrap();
+        assert_eq!(
+            shown(&store.reminder_overrides().unwrap()),
+            [vec![15], vec![60, 5], vec![15]]
+        );
+        let mut master = mail_core::ical::master(DAILY).unwrap();
+        store
+            .reminder_overrides()
+            .unwrap()
+            .apply(&daily, &mut master);
+        assert_eq!(master.reminders, [15]);
     }
 
     #[test]

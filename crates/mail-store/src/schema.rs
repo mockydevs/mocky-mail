@@ -505,8 +505,25 @@ CREATE TABLE account_connections (
 );
 ";
 
+/// Version 11: reminders kept on this device (0.8.0).
+///
+/// - `event_reminder_overrides`: the reminders (minutes before, a JSON
+///   array) chosen here for an event you can't change on the server (a
+///   read-only calendar, or a meeting someone else organises). `occurrence`
+///   is the `recurrence_id` of one date of a series, `NULL` for the whole
+///   event. They go with the event.
+const V11: &str = r"
+CREATE TABLE event_reminder_overrides (
+    event_id   TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+    occurrence INTEGER,
+    minutes    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX event_reminder_overrides_key
+    ON event_reminder_overrides (event_id, ifnull(occurrence, 'all'));
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -815,6 +832,47 @@ mod tests {
             .query_row("SELECT count(*) FROM task_lists", [], |row| row.get(0))
             .unwrap();
         assert_eq!(lists, 1);
+    }
+
+    #[test]
+    fn a_version_ten_database_keeps_its_events_and_gains_reminder_overrides() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(10) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 10).unwrap();
+        conn.execute_batch(
+            r"INSERT INTO accounts (id, email, display_name, auth, color, imap_host, imap_port,
+                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at)
+                 VALUES ('a', 'a@x.co', 'A', 'password', '#000',
+                 'imap.x.co', 993, 'tls', 'smtp.x.co', 465, 'tls', NULL, 0);
+              INSERT INTO calendars (id, account_id, url, name, color)
+                 VALUES ('c', 'a', 'https://x.co/cal/', 'Personal', NULL);
+              INSERT INTO calendar_events (id, calendar_id, href, ics) VALUES ('e', 'c', '/e.ics', '');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        conn.execute_batch(
+            "INSERT INTO event_reminder_overrides (event_id, occurrence, minutes) VALUES ('e', NULL, '[15]');
+             INSERT INTO event_reminder_overrides (event_id, occurrence, minutes) VALUES ('e', 100, '[5]');",
+        )
+        .unwrap();
+        // One for the whole event, one per date.
+        assert!(
+            conn.execute_batch(
+                "INSERT INTO event_reminder_overrides (event_id, occurrence, minutes) VALUES ('e', NULL, '[]');"
+            )
+            .is_err()
+        );
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM calendar_events;")
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM event_reminder_overrides", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

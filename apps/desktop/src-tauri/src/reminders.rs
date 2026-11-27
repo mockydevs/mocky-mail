@@ -70,13 +70,17 @@ fn candidates(state: &AppState, now: i64) -> AppResult<Vec<Candidate>> {
         let accounts = state.store.list_accounts()?;
         let from = now.saturating_sub(MISSED);
         let to = now.saturating_add(AHEAD);
+        // Reminders chosen here for events that can't be changed on the
+        // server take the place of the event's own alarms.
+        let overrides = state.store.reminder_overrides()?;
         for stored in state.store.calendar_events_between(from, to)? {
             let me = calendars
                 .iter()
                 .find(|c| c.id == stored.calendar_id)
                 .and_then(|c| accounts.iter().find(|a| a.id == c.account_id))
                 .map(|a| a.email.clone());
-            for o in ical::occurrences(&stored.ics, from, to) {
+            for mut o in ical::occurrences(&stored.ics, from, to) {
+                overrides.apply(&stored.id, &mut o);
                 if o.reminders.is_empty() {
                     continue;
                 }

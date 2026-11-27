@@ -3962,6 +3962,34 @@ mod tests {
         // No list: the attendees stay as they are.
         let same = edit_event(&edited, &input(Repeat::Keep), 0).unwrap();
         assert_eq!(master(&same).unwrap().attendees.len(), 2);
+        // Someone else's meeting keeps its organiser, whoever edits it.
+        let theirs = made.replace("mailto:info@mocky.co.ke", "mailto:lead@client.example");
+        assert_eq!(
+            master(&theirs)
+                .unwrap()
+                .organizer
+                .map(|p| p.email)
+                .as_deref(),
+            Some("lead@client.example")
+        );
+        for organizer in [None, me()] {
+            let edited = edit_event(
+                &theirs,
+                &EventInput {
+                    attendees: Some(vec!["amina@studio.example".into()]),
+                    organizer,
+                    ..input(Repeat::Keep)
+                },
+                0,
+            )
+            .unwrap();
+            let shown = master(&edited).unwrap();
+            assert_eq!(
+                shown.organizer.map(|p| p.email).as_deref(),
+                Some("lead@client.example")
+            );
+            assert_eq!(edited.matches("ORGANIZER").count(), 1);
+        }
     }
 
     #[test]

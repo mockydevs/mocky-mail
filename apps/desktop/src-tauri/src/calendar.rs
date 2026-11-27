@@ -259,6 +259,7 @@ pub fn list_events(
     }
     let calendars = state.store.list_calendars()?;
     let accounts = state.store.list_accounts()?;
+    let overrides = state.store.reminder_overrides()?;
     let mut out = Vec::new();
     for stored in state.store.calendar_events_between(from, to)? {
         let Some(calendar) = calendars
@@ -271,7 +272,8 @@ pub fn list_events(
             .iter()
             .find(|a| a.id == calendar.account_id)
             .map(|a| a.email.as_str());
-        for occurrence in ical::occurrences(&stored.ics, from, to) {
+        for mut occurrence in ical::occurrences(&stored.ics, from, to) {
+            overrides.apply(&stored.id, &mut occurrence);
             // Invitations you declined stay on the server (so it could tell
             // the organiser) but aren't shown.
             if !declined(&occurrence, me) {
@@ -296,14 +298,7 @@ pub fn get_event(state: State<'_, Arc<AppState>>, id: String) -> AppResult<Calen
     let stored = state.store.get_calendar_event(&id)?;
     let calendar = state.store.get_calendar(&stored.calendar_id)?;
     let account = state.store.get_account(&calendar.account_id)?;
-    let occurrence = ical::master(&stored.ics)
-        .ok_or_else(|| AppError::invalid("This calendar item isn't an event."))?;
-    Ok(with_place(
-        &calendar,
-        stored.id,
-        occurrence,
-        Some(&account.email),
-    ))
+    shown_event(&state, &calendar, &account, &stored)
 }
 
 fn account_of(state: &AppState, calendar: &Calendar) -> AppResult<Account> {
@@ -457,6 +452,106 @@ fn send_invitations(
     Ok(())
 }
 
+/// Whether a save of a stored event can only change its reminders here:
+/// its calendar is read-only, or someone else organises it.
+fn reminders_only(calendar: &Calendar, stored: &StoredEvent, me: &str) -> bool {
+    !calendar.writable || !organises(&stored.ics, me)
+}
+
+/// Who is passed as organiser for a save: you, for a new event or one you
+/// organise (or with no organiser yet). Never someone else's meeting, so
+/// its organiser is never replaced.
+fn organizer_for(existing: Option<&StoredEvent>, account: &Account) -> Option<Person> {
+    existing
+        .is_none_or(|stored| organises(&stored.ics, &account.email))
+        .then(|| me_of(account))
+}
+
+/// The stored event as shown, with the reminders kept here.
+fn shown_event(
+    state: &AppState,
+    calendar: &Calendar,
+    account: &Account,
+    stored: &StoredEvent,
+) -> AppResult<CalendarEvent> {
+    let mut occurrence = ical::master(&stored.ics)
+        .ok_or_else(|| AppError::invalid("This calendar item isn't an event."))?;
+    state
+        .store
+        .reminder_overrides()?
+        .apply(&stored.id, &mut occurrence);
+    Ok(with_place(
+        calendar,
+        stored.id.clone(),
+        occurrence,
+        Some(&account.email),
+    ))
+}
+
+/// For an event that can't be changed on the server (see
+/// [`reminders_only`]): save only its reminders, on this device, and give
+/// it back. Nothing else the editor sent is used, and nothing goes to the
+/// server. `None` when the event can be changed on the server.
+fn save_reminders_here(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    stored: &StoredEvent,
+    input: &EventInput,
+) -> AppResult<Option<CalendarEvent>> {
+    let calendar = state.store.get_calendar(&stored.calendar_id)?;
+    let account = account_of(state, &calendar)?;
+    if !reminders_only(&calendar, stored, &account.email) {
+        return Ok(None);
+    }
+    let shown = keep_reminders_here(state, &calendar, &account, stored, input)?;
+    if input.reminders.is_some() {
+        changed(app, &[]);
+        crate::reminders::refresh(app, state);
+    }
+    Ok(Some(shown))
+}
+
+/// The calendar an event is saved to on the server, and its account: one
+/// that events can be added to.
+fn writable_calendar(state: &AppState, calendar_id: &str) -> AppResult<(Calendar, Account)> {
+    let calendar = state.store.get_calendar(calendar_id)?;
+    if !calendar.writable {
+        return Err(AppError::invalid(
+            "Events can't be added to this calendar. Choose another one.",
+        ));
+    }
+    let account = account_of(state, &calendar)?;
+    Ok((calendar, account))
+}
+
+/// After saving on the server: reminders sent there are no longer kept
+/// here (for that date, or the whole event).
+fn reminders_on_server(state: &AppState, event_id: &str, input: &EventInput) -> AppResult<()> {
+    if input.reminders.is_some() {
+        let one_date = input.occurrence.filter(|_| input.scope == Scope::This);
+        state.store.clear_reminder_override(event_id, one_date)?;
+    }
+    Ok(())
+}
+
+/// The store side of [`save_reminders_here`]: `reminders` (`None`: as
+/// they are) for the whole event, or with `scope: this` for that date.
+fn keep_reminders_here(
+    state: &AppState,
+    calendar: &Calendar,
+    account: &Account,
+    stored: &StoredEvent,
+    input: &EventInput,
+) -> AppResult<CalendarEvent> {
+    if let Some(minutes) = &input.reminders {
+        let one_date = input.occurrence.filter(|_| input.scope == Scope::This);
+        state
+            .store
+            .set_reminder_override(&stored.id, one_date, minutes)?;
+    }
+    shown_event(state, calendar, account, stored)
+}
+
 /// `save_event`: create or change an event on the server, then here.
 #[tauri::command]
 pub async fn save_event(
@@ -465,18 +560,19 @@ pub async fn save_event(
     event: EventSave,
 ) -> AppResult<CalendarEvent> {
     let mut input = checked(event.event)?;
-    let calendar = state.store.get_calendar(&event.calendar_id)?;
-    if !calendar.writable {
-        return Err(AppError::invalid(
-            "Events can't be added to this calendar. Choose another one.",
-        ));
-    }
-    let account = account_of(&state, &calendar)?;
-    input.organizer = Some(me_of(&account));
     let existing = match &event.id {
         Some(id) => Some(state.store.get_calendar_event(id)?),
         None => None,
     };
+    // An event you can't change on the server (read-only calendar, or a
+    // meeting someone else organises): only its reminders, kept here.
+    if let Some(stored) = &existing
+        && let Some(shown) = save_reminders_here(&app, &state, stored, &input)?
+    {
+        return Ok(shown);
+    }
+    let (calendar, account) = writable_calendar(&state, &event.calendar_id)?;
+    input.organizer = organizer_for(existing.as_ref(), &account);
     if calendar.provider == CalendarProvider::Microsoft {
         return save_graph_event(&app, &state, &account, &calendar, existing, &input).await;
     }
@@ -539,6 +635,7 @@ pub async fn save_event(
     let id = state
         .store
         .put_calendar_event(&calendar.id, &href, etag.as_deref(), &ics)?;
+    reminders_on_server(&state, &id, &input)?;
     // Invitations: the server sends them itself if it schedules (SOGo,
     // Google); otherwise they go out through the Outbox.
     if input.notify_attendees
@@ -559,7 +656,12 @@ pub async fn save_event(
     changed(&app, &[]);
     let occurrence =
         ical::master(&ics).ok_or_else(|| AppError::internal("saved event unreadable"))?;
-    Ok(with_place(&calendar, id, occurrence, Some(&account.email)))
+    let mut shown = with_place(&calendar, id, occurrence, Some(&account.email));
+    state
+        .store
+        .reminder_overrides()?
+        .apply(&shown.id, &mut shown.occurrence);
+    Ok(shown)
 }
 
 /// What an edit asks of a Microsoft series' rule: `None` leaves it,
@@ -637,14 +739,8 @@ async fn save_graph_event(
         .store
         .calendar_event_at(&calendar.id, &href)?
         .ok_or_else(|| AppError::invalid("The event was saved, but couldn't be read back yet. It will show after the next sync."))?;
-    let occurrence =
-        ical::master(&stored.ics).ok_or_else(|| AppError::internal("saved event unreadable"))?;
-    Ok(with_place(
-        calendar,
-        stored.id,
-        occurrence,
-        Some(&account.email),
-    ))
+    reminders_on_server(state, &stored.id, input)?;
+    shown_event(state, calendar, account, &stored)
 }
 
 /// `delete_event`: delete an event (or a whole series), or with
@@ -1254,5 +1350,153 @@ mod tests {
         .map(|i| i.scope)
         .ok();
         assert_eq!(all, Some(Scope::All));
+    }
+
+    const THEIRS: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:m\r\nDTSTART:20261118T060000Z\r\nDTEND:20261118T070000Z\r\nSUMMARY:Site visit\r\nORGANIZER;CN=Peter:mailto:peter@client.example\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const MINE: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:o\r\nDTSTART:20261118T060000Z\r\nDTEND:20261118T070000Z\r\nSUMMARY:Review\r\nORGANIZER:mailto:Me@Example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const PLAIN: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:p\r\nDTSTART:20261118T060000Z\r\nDTEND:20261118T070000Z\r\nSUMMARY:Dentist\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    fn account() -> Account {
+        let server = mail_store::ServerConfig {
+            host: "mail.example".into(),
+            port: 993,
+            security: mail_store::Security::Tls,
+        };
+        Account {
+            id: "a".into(),
+            email: "me@example.com".into(),
+            display_name: "Me".into(),
+            auth: mail_store::AuthKind::Password,
+            color: "#2450c8".into(),
+            imap: server.clone(),
+            smtp: server,
+            size_limit_bytes: None,
+            created_at: 0,
+            sort_order: 0,
+            sync_months: None,
+        }
+    }
+
+    fn stored(ics: &str) -> StoredEvent {
+        StoredEvent {
+            id: "e".into(),
+            calendar_id: "c".into(),
+            href: "/c/e.ics".into(),
+            etag: None,
+            ics: ics.into(),
+        }
+    }
+
+    fn calendar(writable: bool) -> Calendar {
+        Calendar {
+            id: "c".into(),
+            account_id: "a".into(),
+            url: "https://x/c/".into(),
+            name: "Personal".into(),
+            color: None,
+            visible: true,
+            writable,
+            provider: CalendarProvider::Caldav,
+            remote_id: None,
+        }
+    }
+
+    #[test]
+    fn only_reminders_change_when_the_server_copy_cant() {
+        let me = "me@example.com";
+        // Read-only calendar: even your own event.
+        assert!(reminders_only(&calendar(false), &stored(MINE), me));
+        assert!(reminders_only(&calendar(false), &stored(PLAIN), me));
+        // Someone else's meeting, even in a calendar you can write to.
+        assert!(reminders_only(&calendar(true), &stored(THEIRS), me));
+        // Yours, or with no organiser: saved on the server as before.
+        assert!(!reminders_only(&calendar(true), &stored(MINE), me));
+        assert!(!reminders_only(&calendar(true), &stored(PLAIN), me));
+    }
+
+    #[test]
+    fn someone_elses_organiser_is_never_replaced() {
+        let account = account();
+        // New events, and events with no organiser yet: you.
+        assert_eq!(
+            organizer_for(None, &account).map(|p| p.email),
+            Some("me@example.com".to_owned())
+        );
+        assert!(organizer_for(Some(&stored(PLAIN)), &account).is_some());
+        assert!(organizer_for(Some(&stored(MINE)), &account).is_some());
+        // Someone else's meeting: nobody is passed, so Peter stays.
+        assert_eq!(organizer_for(Some(&stored(THEIRS)), &account), None);
+        let input = EventInput {
+            attendees: Some(vec!["me@example.com".into(), "ann@x.example".into()]),
+            organizer: organizer_for(Some(&stored(THEIRS)), &account),
+            repeat: Repeat::Keep,
+            ..input()
+        };
+        let edited = ical::edit_event(THEIRS, &input, 1_795_000_000)
+            .and_then(|ics| ical::master(&ics))
+            .and_then(|o| o.organizer)
+            .map(|p| p.email);
+        assert_eq!(edited.as_deref(), Some("peter@client.example"));
+    }
+
+    #[test]
+    fn reminders_of_a_read_only_event_are_kept_here() {
+        let state = AppState::new(
+            mail_store::Store::open_in_memory().unwrap(),
+            Arc::new(mail_sync::secrets::MemoryStore::default()),
+            std::env::temp_dir(),
+        );
+        let template = account();
+        let account = state
+            .store
+            .insert_account(&mail_store::NewAccount {
+                email: template.email,
+                display_name: template.display_name,
+                auth: template.auth,
+                color: template.color,
+                imap: template.imap,
+                smtp: template.smtp,
+                size_limit_bytes: None,
+                created_at: 0,
+            })
+            .unwrap();
+        let found = FoundCalendar {
+            url: "https://x/c/".into(),
+            name: "Shared".into(),
+            writable: false,
+            ..FoundCalendar::default()
+        };
+        let calendar = state.store.set_calendars(&account.id, &[found]).unwrap()[0].clone();
+        let id = state
+            .store
+            .put_calendar_event(&calendar.id, "/c/m.ics", Some("\"1\""), THEIRS)
+            .unwrap();
+        let event = state.store.get_calendar_event(&id).unwrap();
+        assert!(reminders_only(&calendar, &event, &account.email));
+        // Everything else the editor sent is ignored.
+        let edit = EventInput {
+            title: "Renamed".into(),
+            start: 1_795_100_000,
+            end: 1_795_103_600,
+            reminders: Some(vec![5, 60]),
+            ..input()
+        };
+        let shown = keep_reminders_here(&state, &calendar, &account, &event, &edit).unwrap();
+        assert_eq!(shown.occurrence.reminders, [60, 5]);
+        assert_eq!(shown.occurrence.title, "Site visit");
+        assert_eq!(shown.occurrence.start, 1_794_981_600);
+        assert!(!shown.occurrence.is_organizer);
+        // The server copy is untouched; the reminders show from here.
+        let after = state.store.get_calendar_event(&id).unwrap();
+        assert_eq!(after.ics, THEIRS);
+        let again = shown_event(&state, &calendar, &account, &after).unwrap();
+        assert_eq!(again.occurrence.reminders, [60, 5]);
+        // No reminders sent: they stay as they are.
+        let unchanged = EventInput {
+            reminders: None,
+            ..input()
+        };
+        let shown = keep_reminders_here(&state, &calendar, &account, &event, &unchanged).unwrap();
+        assert_eq!(shown.occurrence.reminders, [60, 5]);
     }
 }
