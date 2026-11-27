@@ -119,6 +119,8 @@ export type MessageDetail = MessageListItem & {
   html: string | null;
   text: string | null;
   blockedRemoteImages: number;
+  /** Pictures load because the sender (or their domain) is in the trusted list. */
+  imagesTrusted?: boolean;
   attachments: AttachmentMeta[];
   messageIdHeader: string | null;
   /** In-Reply-To of this message (for continuing a saved reply draft). */
@@ -184,6 +186,97 @@ export type ListSort = 'date' | 'from' | 'subject' | 'size';
 
 export type Importance = 'low' | 'normal' | 'high';
 
+export type SearchScope = 'folder' | 'subfolders' | 'account' | 'all';
+
+/** One piece of a parsed search, for showing the query back as chips. */
+export interface SearchTerm {
+  /** `text` for plain words and phrases; otherwise the operator without its colon. */
+  field: 'text' | 'from' | 'to' | 'cc' | 'subject' | 'body' | 'has' | 'is' | 'category' | 'before' | 'after' | 'in' | 'larger' | 'smaller';
+  value: string;
+  negated: boolean;
+  /** Joined to the next term by OR (absent otherwise). */
+  orWithNext?: boolean;
+}
+
+/** The result of parsing a search box query. */
+export interface ParsedSearch {
+  terms: SearchTerm[];
+  /** Plain-language problems, e.g. "after: needs a date like 2026-10-01". */
+  errors: string[];
+}
+
+/** What a rule looks at. */
+export type RuleConditionKind =
+  | 'from' | 'to' | 'cc' | 'toOrCc' | 'subject' | 'body' | 'subjectOrBody' | 'header'
+  | 'hasAttachment' | 'importance' | 'sizeOver' | 'sizeUnder' | 'category' | 'toMe' | 'onlyToMe';
+
+export interface RuleCondition {
+  kind: RuleConditionKind;
+  /**
+   * Words or addresses for the text kinds (several, comma-separated: any of
+   * them matches; case-insensitive "contains"); a header name and words as
+   * `Name: words` for `header`; `high`/`normal`/`low` for `importance`;
+   * kilobytes for the size kinds; the category name for `category`. Unused
+   * for `hasAttachment`, `toMe`, `onlyToMe`.
+   */
+  value: string;
+}
+
+export type RuleActionKind =
+  | 'move' | 'copy' | 'categorize' | 'flag' | 'clearFlag' | 'clearCategories'
+  | 'markRead' | 'setImportance' | 'delete' | 'notify' | 'pin';
+
+export interface RuleAction {
+  kind: RuleActionKind;
+  /** For move/copy. A folder of the rule's account (rules for all accounts can only use `role`). */
+  folderId?: string | null;
+  /** For move/copy in a rule for all accounts: the folder with this role in each account. */
+  role?: FolderRole | null;
+  /** For categorize. */
+  category?: string | null;
+  /** For setImportance. */
+  importance?: Importance | null;
+}
+
+export interface Rule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** null: every account. */
+  accountId: string | null;
+  /** `all`: every condition must match; `any`: one is enough. No conditions: every message. */
+  match: 'all' | 'any';
+  conditions: RuleCondition[];
+  /** The rule skips a message that matches any of these. */
+  exceptions: RuleCondition[];
+  actions: RuleAction[];
+  /** Later rules don't run on a message this rule matched. */
+  stopProcessing: boolean;
+  /** Also write it to the mail server (Sieve), so it runs when this device is off. */
+  keepOnServer: boolean;
+  /** Read only. `local`: runs here only; `server`: also on the server; `unsupported`: the server can't run it (says why in `serverNote`). */
+  serverStatus: 'local' | 'server' | 'unsupported';
+  serverNote: string | null;
+  /** Lower runs first. */
+  order: number;
+}
+
+export type RuleInput = Omit<Rule, 'id' | 'serverStatus' | 'serverNote' | 'order'> & { id: string | null };
+
+export interface RuleRunResult {
+  /** Messages looked at. */
+  checked: number;
+  /** Messages at least one rule matched. */
+  matched: number;
+}
+
+/** A sender whose remote pictures always load. */
+export interface ImageSender {
+  /** An address, or a domain when `wholeDomain`. */
+  sender: string;
+  wholeDomain: boolean;
+}
+
 /** A colour category. Names are unique (case-insensitive) across all accounts. */
 export interface Category {
   name: string;
@@ -207,6 +300,12 @@ export interface ListQuery {
   sort?: ListSort;
   /** Default true: newest, Z–A, largest first. */
   descending?: boolean;
+  /**
+   * Where `search` looks. Default `folder`: the open view only. `subfolders`
+   * adds the folders below it, `account` the whole account, `all` every
+   * account. `search` takes the query language in docs/ipc.md ("Search").
+   */
+  searchScope?: SearchScope;
 }
 
 /** What a mailto: link asks to fill in a new message with. */
@@ -516,6 +615,8 @@ export interface MailEvents {
   /** The backend also shows the desktop notification when enabled. */
   'mail://new-mail': { accountId: string; count: number };
   'mail://accounts-changed': Record<string, never>;
+  /** A rule's server copy was written, or writing it gave up. */
+  'mail://rules-changed': { rules: Rule[] };
   'mail://contacts-changed': { books: AddressBookStatus[] };
   /** After a calendar sync (with each account's status) or a change made here (empty). */
   'mail://calendar-changed': { calendars: CalendarStatus[] };
@@ -552,6 +653,22 @@ export interface MailApi {
   listMessages(query: ListQuery & { threads?: boolean }): Promise<MessagePage>;
   /** Always put mail from this sender (or anyone at its domain) in Focused or Other; null removes the rule. */
   setFocusRule(sender: string, focus: Focus | null, wholeDomain: boolean): Promise<void>;
+  /** Parse a search box query without running it (for chips and help). */
+  parseSearch(query: string): Promise<ParsedSearch>;
+  listRules(): Promise<Rule[]>;
+  /** Adds (id null) or changes a rule; returns them all, in order. */
+  saveRule(rule: RuleInput): Promise<Rule[]>;
+  deleteRule(id: string): Promise<Rule[]>;
+  /** Every rule id, in the new order. */
+  reorderRules(ids: string[]): Promise<Rule[]>;
+  /** Run rules now on a folder's messages. `ruleIds` null: every enabled rule of that account. */
+  runRules(ruleIds: string[] | null, folderId: string): Promise<RuleRunResult>;
+  /** How many messages in a folder an unsaved rule would match (for the editor). */
+  previewRule(rule: RuleInput, folderId: string): Promise<number>;
+  listImageSenders(): Promise<ImageSender[]>;
+  /** Always load pictures from this sender (or their whole domain). */
+  trustImageSender(sender: string, wholeDomain: boolean): Promise<ImageSender[]>;
+  untrustImageSender(sender: string): Promise<ImageSender[]>;
   /** The mailto: link the app was started with, once (desktop). */
   takeMailto(): Promise<Mailto | null>;
   /** Read a mailto: link (from Android, or the mail://mailto event). */

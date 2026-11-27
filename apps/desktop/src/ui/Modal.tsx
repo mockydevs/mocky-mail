@@ -6,7 +6,8 @@ interface Props {
   children: ReactNode;
   /** Text under the title. */
   description?: string;
-  size?: 'small' | 'medium';
+  /** `large`: a form with many fields; it fills the screen on a phone. */
+  size?: 'small' | 'medium' | 'large';
 }
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])';

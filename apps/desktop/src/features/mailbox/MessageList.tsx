@@ -62,6 +62,8 @@ interface Props {
   selectionBar?: ReactNode;
   /** Buttons beside the title: sort and the reading pane position. */
   tools?: ReactNode;
+  /** Searching beyond the open folder: the folder each row is in. */
+  folderOf?: ((item: MessageListItem) => string | null) | undefined;
 }
 
 const FILTERS: readonly { id: ReadFilter; label: string }[] = [
@@ -365,6 +367,7 @@ export function MessageList(props: Props) {
                 const isChecked = checked.has(m.id);
                 const name = who(m, outgoing);
                 const subject = m.subject || '(no subject)';
+                const where = props.folderOf?.(m) ?? null;
                 return (
                   <li key={m.id}>
                     {i === 0 && <h2 className="rows__group">{group.label}</h2>}
@@ -476,8 +479,9 @@ export function MessageList(props: Props) {
                           </span>
                           <span className="row__subject">{subject}</span>
                           <span className="row__preview">{m.preview}</span>
-                          {(m.categories.length > 0 || (m.flagged && m.flagDue !== null)) && (
+                          {(where !== null || m.categories.length > 0 || (m.flagged && m.flagDue !== null)) && (
                             <span className="row__tags">
+                              {where !== null && <span className="row__folder">In {where}</span>}
                               {m.flagged && m.flagDue !== null && (
                                 <span className={`row__due${isOverdue(m.flagDue, now) ? ' row__due--overdue' : ''}`}>
                                   {dueLabel(m.flagDue, now)}

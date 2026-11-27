@@ -1,7 +1,8 @@
 //! `ManageSieve` client (RFC 5804): reading and storing the server-side
 //! mail rules (Sieve scripts) that run as mail arrives, used for
-//! out-of-office replies. Port 4190, upgraded with `STARTTLS` (which is
-//! required: the password is never sent in the clear), `PLAIN` login.
+//! out-of-office replies and for the rules kept on the server. Port
+//! 4190, upgraded with `STARTTLS` (which is required: the password is
+//! never sent in the clear), `PLAIN` login.
 
 use std::time::Duration;
 

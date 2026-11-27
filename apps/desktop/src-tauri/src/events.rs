@@ -50,6 +50,15 @@ pub fn outbox_changed(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// Rules changed in the background (a write to the mail server finished
+/// or gave up); sends them all, in order.
+pub fn rules_changed(app: &AppHandle, state: &AppState) {
+    match state.store.list_rules() {
+        Ok(rules) => emit(app, "mail://rules-changed", json!({ "rules": rules })),
+        Err(error) => eprintln!("couldn't list rules: {error}"),
+    }
+}
+
 /// What a new-mail notification says: the sender and subject when one
 /// message arrived, otherwise the account and how many.
 fn notification_text(

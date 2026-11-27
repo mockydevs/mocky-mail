@@ -19,8 +19,15 @@ const ICONS: Partial<Record<FolderRole, IconName>> = {
 };
 
 interface Props {
-  mode: 'move' | 'copy';
-  rows: readonly MessageListItem[];
+  /** `pick`: choose a folder for something else (a rule), not for messages. */
+  mode: 'move' | 'copy' | 'pick';
+  /** The messages being moved or copied. */
+  rows?: readonly MessageListItem[];
+  /** `pick`: the accounts whose folders are offered (a heading each when there are several). */
+  accountIds?: readonly string[];
+  /** `pick`: the dialog's title and the line under it. */
+  title?: string;
+  description?: string;
   accounts: readonly Account[];
   folders: Readonly<Record<string, Folder[]>>;
   onPick: (target: MoveTarget, name: string) => void;
@@ -43,20 +50,28 @@ function matches(nodes: readonly FolderNode[], needle: string, path: string[] = 
  * box. Messages from several accounts can only go to a folder every account
  * has (Inbox, Archive, Trash), each to its own account's.
  */
-export function FolderPicker({ mode, rows, accounts, folders, onPick, onClose }: Props) {
+export function FolderPicker({ mode, rows = [], accounts, folders, onPick, onClose, ...props }: Props) {
   const id = useId();
   const [filter, setFilter] = useState('');
-  const accountIds = [...new Set(rows.map((r) => r.accountId))];
+  const accountIds = mode === 'pick' ? [...(props.accountIds ?? [])] : [...new Set(rows.map((r) => r.accountId))];
   const single = accountIds.length === 1 ? accountIds[0] : undefined;
   const account = single === undefined ? undefined : accounts.find((a) => a.id === single);
-  const own = single === undefined ? [] : (folders[single] ?? []);
+  /** Several accounts' folders, each under its name (picking a folder for a rule). */
+  const several = mode === 'pick' && accountIds.length > 1;
+  const nameOf = (accountId: string) => {
+    const a = accounts.find((x) => x.id === accountId);
+    return a ? a.displayName || a.email : '';
+  };
   const here = new Set(rows.map((r) => r.folderId));
   /** Every message is already in it: moving there would do nothing. */
   const isHere = (folder: Folder) => mode === 'move' && here.size === 1 && here.has(folder.id);
   const verb = mode === 'move' ? 'Move' : 'Copy';
   const count = rows.length === 1 ? 'this message' : `${String(rows.length)} messages`;
   const needle = filter.trim().toLocaleLowerCase();
-  const tree = buildFolderTree(own);
+  const trees = (several ? accountIds : single === undefined ? [] : [single]).map((accountId) => ({
+    accountId,
+    tree: buildFolderTree(folders[accountId] ?? []),
+  }));
 
   const pick = (folder: Folder, label: string) => {
     onPick({ folderId: folder.id }, label);
@@ -68,7 +83,7 @@ export function FolderPicker({ mode, rows, accounts, folders, onPick, onClose }:
       className="picker__folder"
       style={{ '--depth': depth } as CSSProperties}
       disabled={isHere(folder)}
-      aria-label={title ?? label}
+      aria-label={several ? `${nameOf(folder.accountId)}: ${title ?? label}` : (title ?? label)}
       onClick={() => {
         pick(folder, label);
       }}
@@ -97,17 +112,22 @@ export function FolderPicker({ mode, rows, accounts, folders, onPick, onClose }:
     </ul>
   );
 
+  const found = trees.flatMap(({ accountId, tree }) =>
+    matches(tree, needle, several ? [nameOf(accountId)] : []).filter((m) => m.node.folder),
+  );
+
   return (
     <Modal
-      title={`${verb} ${count} to…`}
+      title={props.title ?? `${verb} ${count} to…`}
       description={
-        account
+        props.description ??
+        (account
           ? `Folders in ${account.displayName || account.email}.`
-          : 'These messages are in different accounts, so they can only go to a folder every account has. Each goes to its own account’s.'
+          : 'These messages are in different accounts, so they can only go to a folder every account has. Each goes to its own account’s.')
       }
       onClose={onClose}
     >
-      {account ? (
+      {trees.length > 0 ? (
         <>
           <label className="form-field" htmlFor={`${id}-filter`}>
             <span className="form-field__label">Find a folder</span>
@@ -123,20 +143,24 @@ export function FolderPicker({ mode, rows, accounts, folders, onPick, onClose }:
           </label>
           <nav className="picker" aria-label="Folders">
             {needle ? (
-              (() => {
-                const found = matches(tree, needle);
-                return found.length === 0 ? (
-                  <p className="muted">No folder matches “{filter.trim()}”.</p>
-                ) : (
-                  <ul className="picker__list">
-                    {found.map(({ node, path }) =>
-                      node.folder ? <li key={node.key}>{folderButton(node.folder, path, 0)}</li> : null,
-                    )}
-                  </ul>
-                );
-              })()
+              found.length === 0 ? (
+                <p className="muted">No folder matches “{filter.trim()}”.</p>
+              ) : (
+                <ul className="picker__list">
+                  {found.map(({ node, path }) =>
+                    node.folder ? <li key={node.key}>{folderButton(node.folder, path, 0, several ? path.split(' / ').slice(1).join(' / ') : undefined)}</li> : null,
+                  )}
+                </ul>
+              )
+            ) : several ? (
+              trees.map(({ accountId, tree }) => (
+                <div key={accountId} className="picker__account">
+                  <h3 className="picker__heading">{nameOf(accountId)}</h3>
+                  {renderTree(tree, 0)}
+                </div>
+              ))
             ) : (
-              renderTree(tree, 0)
+              trees.map(({ accountId, tree }) => <div key={accountId}>{renderTree(tree, 0)}</div>)
             )}
           </nav>
         </>

@@ -446,7 +446,21 @@ async fn session(
             if report.changed {
                 events::changed(app, &account.id, std::slice::from_ref(&folder.id));
             }
-            new_unseen = new_unseen.saturating_add(report.new_unseen);
+            // Rules run on new inbox mail (its bodies were just fetched,
+            // for rules that read the text). What they move away or mark
+            // read isn't announced as new. A rule that fails never holds
+            // up mail.
+            let handled = if report.new_mail.is_empty() {
+                0
+            } else {
+                crate::rules::on_new_mail(app, state, account, &report.new_mail).unwrap_or_else(
+                    |error| {
+                        eprintln!("mail rules didn't run: {}", error.message);
+                        0
+                    },
+                )
+            };
+            new_unseen = new_unseen.saturating_add(report.new_unseen.saturating_sub(handled));
         }
         if scope == Scope::All {
             // Once per inbox: mark old mail that is newsletters or
@@ -456,6 +470,9 @@ async fn session(
                     stop_if_disconnected(error, &mut problem)?;
                 }
             }
+            // Rules that couldn't reach the server's filters earlier (or
+            // never went to this account) are written now, in the background.
+            crate::server_rules::retry_if_due(app, account);
         }
         if new_unseen > 0 {
             events::new_mail(app, state, account, new_unseen);
@@ -886,6 +903,9 @@ pub(crate) async fn refresh_folders(
 struct Report {
     changed: bool,
     new_unseen: u32,
+    /// Mail new in an inbox since the last sync (not on the first): its
+    /// id and whether it is unread, for the rules.
+    new_mail: Vec<(String, bool)>,
 }
 
 const fn flags(f: mail_sync::imap::Flags) -> MessageFlags {
@@ -976,6 +996,7 @@ async fn sync_folder(
         return Ok(Report {
             changed: false,
             new_unseen: 0,
+            new_mail: Vec::new(),
         });
     };
     let mut changed = state
@@ -1004,6 +1025,7 @@ async fn sync_folder(
     };
     let fresh = uids_to_fetch(&server, &local_before, highest, settled, window.as_ref());
     let mut new_unseen: u32 = 0;
+    let mut new_mail = Vec::new();
     // Only UIDs actually stored move the high-water mark, so a message the
     // server didn't return this time is asked for again next time.
     let mut stored_max = highest;
@@ -1011,7 +1033,7 @@ async fn sync_folder(
         let Some(set) = uid_set(chunk) else { continue };
         for message in conn.fetch_headers(&folder.path, &set).await? {
             stored_max = stored_max.max(message.uid);
-            state.store.upsert_message(
+            let id = state.store.upsert_message(
                 &folder.id,
                 message.uid,
                 &message.summary,
@@ -1025,12 +1047,11 @@ async fn sync_folder(
                 &message.tags,
                 status.accepts_keywords,
             )?;
-            if !initial
-                && message.uid > highest
-                && !message.flags.seen
-                && folder.role == FolderRole::Inbox
-            {
-                new_unseen = new_unseen.saturating_add(1);
+            if !initial && message.uid > highest && folder.role == FolderRole::Inbox {
+                if !message.flags.seen {
+                    new_unseen = new_unseen.saturating_add(1);
+                }
+                new_mail.push((id, !message.flags.seen));
             }
             changed = true;
         }
@@ -1071,6 +1092,7 @@ async fn sync_folder(
     Ok(Report {
         changed,
         new_unseen,
+        new_mail,
     })
 }
 

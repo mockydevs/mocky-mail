@@ -9,6 +9,7 @@ import type {
   Category,
   Focus,
   FolderRole,
+  ImageSender,
   Importance,
   MessageDetail,
   MessageListItem,
@@ -52,6 +53,8 @@ export interface ReaderActions {
   onJunk?: (junk: boolean) => void;
   /** Computers: the message in a window of its own. */
   onOpenWindow?: (() => void) | undefined;
+  /** "Create rule…": a new rule started from this message. */
+  onCreateRule?: ((message: MessageDetail) => void) | undefined;
 }
 
 interface Props extends ReaderActions {
@@ -87,6 +90,33 @@ interface Props extends ReaderActions {
   workOffline?: boolean;
 }
 
+/** Free mail services: trusting the whole domain would trust everyone on it. */
+const PUBLIC_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'hotmail.com',
+  'live.com',
+  'yahoo.com',
+  'icloud.com',
+  'me.com',
+  'aol.com',
+  'proton.me',
+  'protonmail.com',
+  'gmx.com',
+  'mail.com',
+]);
+
+/** The trusted entry that lets this address's pictures load: the address itself, or its domain. */
+function trustedEntry(senders: readonly ImageSender[], address: string): ImageSender | undefined {
+  const a = address.toLowerCase();
+  const domain = a.slice(a.lastIndexOf('@') + 1);
+  return (
+    senders.find((s) => !s.wholeDomain && s.sender === a) ??
+    senders.find((s) => s.wholeDomain && (domain === s.sender || domain.endsWith(`.${s.sender}`)))
+  );
+}
+
 const IMPORTANCE_ACTIONS: readonly [Importance, string][] = [
   ['high', 'Mark as high importance'],
   ['normal', 'Mark as normal importance'],
@@ -117,10 +147,12 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
   // Per message: dark mode can be switched off for one email that reads badly inverted.
   const [originalColours, setOriginalColours] = useState(false);
   const allowRemote = alwaysLoadImages || showImages;
+  /** Bumped when the sender is trusted or no longer trusted: the message loads again. */
+  const [trustRevision, setTrustRevision] = useState(0);
   // With or without remote images it is the same message: the image variant
   // loads as a new revision, so the message stays on screen meanwhile and a
   // quick reply being typed (or an opened earlier message) is not thrown away.
-  const loaded = useLoad(`message:${id}`, Number(allowRemote), () => api.getMessage(id, allowRemote));
+  const loaded = useLoad(`message:${id}`, Number(allowRemote) + 2 * trustRevision, () => api.getMessage(id, allowRemote));
   // Tell the shell what is on screen once it has settled. From an effect, so
   // a slow answer for a message the user has already left is never reported;
   // a layout effect, so the shell knows before a key (r, a, f) can be pressed.
@@ -128,6 +160,11 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
   useLayoutEffect(() => {
     onLoaded(settled);
   }, [settled, onLoaded]);
+  // Pictures that load because the sender is trusted: which entry did it, for "Stop".
+  const trustedNow = settled?.imagesTrusted === true;
+  const trustList = useLoad(`image-senders:${id}:${String(trustedNow)}`, trustRevision, () =>
+    trustedNow ? api.listImageSenders() : Promise.resolve<ImageSender[]>([]),
+  );
   const [notice, setNotice] = useState<{ error: AppError | null; text: string | null }>({ error: null, text: null });
   // The attachment shown full screen, if any.
   const [viewing, setViewing] = useState<AttachmentMeta | null>(null);
@@ -262,6 +299,72 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
     setNotice({ error: toAppError(e), text: null });
   };
 
+  // Pictures: always from this sender or domain, or no longer.
+  const fromAddress = message.from?.address ?? '';
+  const fromDomain = fromAddress.includes('@') ? fromAddress.slice(fromAddress.lastIndexOf('@') + 1).toLowerCase() : '';
+  const trusted = message.imagesTrusted === true;
+  const remoteShown = allowRemote || trusted;
+  const trustedBy = trusted
+    ? (trustedEntry(trustList.status === 'ready' ? trustList.value : [], fromAddress) ?? {
+        sender: fromAddress.toLowerCase(),
+        wholeDomain: false,
+      })
+    : null;
+  const trust = (wholeDomain: boolean) => {
+    setNotice({ error: null, text: null });
+    api.trustImageSender(fromAddress, wholeDomain).then(() => {
+      setTrustRevision((r) => r + 1);
+    }, failed);
+  };
+  const untrust = () => {
+    if (!trustedBy) return;
+    setNotice({ error: null, text: null });
+    api.untrustImageSender(trustedBy.sender).then(() => {
+      setShowImages(false);
+      setTrustRevision((r) => r + 1);
+    }, failed);
+  };
+  const trustButtons = fromAddress.includes('@') && !outgoing && (
+    <>
+      <button
+        type="button"
+        className="btn btn--ghost btn--small"
+        onClick={() => {
+          trust(false);
+        }}
+      >
+        Always show from {fromAddress}
+      </button>
+      {fromDomain && !PUBLIC_DOMAINS.has(fromDomain) && (
+        <button
+          type="button"
+          className="btn btn--ghost btn--small"
+          onClick={() => {
+            trust(true);
+          }}
+        >
+          Always show from {fromDomain}
+        </button>
+      )}
+    </>
+  );
+  const trustedNote = trustedBy && isHtml && (
+    <p className="images-note">
+      <Icon name="image" size={16} />
+      <span>
+        Pictures shown because you trust {trustedBy.wholeDomain ? `everyone at ${trustedBy.sender}` : trustedBy.sender} ·{' '}
+      </span>
+      <button
+        type="button"
+        className="btn btn--link btn--small"
+        aria-label={`Stop showing pictures from ${trustedBy.sender} automatically`}
+        onClick={untrust}
+      >
+        Stop
+      </button>
+    </p>
+  );
+
   // Whole-message actions, in the More menu on both layouts.
   const senderAddress = message.from?.address;
   const moveTo: Focus | null = props.focusTab === 'focused' ? 'other' : props.focusTab === 'other' ? 'focused' : null;
@@ -297,7 +400,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
       label: 'Print',
       icon: 'print',
       run: () => {
-        printMessage(api, message, allowRemote).catch(failed);
+        printMessage(api, message, remoteShown).catch(failed);
       },
     },
     {
@@ -319,6 +422,18 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
         api.messageSource(message.id).then(setSource, failed);
       },
     },
+    ...(props.onCreateRule && role !== 'drafts' && role !== 'sent' && !outgoing
+      ? [
+          {
+            key: 'rule',
+            label: 'Create rule…',
+            icon: 'move' as const,
+            run: () => {
+              props.onCreateRule?.(message);
+            },
+          },
+        ]
+      : []),
     ...(props.onImportance && role !== 'drafts'
       ? IMPORTANCE_ACTIONS.filter(([value]) => value !== item.importance).map(([value, label]) => ({
           key: `importance-${value}`,
@@ -424,6 +539,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
           <a
             key={i}
             href={part.url}
+            title={part.url}
             onClick={(e) => {
               e.preventDefault();
               open(part.url);
@@ -437,7 +553,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
   );
 
   if (props.narrow) {
-    const blocked = isHtml && message.blockedRemoteImages > 0 && !allowRemote;
+    const blocked = isHtml && message.blockedRemoteImages > 0 && !remoteShown;
     const toMe = account !== undefined && message.to.some((m) => m.address.toLowerCase() === account.email.toLowerCase());
     const firstTo = message.to[0];
     const toLabel = toMe ? 'to me' : firstTo ? `to ${firstTo.name ?? firstTo.address}` : 'no recipients';
@@ -630,8 +746,10 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
                 >
                   Show
                 </button>
+                {trustButtons}
               </div>
             )}
+            {trustedNote}
             {message.invitation && <InvitationCard key={message.id} messageId={message.id} initial={message.invitation} />}
             {attachmentList}
             {viewer}
@@ -644,7 +762,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
               title={`Message: ${message.subject}`}
               html={message.html ?? ''}
               theme={originalColours ? 'light' : theme}
-              allowRemoteImages={allowRemote}
+              allowRemoteImages={remoteShown}
               fitContent
             />
           ) : (
@@ -929,7 +1047,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
           </div>
         </header>
 
-        {message.html !== null && message.blockedRemoteImages > 0 && !allowRemote && (
+        {message.html !== null && message.blockedRemoteImages > 0 && !remoteShown && (
           <div className="images-bar" role="status">
             <Icon name="image" />
             <span>
@@ -945,8 +1063,10 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
             >
               Show images ({message.blockedRemoteImages} blocked)
             </button>
+            {trustButtons}
           </div>
         )}
+        {trustedNote}
 
         {message.invitation && <InvitationCard key={message.id} messageId={message.id} initial={message.invitation} />}
         {attachmentList}
@@ -968,7 +1088,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
             title={`Message: ${message.subject}`}
             html={message.html ?? ''}
             theme={originalColours ? 'light' : theme}
-            allowRemoteImages={allowRemote}
+            allowRemoteImages={remoteShown}
           />
         </div>
       )}

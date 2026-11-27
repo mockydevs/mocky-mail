@@ -304,6 +304,11 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
                 counter.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
+            // A link's title says where it really goes (added below); the
+            // sender's own could claim anything.
+            if element == "a" && attribute == "title" {
+                return None;
+            }
             match attribute {
                 "bgcolor" | "color" => is_plain_colour_value(value).then_some(Cow::Borrowed(value)),
                 // Sizes are numbers or percentages, nothing else.
@@ -326,7 +331,7 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
         .map(stylesheet::clean_stylesheet)
         .filter(|css| !css.is_empty())
         .collect();
-    let body = builder.clean(html).to_string();
+    let body = title_links(&builder.clean(html).to_string());
     let html = if sheet.is_empty() {
         body
     } else {
@@ -336,6 +341,235 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
         html,
         blocked_remote_images: blocked.load(Ordering::Relaxed),
     }
+}
+
+/// Most characters of a link's address shown in its title.
+const MAX_TITLE_URL: usize = 300;
+
+/// File types whose names look like domains (`invoice.pdf`).
+const FILE_ENDINGS: &[&str] = &[
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "zip", "rar", "jpg", "jpeg", "png", "gif",
+    "txt", "csv", "htm", "html", "php", "aspx", "ics", "eml", "mp3", "mp4",
+];
+
+/// A piece of serialized HTML: text, or a whole tag.
+enum Piece<'a> {
+    Text(&'a str),
+    Tag(&'a str),
+}
+
+/// Split the sanitizer's own output into text and tags. It writes every
+/// attribute value in double quotes (a `"` inside becomes `&quot;`) and
+/// escapes `<` in text, and the elements that hold raw text (scripts,
+/// styles) and comments are already gone, so a `<` outside quotes always
+/// starts a tag and a `>` outside quotes always ends one.
+fn pieces(html: &str) -> Vec<Piece<'_>> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut in_tag = false;
+    let mut in_quote = false;
+    for (i, c) in html.char_indices() {
+        match (in_tag, c) {
+            (false, '<') => {
+                if i > start {
+                    out.push(Piece::Text(html.get(start..i).unwrap_or_default()));
+                }
+                start = i;
+                in_tag = true;
+                in_quote = false;
+            }
+            (true, '"') => in_quote = !in_quote,
+            (true, '>') if !in_quote => {
+                let end = i.saturating_add(1);
+                out.push(Piece::Tag(html.get(start..end).unwrap_or_default()));
+                start = end;
+                in_tag = false;
+            }
+            _ => {}
+        }
+    }
+    if start < html.len() {
+        let rest = html.get(start..).unwrap_or_default();
+        out.push(if in_tag {
+            Piece::Tag(rest)
+        } else {
+            Piece::Text(rest)
+        });
+    }
+    out
+}
+
+/// The value of an attribute in a serialized tag (still escaped).
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let mut rest = tag.strip_prefix('<')?;
+    // The tag name.
+    rest = rest.trim_start_matches(|c: char| !c.is_whitespace() && c != '>');
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() || rest.starts_with('>') || rest.starts_with("/>") {
+            return None;
+        }
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '=' || c == '>')
+            .unwrap_or(rest.len());
+        let (key, after) = rest.split_at(end);
+        rest = after;
+        let value = if let Some(after_eq) = rest.strip_prefix("=\"") {
+            let close = after_eq.find('"')?;
+            let (value, after) = after_eq.split_at(close);
+            rest = after.get(1..).unwrap_or_default();
+            Some(value)
+        } else {
+            None
+        };
+        if key.eq_ignore_ascii_case(name) {
+            return value;
+        }
+    }
+}
+
+/// Undo the escaping the serializer writes.
+fn unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+}
+
+fn escape_attribute(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The host after `scheme://`: no user name, port or trailing dot.
+fn host_of(rest: &str) -> Option<String> {
+    let authority = rest.split(['/', '?', '#', '\\']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = if host.starts_with('[') {
+        host.split_inclusive(']').next()?
+    } else {
+        host.split(':').next()?
+    };
+    let host = host.trim_end_matches('.').to_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+/// The host a web link really goes to.
+fn link_host(href: &str) -> Option<String> {
+    let lower = href.trim().to_lowercase();
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))?;
+    host_of(rest)
+}
+
+/// The host a link's visible text shows, when the text is a web address
+/// or a domain (`www.bank.example`, `https://bank.example/login`).
+fn shown_host(text: &str) -> Option<String> {
+    let text = text
+        .trim()
+        .trim_matches(|c| matches!(c, '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\''));
+    if text.is_empty() || text.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let without = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"));
+    let rest = without.unwrap_or(&lower);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // An email address, not a web address.
+    if without.is_none() && authority.contains('@') {
+        return None;
+    }
+    let host = host_of(rest)?;
+    let labels: Vec<&str> = host.split('.').collect();
+    let tld = labels.last()?;
+    let domain_like = labels.len() >= 2
+        && labels
+            .iter()
+            .all(|l| !l.is_empty() && l.chars().all(|c| c.is_alphanumeric() || c == '-'))
+        && tld.chars().count() >= 2
+        && tld.chars().all(char::is_alphabetic);
+    // `invoice.pdf` is a file name, unless it was written as an address.
+    let file_name = without.is_none()
+        && !host.starts_with("www.")
+        && !rest.contains('/')
+        && FILE_ENDINGS.contains(tld);
+    (domain_like && !file_name).then_some(host)
+}
+
+/// The same site: equal ignoring `www.`, or one inside the other
+/// (`example.com` shown, `click.example.com` real).
+fn same_site(shown: &str, real: &str) -> bool {
+    let a = shown.strip_prefix("www.").unwrap_or(shown);
+    let b = real.strip_prefix("www.").unwrap_or(real);
+    a == b || b.ends_with(&format!(".{a}")) || a.ends_with(&format!(".{b}"))
+}
+
+/// The title for a link: where it goes, with a warning first when the
+/// text shows a different web address.
+fn link_title(href: &str, visible: &str) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() || href.to_ascii_lowercase().starts_with("cid:") {
+        return None;
+    }
+    let mut shown: String = href.chars().take(MAX_TITLE_URL).collect();
+    if href.chars().count() > MAX_TITLE_URL {
+        shown.push('…');
+    }
+    match (link_host(href), shown_host(visible)) {
+        (Some(real), Some(claimed)) if !same_site(&claimed, &real) => Some(format!(
+            "Link goes to {real}, not the address shown.\n{shown}"
+        )),
+        _ => Some(shown),
+    }
+}
+
+/// Give every link in sanitized HTML a `title` with its real destination,
+/// so pointing at it shows where it goes, and a warning when its text
+/// looks like a different address.
+fn title_links(html: &str) -> String {
+    let pieces = pieces(html);
+    let mut out = String::with_capacity(html.len().saturating_add(html.len() / 8));
+    for (i, piece) in pieces.iter().enumerate() {
+        let tag = match piece {
+            Piece::Text(text) => {
+                out.push_str(text);
+                continue;
+            }
+            Piece::Tag(tag) => *tag,
+        };
+        let Some(after_name) = tag
+            .strip_prefix("<a")
+            .filter(|rest| rest.starts_with([' ', '>', '\t', '\n']))
+        else {
+            out.push_str(tag);
+            continue;
+        };
+        let visible: String = pieces
+            .iter()
+            .skip(i.saturating_add(1))
+            .take_while(|p| !matches!(p, Piece::Tag(t) if t.eq_ignore_ascii_case("</a>")))
+            .filter_map(|p| match p {
+                Piece::Text(t) => Some(unescape(t)),
+                Piece::Tag(_) => None,
+            })
+            .collect();
+        match attribute(tag, "href").and_then(|href| link_title(&unescape(href), &visible)) {
+            Some(title) => {
+                out.push_str("<a title=\"");
+                out.push_str(&escape_attribute(&title));
+                out.push('"');
+                out.push_str(after_name);
+            }
+            None => out.push_str(tag),
+        }
+    }
+    out
 }
 
 /// Replace `cid:` image references in *already sanitized* HTML with the
@@ -454,6 +688,114 @@ mod tests {
     fn links_open_without_referrer_or_opener() {
         let out = clean(r#"<a href="https://example.com">x</a>"#);
         assert!(out.contains(r#"rel="noopener noreferrer""#));
+    }
+
+    #[test]
+    fn links_show_where_they_really_go() {
+        let out = clean(
+            r#"<a href="https://shop.example/order?id=1&amp;x=2" title="Your bank">Track your order</a>"#,
+        );
+        assert!(
+            out.contains(r#"<a title="https://shop.example/order?id=1&amp;x=2" href="#),
+            "{out}"
+        );
+        // The sender's own title is gone.
+        assert!(!out.contains("Your bank"), "{out}");
+        let mail = clean(r#"<a href="mailto:help@shop.example">Write to us</a>"#);
+        assert!(
+            mail.contains(r#"title="mailto:help@shop.example""#),
+            "{mail}"
+        );
+        // No address, no title; inline references aren't links.
+        assert!(!clean("<a>plain</a>").contains("title"));
+        assert!(!clean(r#"<a href="cid:x">i</a>"#).contains("title"));
+        // Long addresses are cut.
+        let long = format!("https://t.example/{}", "a".repeat(1000));
+        let out = clean(&format!(r#"<a href="{long}">x</a>"#));
+        let title = attribute(&out, "title").unwrap();
+        assert!(title.chars().count() <= MAX_TITLE_URL + 1, "{title}");
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn links_whose_text_shows_another_address_say_so() {
+        let warned = |html: &str| {
+            let out = clean(html);
+            attribute(&out, "title")
+                .unwrap_or_default()
+                .starts_with("Link goes to")
+        };
+        let out =
+            clean(r#"<a href="https://evil.example/login">https://www.mybank.co.ke/login</a>"#);
+        assert!(
+            out.contains("title=\"Link goes to evil.example, not the address shown.\nhttps://evil.example/login\""),
+            "{out}"
+        );
+        assert!(warned(
+            r#"<a href="https://paypal.com.evil.example/">paypal.com</a>"#
+        ));
+        assert!(warned(
+            r#"<a href="https://www.paypal.com@evil.example/">www.paypal.com</a>"#
+        ));
+        assert!(warned(
+            r#"<a href="http://evil.example:8080/"><b>www.</b>safaricom.co.ke</a>"#
+        ));
+        // The same site, a part of it, or words that aren't an address.
+        assert!(!warned(
+            r#"<a href="https://www.mocky.co.ke/x">mocky.co.ke</a>"#
+        ));
+        assert!(!warned(
+            r#"<a href="https://click.mocky.co.ke/x">mocky.co.ke</a>"#
+        ));
+        assert!(!warned(
+            r#"<a href="https://mocky.co.ke/">www.mocky.co.ke</a>"#
+        ));
+        assert!(!warned(
+            r#"<a href="https://MOCKY.co.ke/">https://mocky.co.ke</a>"#
+        ));
+        assert!(!warned(
+            r#"<a href="https://cdn.example/f">invoice.pdf</a>"#
+        ));
+        assert!(!warned(r#"<a href="https://t.example/">Pay now</a>"#));
+        assert!(!warned(
+            r#"<a href="https://t.example/">jane@mocky.co.ke</a>"#
+        ));
+        assert!(!warned(r#"<a href="https://t.example/">version 2.0</a>"#));
+        assert!(!warned(
+            r#"<a href="mailto:x@evil.example">www.bank.example</a>"#
+        ));
+    }
+
+    #[test]
+    fn titles_cannot_break_out_of_attributes() {
+        // Markup inside an attribute value isn't a link, and quotes in the
+        // address or the text stay inside the title.
+        for html in [
+            r#"<img src="cid:a" alt="<a onclick=x() href=https://e.example>">"#,
+            r#"<p class="<a href=&quot;https://e.example&quot; onmouseover=x()>">t</p>"#,
+            r#"<a href="https://e.example/&quot;onmouseover=&quot;x()">"www.bank.example"</a>"#,
+            r#"<a href="https://e.example/'><img src=x onerror=y>">a<img alt="</a>" src="cid:q">b</a>"#,
+        ] {
+            let out = clean(html);
+            let lower = out.to_ascii_lowercase();
+            for (i, _) in lower
+                .match_indices("onmouseover")
+                .chain(lower.match_indices("onclick"))
+                .chain(lower.match_indices("onerror"))
+            {
+                // Only ever inside a quoted value: an even number of quotes
+                // in the tag before it.
+                let tag_start = lower.get(..i).unwrap().rfind('<').unwrap();
+                let quotes = lower.get(tag_start..i).unwrap().matches('"').count();
+                assert!(quotes % 2 == 1, "{html} -> {out}");
+            }
+            // Every tag still parses with balanced quotes.
+            for piece in pieces(&out) {
+                if let Piece::Tag(tag) = piece {
+                    assert!(tag.matches('"').count() % 2 == 0, "{html} -> {out}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -640,6 +982,19 @@ mod tests {
             let out = clean(&wrapped).to_ascii_lowercase();
             prop_assert!(!out.contains("<script"));
             prop_assert!(!out.contains("onerror"));
+        }
+
+        #[test]
+        fn titled_links_keep_tags_well_formed(text in ".{0,60}", href in "[ -~]{0,60}") {
+            let html = format!(
+                "<p>{text}<a href=\"https://{href}\">{text}</a><img alt=\"<a href='x'>{href}\" src=\"cid:a\"></p>"
+            );
+            let out = clean(&html);
+            for piece in pieces(&out) {
+                if let Piece::Tag(tag) = piece {
+                    prop_assert!(tag.matches('"').count() % 2 == 0, "{}", out);
+                }
+            }
         }
     }
 }

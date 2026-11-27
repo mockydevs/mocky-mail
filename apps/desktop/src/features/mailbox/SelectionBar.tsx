@@ -15,6 +15,8 @@ export interface SelectionActions {
   onArchive: () => void;
   onDelete: () => void;
   onJunk: (junk: boolean) => void;
+  /** "Create rule…" from the selected messages' senders. */
+  onCreateRule?: () => void;
 }
 
 interface Props extends SelectionActions {
@@ -91,6 +93,11 @@ export function SelectionBar(props: Props) {
         />
         <Action icon="move" label="Move to…" onClick={props.onMove} />
         <Action icon="copy" label="Copy to…" onClick={props.onCopy} />
+        {props.onCreateRule && role !== 'drafts' && role !== 'sent' && (
+          <button type="button" className="btn btn--ghost btn--small" onClick={props.onCreateRule}>
+            Create rule…
+          </button>
+        )}
         {role !== 'archive' && !inBin && role !== 'drafts' && <Action icon="archive" label="Archive" onClick={props.onArchive} />}
         <Action icon="trash" label={inBin ? 'Delete forever' : 'Delete'} onClick={props.onDelete} />
         {role !== 'drafts' && role !== 'sent' && (
