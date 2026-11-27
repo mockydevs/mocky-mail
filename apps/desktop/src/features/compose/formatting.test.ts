@@ -1,4 +1,15 @@
+import { screen, within } from '@testing-library/react';
+import { vi } from 'vitest';
+
+import { messageHtml, selectText } from '../../test/editor';
+import { renderApp, rows } from '../../test/renderApp';
 import { link, prefixLines, wrap } from './formatting';
+import { preloadEditor } from './editor/loader';
+
+// Compose's editor is a chunk of its own: have it here before the first test.
+beforeAll(async () => {
+  await preloadEditor();
+});
 
 describe('compose formatting', () => {
   it('wraps the selection, or a placeholder, and unwraps on a second press', () => {
@@ -33,38 +44,29 @@ describe('compose formatting', () => {
 });
 
 describe('compose formatting in the app', () => {
-  it('formats with the toolbar and Ctrl+B, and previews what recipients see', async () => {
-    const { renderApp, rows } = await import('../../test/renderApp');
-    const { screen, within, waitFor } = await import('@testing-library/react');
-    const { user } = renderApp();
+  it('formats with the toolbar and Ctrl+I, and sends what recipients see as HTML', async () => {
+    const { user, api } = renderApp();
     await rows();
+    const send = vi.spyOn(api, 'sendMessage');
     await user.click(screen.getByRole('button', { name: 'New message' }));
     const form = within(screen.getByRole('form', { name: 'New message' }));
-    const body = form.getByLabelText<HTMLTextAreaElement>('Message');
+    await user.type(form.getByLabelText('To'), 'peter@client.example');
+    const body = await form.findByLabelText('Message');
     await user.click(body);
-    await user.keyboard('{Control>}a{/Control}');
     await user.keyboard('Please confirm');
-    body.setSelectionRange(7, 14);
+    selectText(body, 'confirm');
     await user.click(form.getByRole('button', { name: 'Bold' }));
-    expect(body.value.startsWith('Please **confirm**')).toBe(true);
-    // The toolbar puts the selection back on the next frame; wait for that
-    // before choosing a new one, or it lands on top of ours.
-    await waitFor(() => {
-      expect(body.selectionStart).toBe(9);
-    });
-
-    await user.click(body);
-    body.setSelectionRange(0, 6);
+    expect(form.getByRole('button', { name: 'Bold' })).toHaveAttribute('aria-pressed', 'true');
+    expect(messageHtml(body)).toContain('<strong>confirm</strong>');
+    selectText(body, 'Please');
     await user.keyboard('{Control>}i{/Control}');
-    expect(body.value.startsWith('*Please* **confirm**')).toBe(true);
+    expect(messageHtml(body)).toContain('<em>Please</em>');
 
-    await user.click(form.getByRole('button', { name: 'Preview' }));
-    const frame = await form.findByTitle('Preview of your message');
-    await waitFor(() => {
-      expect(frame.getAttribute('srcdoc')).toContain('<strong>confirm</strong>');
+    await user.click(form.getByRole('button', { name: 'Send' }));
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ bodyHtml: '<p><em>Please</em> <strong>confirm</strong></p>', bodyText: 'Please confirm' }),
+      );
     });
-    expect(body).not.toBeVisible();
-    await user.click(form.getByRole('button', { name: 'Edit' }));
-    expect(body).toBeVisible();
   });
 });

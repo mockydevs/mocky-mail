@@ -2,7 +2,14 @@ import { act, screen, within } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import type { DraftSaved } from '../../api/types';
+import { messageText } from '../../test/editor';
 import { reader, renderApp, rows, unified } from '../../test/renderApp';
+import { preloadEditor } from './editor/loader';
+
+// Compose's editor is a chunk of its own: have it here before the first test.
+beforeAll(async () => {
+  await preloadEditor();
+});
 
 const MB = 1024 * 1024;
 const composeForm = (name = 'New message') => within(screen.getByRole('form', { name }));
@@ -17,7 +24,7 @@ describe('compose', () => {
     expect(form.getByLabelText('From')).toBeInTheDocument();
     expect(form.getByLabelText('To')).toHaveFocus();
     expect(form.getByLabelText('Subject')).toBeInTheDocument();
-    expect(form.getByLabelText('Message')).toBeInTheDocument();
+    expect(await form.findByLabelText('Message')).toBeInTheDocument();
 
     await user.click(form.getByRole('button', { name: 'Send' }));
     expect(form.getByRole('alert')).toHaveTextContent('Add at least one recipient.');
@@ -174,7 +181,7 @@ describe('compose', () => {
     expect(form.getByRole('button', { name: 'Remove Brian Otieno <brian@personal.example>' })).toBeInTheDocument();
     expect(form.getByText('Brian Otieno')).toBeInTheDocument();
     expect(form.getByLabelText('Subject')).toHaveValue('Re: Lunch on Friday?');
-    expect(form.getByLabelText('Message')).toHaveValue('Friday works. 1pm at');
+    expect(messageText(await form.findByLabelText('Message'))).toBe('Friday works. 1pm at');
     expect(await form.findByText('Menu.pdf')).toBeInTheDocument();
     await user.click(form.getByRole('button', { name: 'Send' }));
     await vi.waitFor(() => {
@@ -361,8 +368,11 @@ describe('compose', () => {
     expect(row('To').getByRole('button', { name: 'Remove Wanjiru Kamau <wanjiru@fitout.example>' })).toBeInTheDocument();
     expect(row('Cc').getByRole('button', { name: 'Remove Amina Hassan <amina@studio.example>' })).toBeInTheDocument();
     expect(form.getByLabelText('Subject')).toHaveValue('Re: Revised quotation for the Westlands office fit-out');
-    expect(form.getByLabelText('Message')).toHaveFocus();
-    expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain('> Thanks,\n> Wanjiru');
+    const message = await form.findByLabelText('Message');
+    await vi.waitFor(() => {
+      expect(message).toHaveFocus();
+    });
+    expect(messageText(message)).toContain('> Thanks,\n> Wanjiru');
     await user.click(form.getByRole('button', { name: 'Send' }));
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledWith(
@@ -382,6 +392,6 @@ describe('compose', () => {
     const form = composeForm('Forward');
     expect(form.getByLabelText('To')).toHaveValue('');
     expect(form.getByLabelText('Subject')).toHaveValue('Fwd: Revised quotation for the Westlands office fit-out');
-    expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain('---------- Forwarded message ----------');
+    expect(messageText(await form.findByLabelText('Message'))).toContain('---------- Forwarded message ----------');
   });
 });

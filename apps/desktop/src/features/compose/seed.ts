@@ -1,5 +1,6 @@
 import type { Account, Draft, DraftAttachment, FolderRole, Mailbox, MessageDetail } from '../../api/types';
 import { formatLongDate } from '../../lib/format';
+import { quotedOriginal, signatureBlock, SIGNATURE_SEPARATOR } from './richText';
 
 /** "Wanjiru Kamau <wanjiru@fitout.example>" or the bare address. */
 export function formatMailbox(mailbox: Mailbox): string {
@@ -111,6 +112,8 @@ export function replyDraft(message: MessageDetail, account: Account, all: boolea
     cc: formatMailboxes(cc),
     subject: replySubject(message.subject),
     bodyText: `\n\n${header}\n${quote(bodyTextOf(message))}`,
+    // The original stays as HTML, quoted under where the user types.
+    bodyHtml: `<p></p>${quotedOriginal([header], message, true)}`,
     replyToMessageId: message.id,
   };
 }
@@ -120,18 +123,20 @@ export function replyDraft(message: MessageDetail, account: Account, all: boolea
  * attachments_for_draft; the caller loads them because that can fail.
  */
 export function forwardDraft(message: MessageDetail, timeZone?: string, attachments: DraftAttachment[] = []): Draft {
-  const header = [
+  const lines = [
     '---------- Forwarded message ----------',
     `From: ${message.from ? formatMailbox(message.from) : ''}`,
     `Date: ${formatLongDate(message.date, timeZone)}`,
     `Subject: ${message.subject}`,
     `To: ${formatMailboxes(message.to)}`,
     ...(message.cc.length > 0 ? [`Cc: ${formatMailboxes(message.cc)}`] : []),
-  ].join('\n');
+  ];
+  const header = lines.join('\n');
   return {
     ...blankDraft(message.accountId),
     subject: forwardSubject(message.subject),
     bodyText: `\n\n${header}\n\n${bodyTextOf(message)}`,
+    bodyHtml: `<p></p>${quotedOriginal(lines, message, false)}`,
     references: threading(message).references,
     attachments,
   };
@@ -150,6 +155,8 @@ export function draftFromMessage(message: MessageDetail, attachments: DraftAttac
     bcc: formatMailboxes(message.bcc ?? []),
     subject: message.subject,
     bodyText: bodyTextOf(message),
+    // Written in the rich-text editor: carry on with its HTML.
+    bodyHtml: message.html,
     inReplyTo: message.inReplyTo,
     references: message.references,
     attachments,
@@ -185,13 +192,7 @@ export function toolbarActions(role: FolderRole | null): ToolbarAction[] {
   return actions;
 }
 
-/** Starts a signature in plain text (RFC 3676: dash dash space). The backend looks for it too. */
-export const SIGNATURE_SEPARATOR = '-- ';
-
-/** The signature as compose shows it. */
-export function signatureBlock(text: string): string {
-  return `${SIGNATURE_SEPARATOR}\n${text}`;
-}
+export { SIGNATURE_SEPARATOR, signatureBlock };
 
 /**
  * Add a signature under where the user types: after the (empty) top of a new

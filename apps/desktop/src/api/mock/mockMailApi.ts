@@ -1,5 +1,5 @@
 import { appError, MailError, toAppError } from '../errors';
-import { parseRecipients } from '../../features/compose/recipients';
+import { addressOf, isPlausibleAddress, parseRecipients, splitRecipients } from '../../features/compose/recipients';
 import type {
   Account,
   AddressBookStatus,
@@ -28,6 +28,7 @@ import type {
   MessageDetail,
   MessageListItem,
   OutboxEntry,
+  RecipientCheck,
   Rule,
   RuleAction,
   ServerSuggestion,
@@ -106,6 +107,10 @@ export interface MockMailApi extends MailApi {
   readonly printed: string[];
   /** Message ids passed to openMessageWindow, for assertions. */
   readonly openedWindows: string[];
+  /** Keys of the compose windows opened with openComposeWindow, for assertions. */
+  readonly openedComposeWindows: string[];
+  /** Read receipts answered with answerReadReceipt, for assertions. */
+  readonly answeredReceipts: { messageId: string; send: boolean }[];
   /** Make takeMailto return this link once, as if the app were opened with it. */
   launchWith(url: string): void;
   /** A new message arrives, as a sync would bring it in. */
@@ -275,6 +280,10 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const favoriteIds = new Set(options.favorites ?? []);
   folders = folders.map((f) => ({ ...f, favorite: favoriteIds.has(f.id) }));
   const openedWindows: string[] = [];
+  const openedComposeWindows: string[] = [];
+  const answeredReceipts: { messageId: string; send: boolean }[] = [];
+  /** Drafts waiting for their compose window to take them, by key. */
+  const composeDrafts = new Map<string, Draft>();
   const signatures = new Map<string, SignatureSet>(
     Object.entries(options.signatures ?? {}).map(([accountId, signature]) => [
       accountId,
@@ -426,7 +435,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     if (to.valid.length + cc.valid.length + bcc.valid.length === 0) throw appError('invalid', 'Add at least one recipient.');
     const estimatedBytes = draft.attachments.reduce(
       (sum, a) => sum + encodedSize(a.size),
-      encodedSize(new TextEncoder().encode(draft.bodyText).length) + HEADER_ALLOWANCE,
+      encodedSize(new TextEncoder().encode(draft.bodyText + (draft.bodyHtml ?? '')).length) + HEADER_ALLOWANCE,
     );
     const limitBytes = acc.sizeLimitBytes ?? DEFAULT_LIMIT;
     if (estimatedBytes > limitBytes) {
@@ -508,6 +517,8 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     openedFiles,
     printed,
     openedWindows,
+    openedComposeWindows,
+    answeredReceipts,
     launchWith: (url) => {
       launchLink = url;
     },
@@ -788,6 +799,87 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         else focusRules.delete(key);
       }),
 
+    resolveRecipients: (text) =>
+      run('resolveRecipients', () => {
+        const own = new Set(accounts.map((a) => a.email.toLowerCase()));
+        // Everyone the mock knows: saved contacts, then people in the mail.
+        const people = new Map<string, Mailbox>();
+        for (const c of contacts.filter((x) => x.state !== 'deleted')) {
+          for (const address of c.emails) people.set(address.toLowerCase(), { name: c.name || null, address });
+        }
+        for (const m of messages) {
+          for (const p of [m.from, ...m.to, ...m.cc].filter((x): x is Mailbox => x !== null)) {
+            const key = p.address.toLowerCase();
+            if (!own.has(key) && !people.has(key)) people.set(key, p);
+          }
+        }
+        const result: RecipientCheck = { resolved: [], ambiguous: [], invalid: [] };
+        const add = (mailbox: Mailbox) => {
+          if (!result.resolved.some((m) => m.address.toLowerCase() === mailbox.address.toLowerCase())) result.resolved.push(mailbox);
+        };
+        for (const entry of splitRecipients(text)) {
+          const address = addressOf(entry);
+          if (address !== null && isPlausibleAddress(address)) {
+            const typed = /^(.*?)<[^<>]*>\s*$/.exec(entry)?.[1]?.trim().replace(/^"|"$/g, '');
+            add({ name: typed !== undefined && typed !== '' ? typed : (people.get(address.toLowerCase())?.name ?? null), address });
+            continue;
+          }
+          const q = entry.trim().toLowerCase();
+          const candidates = [...people.values()].filter((p) => {
+            const name = p.name?.toLowerCase() ?? '';
+            return name !== '' && (name.startsWith(q) || name.split(/\s+/).some((word) => word.startsWith(q)));
+          });
+          // Of several, one whose name is exactly what was typed wins, as in the backend.
+          const exact = candidates.filter((p) => p.name?.toLowerCase() === q);
+          const one = candidates.length === 1 ? candidates[0] : exact.length === 1 ? exact[0] : undefined;
+          if (one) add(one);
+          else if (candidates.length > 0) result.ambiguous.push({ input: entry, candidates });
+          else result.invalid.push(entry);
+        }
+        return result;
+      }),
+
+    contactCardAttachment: (contactId) =>
+      run('contactCardAttachment', () => {
+        const found = contacts.find((c) => c.id === contactId && c.state !== 'deleted');
+        if (!found) throw appError('not_found', 'That contact no longer exists.');
+        const name = (found.name !== '' ? found.name : (found.emails[0] ?? 'Contact')).replace(/[\\/:*?"<>|]/g, '_');
+        return { path: `/tmp/mocky-mail/contacts/${found.id}.vcf`, fileName: `${name}.vcf`, size: 180 + name.length };
+      }),
+
+    messageAsAttachment: (messageId) =>
+      run('messageAsAttachment', () => {
+        const m = stored(messageId);
+        const name = (m.subject !== '' ? m.subject : 'Message').replace(/[\\/:*?"<>|]/g, '_');
+        return { path: `/tmp/mocky-mail/items/${m.id}.eml`, fileName: `${name}.eml`, size: m.size };
+      }),
+
+    answerReadReceipt: (messageId, send) =>
+      run('answerReadReceipt', () => {
+        const m = stored(messageId);
+        if (!m.readReceipt) throw appError('invalid', 'This message did not ask for a read receipt.');
+        if (m.readReceipt.answered) throw appError('invalid', 'The read receipt was already answered.');
+        messages = messages.map((x) =>
+          x.id === messageId && x.readReceipt ? { ...x, readReceipt: { ...x.readReceipt, answered: true } } : x,
+        );
+        answeredReceipts.push({ messageId, send });
+      }),
+
+    openComposeWindow: (draft) =>
+      run('openComposeWindow', () => {
+        if (options.phone) throw appError('invalid', 'Phones write one message at a time.');
+        const key = `compose-${String(seq++)}`;
+        composeDrafts.set(key, clone(draft));
+        openedComposeWindows.push(key);
+      }),
+
+    takeComposeDraft: (key) =>
+      run('takeComposeDraft', () => {
+        const draft = composeDrafts.get(key) ?? null;
+        composeDrafts.delete(key);
+        return draft;
+      }),
+
     takeMailto: () =>
       run('takeMailto', () => {
         const url = launchLink;
@@ -818,6 +910,13 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
 
     getMessage: (id, allowRemote) =>
       run('getMessage', () => {
+        // Like the backend: with Always send, opening a message that asks for a
+        // read receipt sends one at once (and it then counts as answered).
+        const asked = stored(id).readReceipt;
+        if (settings.readReceipts === 'always' && asked && !asked.answered) {
+          messages = messages.map((x) => (x.id === id && x.readReceipt ? { ...x, readReceipt: { ...x.readReceipt, answered: true } } : x));
+          answeredReceipts.push({ messageId: id, send: true });
+        }
         const { remoteHtml, ...detail } = stored(id);
         const trusted = remoteHtml !== undefined && trustsImages(detail.from?.address);
         if (!remoteHtml || !(allowRemote || trusted)) return detail;
@@ -1135,7 +1234,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
             cc: parseRecipients(draft.cc).valid.map((address) => ({ name: null, address })),
             bcc: parseRecipients(draft.bcc).valid.map((address) => ({ name: null, address })),
             replyTo: [],
-            html: null,
+            html: draft.bodyHtml ?? null,
             text: draft.bodyText,
             blockedRemoteImages: 0,
             attachments: draft.attachments.map((a, index) => ({

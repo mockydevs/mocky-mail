@@ -1,11 +1,20 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { vi } from 'vitest';
 
+import { editorOf, messageText } from '../../test/editor';
 import { reader, renderApp, rows } from '../../test/renderApp';
 import { signatureBlock, swapSignature, withSignature } from './seed';
+import { preloadEditor } from './editor/loader';
+
+// Compose's editor is a chunk of its own: have it here before the first test.
+beforeAll(async () => {
+  await preloadEditor();
+});
 
 const WORK = { html: '<b>Don Onyango</b><br>Mocky Digital', text: 'Don Onyango\nMocky Digital' };
 const PERSONAL = { html: 'Don', text: 'Don' };
+/** A new message's body with a signature: a line to write on, then the signature (null: none). */
+const shown = (text: string | null) => (text === null ? '' : `\n${signatureBlock(text)}`);
 
 describe('signature placement', () => {
   it('goes under where you type, and above the quoted original', () => {
@@ -34,17 +43,17 @@ describe('signature in the app', () => {
     const accounts = await api.listAccounts();
     await user.click(screen.getByRole('button', { name: 'New message' }));
     const form = within(screen.getByRole('form', { name: 'New message' }));
-    const body = form.getByLabelText<HTMLTextAreaElement>('Message');
+    const body = await form.findByLabelText('Message');
     const first = accounts[0];
     const other = accounts[1];
     if (!first || !other) throw new Error('mock accounts');
     const expected = (id: string) => (id === 'work' ? WORK.text : id === 'personal' ? PERSONAL.text : null);
     await waitFor(() => {
-      expect(body.value).toBe(withSignature('', expected(first.id)));
+      expect(messageText(body)).toBe(shown(expected(first.id)));
     });
     await user.selectOptions(form.getByLabelText('From'), other.id);
     await waitFor(() => {
-      expect(body.value).toBe(withSignature('', expected(other.id)));
+      expect(messageText(body)).toBe(shown(expected(other.id)));
     });
   });
 
@@ -98,15 +107,15 @@ describe('signature in the app', () => {
     await rows();
     await user.click(screen.getByRole('button', { name: 'New message' }));
     const form = within(screen.getByRole('form', { name: 'New message' }));
-    const body = form.getByLabelText<HTMLTextAreaElement>('Message');
+    const body = await form.findByLabelText('Message');
     await waitFor(() => {
-      expect(body.value).toBe(withSignature('', FULL.text));
+      expect(messageText(body)).toBe(shown(FULL.text));
     });
     const picker = form.getByRole('combobox', { name: 'Signature' });
     await user.selectOptions(picker, 'Short');
-    expect(body.value).toBe(withSignature('', SHORT.text));
+    expect(messageText(body)).toBe(shown(SHORT.text));
     await user.selectOptions(picker, 'None');
-    expect(body.value).toBe('');
+    expect(messageText(body)).toBe('');
   });
 
   it('starts replies with the reply signature', async () => {
@@ -118,7 +127,7 @@ describe('signature in the app', () => {
     await user.click(await within(reader()).findByRole('button', { name: 'Reply' }));
     const form = within(await screen.findByRole('form', { name: /^Reply/ }));
     await waitFor(() => {
-      expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain(signatureBlock(SHORT.text));
+      expect(messageText(form.getByLabelText('Message'))).toContain(signatureBlock(SHORT.text));
     });
     expect(form.getByRole('combobox', { name: 'Signature' })).toHaveDisplayValue('Short');
   });
@@ -134,7 +143,7 @@ describe('signature in the app', () => {
     await user.click(within(reader()).getByRole('button', { name: 'Forward' }));
     const form = within(await screen.findByRole('form', { name: 'Forward' }));
     await waitFor(() => {
-      expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain(signatureBlock(SHORT.text));
+      expect(messageText(form.getByLabelText('Message'))).toContain(signatureBlock(SHORT.text));
     });
     expect(form.getByRole('combobox', { name: 'Signature' })).toHaveDisplayValue('Short');
   });
@@ -205,8 +214,11 @@ describe('signature picture', () => {
     const preview = await form.findByRole('img', { name: 'Your signature' });
     expect(preview).toHaveStyle({ width: '240px' });
     // Deleting the signature from the body drops the picture too.
-    const body = form.getByLabelText<HTMLTextAreaElement>('Message');
-    fireEvent.change(body, { target: { value: 'Just words' } });
+    const body = await form.findByLabelText('Message');
+    act(() => {
+      editorOf(body).chain().focus().selectAll().insertContent('Just words').run();
+    });
+    expect(messageText(body)).toBe('Just words');
     await waitFor(() => {
       expect(form.queryByRole('img', { name: 'Your signature' })).not.toBeInTheDocument();
     });
