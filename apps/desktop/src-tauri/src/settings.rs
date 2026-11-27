@@ -51,6 +51,10 @@ pub struct Settings {
     /// Work Offline: no syncing or sending until switched off. Changes
     /// made meanwhile wait in the queue.
     pub work_offline: bool,
+    /// When an opened message asks for a read receipt: "ask" (the
+    /// interface offers to send one), "always" (sent at once, the first
+    /// time it is opened) or "never" (not offered, never sent by itself).
+    pub read_receipts: String,
     /// Read only: what this device offers, for the Settings screen.
     pub device: Device,
 }
@@ -96,6 +100,7 @@ impl Default for Settings {
             start_at_login: false,
             reading_pane: "right".into(),
             work_offline: false,
+            read_receipts: "ask".into(),
             device: Device::default(),
         }
     }
@@ -126,6 +131,9 @@ impl Settings {
         }
         if !matches!(self.reading_pane.as_str(), "right" | "bottom" | "off") {
             self.reading_pane = "right".into();
+        }
+        if !matches!(self.read_receipts.as_str(), "ask" | "always" | "never") {
+            self.read_receipts = "ask".into();
         }
         self
     }
@@ -242,10 +250,12 @@ mod tests {
             start_at_login: false,
             reading_pane: "sideways".into(),
             work_offline: true,
+            read_receipts: "sometimes".into(),
             device: Device::default(),
         }
         .normalized();
         assert_eq!(s.reading_pane, "right");
+        assert_eq!(s.read_receipts, "ask");
         assert!(s.work_offline);
         assert_eq!(s.theme, "system");
         assert_eq!(s.remote_images, "block");
@@ -282,5 +292,8 @@ mod tests {
         let json = serde_json::to_value(Settings::default()).unwrap_or_default();
         assert_eq!(json["readingPane"], "right");
         assert_eq!(json["workOffline"], false);
+        // Older settings ask before sending read receipts.
+        assert_eq!(s.read_receipts, "ask");
+        assert_eq!(json["readReceipts"], "ask");
     }
 }

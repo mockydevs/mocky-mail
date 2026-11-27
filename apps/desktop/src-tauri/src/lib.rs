@@ -10,6 +10,7 @@
 mod accounts;
 mod attachments;
 mod calendar;
+mod compose;
 mod contacts;
 mod convert;
 mod credentials;
@@ -28,6 +29,7 @@ mod message_window;
 mod organize;
 mod out_of_office;
 mod outbox;
+mod read_receipts;
 mod reminders;
 mod rules;
 mod server_rules;
@@ -293,6 +295,12 @@ pub fn run() {
             rules::list_image_senders,
             rules::trust_image_sender,
             rules::untrust_image_sender,
+            compose::resolve_recipients,
+            compose::contact_card_attachment,
+            compose::message_as_attachment,
+            compose::open_compose_window,
+            compose::take_compose_draft,
+            read_receipts::answer_read_receipt,
         ])
         .run(tauri::generate_context!());
 

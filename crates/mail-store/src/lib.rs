@@ -19,6 +19,7 @@ mod ids;
 mod messages;
 mod ops;
 mod outbox;
+mod receipts;
 mod rules;
 mod schema;
 mod search;
@@ -45,6 +46,7 @@ pub use messages::{
 };
 pub use ops::{OpKind, PendingOp};
 pub use outbox::{NewOutbox, OutboxEntry, OutboxMessage};
+pub use receipts::read_receipt_key;
 pub use rules::{ImageSender, RuleSubject, image_sender_key};
 
 /// How long a writer waits for another connection's lock before failing.

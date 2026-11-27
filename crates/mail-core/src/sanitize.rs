@@ -271,6 +271,9 @@ pub fn sanitize_html(html: &str, remote: RemoteContent) -> SanitizedHtml {
         // `class` lets the email's own stylesheet (cleaned separately)
         // reach its elements; the rest is how email has always been laid out.
         .add_generic_attributes(["style", "class", "align", "valign", "dir", "role"])
+        // Compose's own marks in a saved draft (the quoted original, the
+        // signature), so continuing it keeps them. They do nothing here.
+        .add_generic_attributes([crate::rich::QUOTE_MARKER, crate::rich::SIGNATURE_MARKER])
         .filter_style_properties(ALLOWED_STYLE_PROPERTIES.iter().copied().collect())
         .rm_tag_attributes("img", ["srcset"])
         .add_tag_attributes("img", ["border"])
@@ -353,7 +356,7 @@ const FILE_ENDINGS: &[&str] = &[
 ];
 
 /// A piece of serialized HTML: text, or a whole tag.
-enum Piece<'a> {
+pub(crate) enum Piece<'a> {
     Text(&'a str),
     Tag(&'a str),
 }
@@ -363,7 +366,7 @@ enum Piece<'a> {
 /// escapes `<` in text, and the elements that hold raw text (scripts,
 /// styles) and comments are already gone, so a `<` outside quotes always
 /// starts a tag and a `>` outside quotes always ends one.
-fn pieces(html: &str) -> Vec<Piece<'_>> {
+pub(crate) fn pieces(html: &str) -> Vec<Piece<'_>> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut in_tag = false;
@@ -400,7 +403,7 @@ fn pieces(html: &str) -> Vec<Piece<'_>> {
 }
 
 /// The value of an attribute in a serialized tag (still escaped).
-fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let mut rest = tag.strip_prefix('<')?;
     // The tag name.
     rest = rest.trim_start_matches(|c: char| !c.is_whitespace() && c != '>');
@@ -429,7 +432,7 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Undo the escaping the serializer writes.
-fn unescape(text: &str) -> String {
+pub(crate) fn unescape(text: &str) -> String {
     text.replace("&quot;", "\"")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -437,7 +440,7 @@ fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn escape_attribute(text: &str) -> String {
+pub(crate) fn escape_attribute(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")

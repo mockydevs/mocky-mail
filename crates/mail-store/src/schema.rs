@@ -404,8 +404,25 @@ CREATE TABLE image_senders (
 );
 ";
 
+/// Version 9: compose (0.7.0).
+///
+/// - `read_receipts`: read receipts asked for by received messages that
+///   were answered here (sent, or declined when `sent` is 0), so each is
+///   asked about and sent once. Keyed by the account and the message's
+///   Message-ID (`id:` and the local id when it has none), so moving the
+///   message to another folder doesn't ask again.
+const V9: &str = r"
+CREATE TABLE read_receipts (
+    account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    message_key TEXT NOT NULL,
+    sent        INTEGER NOT NULL,
+    answered_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, message_key)
+);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -607,6 +624,41 @@ mod tests {
             .query_row("SELECT count(*) FROM rules", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rules, 0);
+    }
+
+    #[test]
+    fn a_version_eight_database_gains_read_receipts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(8) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.execute_batch(
+            r"INSERT INTO accounts (id, email, display_name, auth, color, imap_host, imap_port,
+                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at)
+                 VALUES ('a', 'a@x.co', 'A', 'password', '#000',
+                 'imap.x.co', 993, 'tls', 'smtp.x.co', 465, 'tls', NULL, 0);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        conn.execute_batch(
+            "INSERT INTO read_receipts (account_id, message_key, sent, answered_at) VALUES ('a', 'q@x', 1, 5);",
+        )
+        .unwrap();
+        // Once per message.
+        assert!(
+            conn.execute_batch(
+                "INSERT INTO read_receipts (account_id, message_key, sent, answered_at) VALUES ('a', 'q@x', 0, 6);",
+            )
+            .is_err()
+        );
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM accounts;")
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM read_receipts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

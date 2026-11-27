@@ -148,6 +148,113 @@ pub fn parse_address_list(input: &str) -> Result<Vec<Mailbox>, AddressListError>
     Ok(out)
 }
 
+/// A name in a recipient field that matches more than one person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmbiguousRecipient {
+    /// The entry as typed.
+    pub input: String,
+    /// The people it could be.
+    pub candidates: Vec<Mailbox>,
+}
+
+/// Check Names: what each entry of a recipient field stands for.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipientCheck {
+    /// Addresses, and names that match one person, with names filled in.
+    pub resolved: Vec<Mailbox>,
+    /// Names that match several people.
+    pub ambiguous: Vec<AmbiguousRecipient>,
+    /// Entries that are neither an address nor anyone known, as typed.
+    pub invalid: Vec<String>,
+}
+
+/// Check Names for one field (`To`, `Cc` or `Bcc` as typed), split like
+/// [`parse_address_list`]. An entry that is an address is kept, with the
+/// name from `name_for` (the address book) when it has none. Anything else
+/// is looked up with `search` (contacts, then people from mail): one match
+/// resolves it; of several, the one whose name or address is exactly the
+/// entry (ignoring case) does; otherwise the entry is ambiguous, and with
+/// none it is invalid.
+pub fn resolve_recipients(
+    input: &str,
+    name_for: impl Fn(&str) -> Option<String>,
+    search: impl Fn(&str) -> Vec<Mailbox>,
+) -> RecipientCheck {
+    let mut check = RecipientCheck::default();
+    let add = |resolved: &mut Vec<Mailbox>, mailbox: Mailbox| {
+        if !resolved
+            .iter()
+            .any(|m| m.address.eq_ignore_ascii_case(&mailbox.address))
+        {
+            resolved.push(mailbox);
+        }
+    };
+    for entry in split_entries(input) {
+        if let Ok(mut mailbox) = parse_entry(&entry) {
+            if mailbox.name.is_none() {
+                mailbox.name = name_for(&mailbox.address)
+                    .map(|n| display_safe(&n))
+                    .filter(|n| !n.is_empty());
+            }
+            add(&mut check.resolved, mailbox);
+            continue;
+        }
+        let query = entry
+            .split('<')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('"')
+            .trim()
+            .to_owned();
+        if query.is_empty() {
+            check.invalid.push(entry);
+            continue;
+        }
+        let mut candidates: Vec<Mailbox> = Vec::new();
+        for found in search(&query) {
+            if is_valid_address(&found.address)
+                && !candidates
+                    .iter()
+                    .any(|m| m.address.eq_ignore_ascii_case(&found.address))
+            {
+                candidates.push(found);
+            }
+        }
+        let chosen = {
+            let exact: Vec<&Mailbox> = candidates
+                .iter()
+                .filter(|m| {
+                    m.name
+                        .as_deref()
+                        .is_some_and(|n| n.trim().eq_ignore_ascii_case(&query))
+                        || m.address.eq_ignore_ascii_case(&query)
+                        || m.address
+                            .split('@')
+                            .next()
+                            .is_some_and(|local| local.eq_ignore_ascii_case(&query))
+                })
+                .collect();
+            match (candidates.as_slice(), exact.as_slice()) {
+                ([one], _) => Some(one.clone()),
+                (_, [one]) => Some((*one).clone()),
+                _ => None,
+            }
+        };
+        match chosen {
+            Some(one) => add(&mut check.resolved, one),
+            None if candidates.is_empty() => check.invalid.push(entry),
+            None => check.ambiguous.push(AmbiguousRecipient {
+                input: entry,
+                candidates,
+            }),
+        }
+    }
+    check
+}
+
 fn strip_prefixes(subject: &str) -> &str {
     let mut rest = subject.trim();
     loop {
@@ -365,6 +472,88 @@ mod tests {
             parse_address_list(&many),
             Err(AddressListError::TooMany { .. })
         ));
+    }
+
+    #[test]
+    fn check_names_resolves_addresses_and_names() {
+        let book = [
+            Mailbox {
+                name: Some("Peter Mwangi".into()),
+                address: "peter@client.example".into(),
+            },
+            Mailbox {
+                name: Some("Peter Otieno".into()),
+                address: "potieno@site.example".into(),
+            },
+            Mailbox {
+                name: Some("Amina".into()),
+                address: "amina@studio.example".into(),
+            },
+            Mailbox {
+                name: Some("Amina Hassan".into()),
+                address: "ahassan@studio.example".into(),
+            },
+            Mailbox {
+                name: None,
+                address: "wanjiru@fitout.example".into(),
+            },
+        ];
+        let name_for = |address: &str| {
+            book.iter()
+                .find(|m| m.address.eq_ignore_ascii_case(address))
+                .and_then(|m| m.name.clone())
+        };
+        let search = |query: &str| -> Vec<Mailbox> {
+            let q = query.to_lowercase();
+            book.iter()
+                .filter(|m| {
+                    m.address.contains(&q)
+                        || m.name
+                            .as_deref()
+                            .is_some_and(|n| n.to_lowercase().contains(&q))
+                })
+                .cloned()
+                .collect()
+        };
+        let check = resolve_recipients(
+            "peter@client.example; \"Boss\" <boss@work.example>, pet, amina, Otieno, wanjiru, Nobody Here, PETER@client.example, bad@",
+            name_for,
+            search,
+        );
+        assert_eq!(
+            check.resolved,
+            vec![
+                Mailbox {
+                    name: Some("Peter Mwangi".into()),
+                    address: "peter@client.example".into()
+                },
+                Mailbox {
+                    name: Some("Boss".into()),
+                    address: "boss@work.example".into()
+                },
+                // "amina" matches two, but one is called exactly that.
+                Mailbox {
+                    name: Some("Amina".into()),
+                    address: "amina@studio.example".into()
+                },
+                Mailbox {
+                    name: Some("Peter Otieno".into()),
+                    address: "potieno@site.example".into()
+                },
+                mb("wanjiru@fitout.example"),
+            ]
+        );
+        assert_eq!(check.ambiguous.len(), 1);
+        assert_eq!(check.ambiguous[0].input, "pet");
+        assert_eq!(check.ambiguous[0].candidates.len(), 2);
+        assert_eq!(check.invalid, vec!["Nobody Here", "bad@"]);
+        assert_eq!(
+            resolve_recipients("", |_| None, |_| Vec::new()),
+            RecipientCheck::default()
+        );
+        let json = serde_json::to_value(&check).unwrap();
+        assert!(json["ambiguous"][0]["candidates"].is_array());
+        assert!(json["invalid"].is_array());
     }
 
     #[test]

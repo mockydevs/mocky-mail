@@ -18,6 +18,8 @@ pub mod mailto;
 pub mod message;
 pub mod outbox;
 pub mod preview;
+pub mod receipts;
+pub mod rich;
 pub mod rules;
 pub mod sanitize;
 pub mod search;

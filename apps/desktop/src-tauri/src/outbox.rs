@@ -14,11 +14,12 @@ use mail_core::message::{
     Mailbox, attachment_bytes, make_preview, parse_body, parse_summary, safe_file_name,
 };
 use mail_core::outbox::{OutboxItem, OutboxState, RetryPolicy, SendOutcome};
+use mail_core::sanitize::{RemoteContent, embed_inline_images, sanitize_html};
 use mail_core::signature::html_with_signature;
 use mail_store::{Account, AuthKind, NewOutbox, OutboxEntry};
 use mail_sync::imap::ImapConnection;
 use mail_sync::outgoing::{
-    OutgoingAttachment, OutgoingMessage, build, mime_for_file_name, with_bcc_header,
+    InlineImage, OutgoingAttachment, OutgoingMessage, build, mime_for_file_name, with_bcc_header,
 };
 use mail_sync::smtp;
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,90 @@ pub struct Draft {
     /// High or low importance, sent as headers; normal sends none.
     #[serde(default)]
     importance: Importance,
+    /// Rich-text compose: the HTML as written. Sent cleaned, with a
+    /// plain-text part made from it; `body_text` is then only a fallback.
+    #[serde(default)]
+    body_html: Option<String>,
+    /// Ask for a read receipt (`Disposition-Notification-To`: the account).
+    #[serde(default)]
+    request_read_receipt: bool,
+}
+
+impl Draft {
+    /// The subject as typed.
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+}
+
+/// What a rich-text draft sends: the HTML document, its plain text, and
+/// the pictures inside it (pasted ones and the signature's).
+struct RichParts {
+    html: String,
+    text: String,
+    inline_images: Vec<InlineImage>,
+}
+
+/// Whether `haystack` already has `needle`'s lines, whole and one after
+/// another (spacing ignored): the signature written into the HTML as text.
+fn has_lines(haystack: &str, needle: &str) -> bool {
+    let lines = |s: &str| -> Vec<String> {
+        s.lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|line| !line.is_empty())
+            .collect()
+    };
+    let needle = lines(needle);
+    !needle.is_empty() && lines(haystack).windows(needle.len()).any(|w| w == needle)
+}
+
+/// The rich-text body: compose HTML cleaned, the signature put in (the one
+/// its `data-mocky-signature` place names, else one whose plain block is
+/// still in `body_text`, unless the HTML already shows it), and a text part.
+fn rich_parts(
+    state: &AppState,
+    account_id: &str,
+    draft: &Draft,
+    html: &str,
+) -> AppResult<RichParts> {
+    let clean = mail_core::rich::clean(html);
+    let named = match clean.signature_placeholder().filter(|id| !id.is_empty()) {
+        Some(id) => crate::signatures::by_id(state, account_id, &id)?,
+        None => None,
+    };
+    let named = match named {
+        Some(named) => Some(named),
+        None => {
+            crate::signatures::in_body_named(state, account_id, &draft.body_text)?.filter(|named| {
+                clean.signature_placeholder().is_some()
+                    || !has_lines(&clean.text(), &named.signature.text)
+            })
+        }
+    };
+    let rich = mail_core::rich::finish(
+        &clean,
+        named
+            .as_ref()
+            .map(|named| (&named.signature, Some(named.id.as_str()))),
+    )
+    .map_err(|e| AppError::new("too_large", e.to_string()))?;
+    let mut inline_images: Vec<InlineImage> = rich
+        .inline_images
+        .into_iter()
+        .map(|image| InlineImage {
+            content_id: image.content_id,
+            mime_type: image.mime_type,
+            data: image.data,
+        })
+        .collect();
+    if let Some(named) = &named {
+        inline_images.extend(crate::signatures::inline_image(&named.signature));
+    }
+    Ok(RichParts {
+        html: rich.html,
+        text: rich.text,
+        inline_images,
+    })
 }
 
 /// An outbox row for the interface (`OutboxEntry` in `docs/ipc.md`).
@@ -135,32 +220,52 @@ fn size_error(estimated: u64, limit: u64) -> AppError {
     )
 }
 
-/// Estimated size of a draft and the limit, checked.
-async fn measure(state: &AppState, draft: &Draft) -> AppResult<(Account, u64, u64)> {
+fn byte_len(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// Estimated size of a draft and the limit, checked. A rich-text draft's
+/// body is made here (it is what gets measured) and handed back.
+async fn measure(
+    state: &AppState,
+    draft: &Draft,
+) -> AppResult<(Account, u64, u64, Option<RichParts>)> {
     let account = state.store.get_account(&draft.account_id)?;
+    let limit = limit_for(&account);
     let mut sizes = Vec::new();
     for attachment in &draft.attachments {
         sizes.push(check_picked(state, attachment).await?.1);
     }
-    // The signature picture travels inside the message.
-    if let Some(image) =
-        crate::signatures::in_body(state, &account.id, &draft.body_text)?.and_then(|s| s.image)
-    {
-        sizes.push(u64::try_from(image.data.len()).unwrap_or(u64::MAX));
-    }
-    let estimated = estimate_message_size(
-        u64::try_from(draft.body_text.len()).unwrap_or(u64::MAX),
-        &sizes,
-    );
-    let limit = limit_for(&account);
+    let (body_len, rich) = if let Some(html) = draft.body_html.as_deref() {
+        // Far too big to be worth cleaning first.
+        let raw = byte_len(html.len());
+        if raw > limit.saturating_mul(2) {
+            return Err(size_error(estimate_message_size(raw, &sizes), limit));
+        }
+        let rich = rich_parts(state, &account.id, draft, html)?;
+        sizes.extend(rich.inline_images.iter().map(|i| byte_len(i.data.len())));
+        (
+            byte_len(rich.html.len()).saturating_add(byte_len(rich.text.len())),
+            Some(rich),
+        )
+    } else {
+        // The signature picture travels inside the message.
+        if let Some(image) =
+            crate::signatures::in_body(state, &account.id, &draft.body_text)?.and_then(|s| s.image)
+        {
+            sizes.push(byte_len(image.data.len()));
+        }
+        (byte_len(draft.body_text.len()), None)
+    };
+    let estimated = estimate_message_size(body_len, &sizes);
     if estimated > limit {
         return Err(size_error(estimated, limit));
     }
-    Ok((account, estimated, limit))
+    Ok((account, estimated, limit, rich))
 }
 
 async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, OutgoingMessage)> {
-    let (account, _, _) = measure(state, draft).await?;
+    let (account, _, _, rich) = measure(state, draft).await?;
     let mut attachments = Vec::new();
     for attachment in &draft.attachments {
         let (path, _) = check_picked(state, attachment).await?;
@@ -175,21 +280,26 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
             data,
         });
     }
-    // The account signature whose block is still in the body as compose put it.
-    let signature = crate::signatures::in_body(state, &account.id, &draft.body_text)?;
-    let body_html = signature
-        .as_ref()
-        .and_then(|signature| html_with_signature(&draft.body_text, signature))
-        // No signature: formatted writing still goes out as HTML too.
-        .or_else(|| {
-            mail_core::formatting::has_formatting(&draft.body_text)
-                .then(|| mail_core::formatting::html_document(&draft.body_text))
-        });
-    let inline_images = match (&body_html, &signature) {
-        (Some(_), Some(signature)) => crate::signatures::inline_image(signature)
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
+    let (body_text, body_html, inline_images) = if let Some(rich) = rich {
+        (rich.text, Some(rich.html), rich.inline_images)
+    } else {
+        // The account signature whose block is still in the body as compose put it.
+        let signature = crate::signatures::in_body(state, &account.id, &draft.body_text)?;
+        let body_html = signature
+            .as_ref()
+            .and_then(|signature| html_with_signature(&draft.body_text, signature))
+            // No signature: formatted writing still goes out as HTML too.
+            .or_else(|| {
+                mail_core::formatting::has_formatting(&draft.body_text)
+                    .then(|| mail_core::formatting::html_document(&draft.body_text))
+            });
+        let inline_images = match (&body_html, &signature) {
+            (Some(_), Some(signature)) => crate::signatures::inline_image(signature)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        (draft.body_text.clone(), body_html, inline_images)
     };
     let message = OutgoingMessage {
         from: Mailbox {
@@ -200,13 +310,14 @@ async fn prepare(state: &AppState, draft: &Draft) -> AppResult<(Account, Outgoin
         cc: field("Cc", &draft.cc)?,
         bcc: field("Bcc", &draft.bcc)?,
         subject: draft.subject.clone(),
-        body_text: draft.body_text.clone(),
+        body_text,
         body_html,
         in_reply_to: draft.in_reply_to.clone(),
         references: draft.references.clone(),
         attachments,
         inline_images,
         importance: draft.importance,
+        read_receipt_to: draft.request_read_receipt.then(|| account.email.clone()),
     };
     Ok((account, message))
 }
@@ -225,7 +336,7 @@ pub async fn check_draft(state: State<'_, Arc<AppState>>, draft: Draft) -> AppRe
     for (name, value) in [("To", &draft.to), ("Cc", &draft.cc), ("Bcc", &draft.bcc)] {
         field(name, value)?;
     }
-    let (_, estimated_bytes, limit_bytes) = measure(&state, &draft).await?;
+    let (_, estimated_bytes, limit_bytes, _) = measure(&state, &draft).await?;
     Ok(DraftCheck {
         estimated_bytes,
         limit_bytes,
@@ -512,7 +623,7 @@ pub async fn outbox_edit(
         cc: join(&summary.cc),
         bcc: hidden_recipients(&message.recipients, &summary.to, &summary.cc).join(", "),
         subject: summary.subject,
-        body_text: body.text.unwrap_or_default(),
+        body_text: body.text.clone().unwrap_or_default(),
         in_reply_to: summary.in_reply_to,
         references: summary.references,
         attachments,
@@ -520,7 +631,21 @@ pub async fn outbox_edit(
         draft_message_id: None,
         // Editing a queued message keeps the importance it was sent with.
         importance: summary.importance,
+        body_html: rich_html_of(&body),
+        request_read_receipt: mail_core::receipts::requested(&message.raw).is_some(),
     })
+}
+
+/// The HTML of a message written in rich-text compose, as compose shows it
+/// (cleaned, its pictures inline as `data:`); `None` for one written as
+/// plain text, whose HTML part the app made itself.
+fn rich_html_of(body: &mail_core::message::MessageBody) -> Option<String> {
+    let html = body
+        .html
+        .as_deref()
+        .filter(|html| html.contains(mail_core::rich::RICH_MARKER))?;
+    let clean = sanitize_html(html, RemoteContent::Allow);
+    Some(embed_inline_images(&clean.html, &body.inline_images))
 }
 
 /// Write a message's attachments to the app's cache as files the user may
@@ -551,6 +676,31 @@ async fn copy_attachments(
         }
     }
     Ok(out)
+}
+
+/// Write a file made for a draft (a contact card, a message attached
+/// whole) to the app's cache, where draft attachments live, and allow it
+/// to be attached.
+pub(crate) async fn cache_for_draft(
+    state: &AppState,
+    label: &str,
+    file_name: &str,
+    bytes: &[u8],
+) -> AppResult<DraftAttachment> {
+    let file_name = safe_file_name(file_name);
+    let dir = state
+        .cache_dir
+        .join(crate::attachments::DRAFT_COPIES_DIR)
+        .join(safe_file_name(label));
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = dir.join(&file_name);
+    tokio::fs::write(&path, bytes).await?;
+    lock(&state.picked_files).insert(path.clone());
+    Ok(DraftAttachment {
+        path: path.display().to_string(),
+        file_name,
+        size: byte_len(bytes.len()),
+    })
 }
 
 /// `attachments_for_draft`: a message's attachments, ready to attach.
@@ -943,6 +1093,28 @@ mod tests {
         // The rest of the message is untouched.
         assert!(saved.ends_with(delivered));
         assert_eq!(with_bcc_header(delivered, &[]), delivered);
+    }
+
+    #[test]
+    fn a_signature_already_written_out_is_not_added_twice() {
+        let body = "Hi Don,\n\nThanks.\n\nDon  Onyango\nMocky Digital\n\n> quoted";
+        assert!(has_lines(body, "Don Onyango\nMocky Digital"));
+        assert!(has_lines(body, "Mocky Digital"));
+        // Words inside other lines don't count.
+        assert!(!has_lines(body, "Don"));
+        assert!(!has_lines(body, "Mocky Digital\nNairobi"));
+        assert!(!has_lines(body, " "));
+        let draft: Draft = serde_json::from_value(serde_json::json!({
+            "accountId": "a", "to": "", "cc": "", "bcc": "", "subject": "S",
+            "bodyText": "x", "inReplyTo": null, "references": [], "attachments": [],
+            "replyToMessageId": null
+        }))
+        .unwrap();
+        // Drafts from before 0.7.0 are plain text and ask for no receipt.
+        assert!(draft.body_html.is_none() && !draft.request_read_receipt);
+        let json = serde_json::to_value(&draft).unwrap();
+        assert!(json["bodyHtml"].is_null());
+        assert_eq!(json["requestReadReceipt"], false);
     }
 
     #[test]

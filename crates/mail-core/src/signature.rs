@@ -317,11 +317,25 @@ pub fn html_with_signature(body: &str, signature: &Signature) -> Option<String> 
         "<!doctype html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family:Arial,Helvetica,sans-serif;font-size:14px\">",
     );
     block(body.get(..start)?.trim_end_matches('\n'), &mut html);
-    let _ = write!(
-        html,
-        "<div class=\"signature\" style=\"margin-top:16px\">{}",
-        signature.html
-    );
+    html.push_str(&signature_html(signature, None));
+    block(body.get(end..)?.trim_start_matches('\n'), &mut html);
+    html.push_str("</body></html>");
+    Some(html)
+}
+
+/// The full signature as sent: its HTML and picture (by Content-ID) in a
+/// `<div class="signature">`. With `id` (rich-text compose), the div also
+/// carries `data-mocky-signature="<id>"`, so a saved draft continued later
+/// is sent with the signature as it is then, not a stale copy.
+#[must_use]
+pub fn signature_html(signature: &Signature, id: Option<&str>) -> String {
+    let mut html = String::from("<div class=\"signature\"");
+    if let Some(id) = id {
+        html.push_str(" data-mocky-signature=\"");
+        escape(id, &mut html);
+        html.push('"');
+    }
+    let _ = write!(html, " style=\"margin-top:16px\">{}", signature.html);
     if let Some(image) = &signature.image {
         let mut alt = String::new();
         escape(&signature.text.replace('\n', " "), &mut alt);
@@ -332,9 +346,7 @@ pub fn html_with_signature(body: &str, signature: &Signature) -> Option<String> 
         );
     }
     html.push_str("</div>");
-    block(body.get(end..)?.trim_start_matches('\n'), &mut html);
-    html.push_str("</body></html>");
-    Some(html)
+    html
 }
 
 #[cfg(test)]
