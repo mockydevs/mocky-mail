@@ -28,6 +28,12 @@ if (!('isContentEditable' in HTMLElement.prototype)) {
 if (typeof document.elementFromPoint !== 'function') {
   Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => null });
 }
+// ProseMirror moves the selection with Selection.modify in some cases (a
+// cursor next to an uneditable node); jsdom has no modify. Doing nothing is
+// enough without layout, and avoids an uncaught error that fails the run.
+if (typeof (Selection.prototype as { modify?: unknown }).modify !== 'function') {
+  Object.defineProperty(Selection.prototype, 'modify', { configurable: true, value: () => undefined });
+}
 
 afterEach(() => {
   cleanup();
