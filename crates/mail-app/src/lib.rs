@@ -6,6 +6,8 @@
 //! trait, so the desktop and Android app, the command line, the MCP server
 //! and the browser version all run the same logic.
 //!
+//! [`registry::dispatch`] runs any command by name with JSON arguments.
+//!
 //! Mail rules live in `mail-core`; network code in `mail-sync`; storage in
 //! `mail-store`.
 
@@ -40,6 +42,7 @@ pub mod out_of_office;
 pub mod outbox;
 pub mod pst;
 pub mod read_receipts;
+pub mod registry;
 pub mod reminders;
 pub mod rules;
 pub mod security;
