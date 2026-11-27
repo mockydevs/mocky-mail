@@ -39,6 +39,8 @@ pub struct AppState {
     pub calendar_sync: tokio::sync::Mutex<()>,
     /// Drafts waiting for the compose window opened for them, by key.
     pub compose_drafts: Mutex<Vec<(String, crate::outbox::Draft)>>,
+    /// Trusted roots and decrypted messages, in memory only.
+    pub security: crate::security::SecurityState,
 }
 
 /// Lock a mutex, recovering from a panic elsewhere instead of failing.
@@ -60,6 +62,7 @@ impl AppState {
             contacts_sync: tokio::sync::Mutex::new(()),
             calendar_sync: tokio::sync::Mutex::new(()),
             compose_drafts: Mutex::new(Vec::new()),
+            security: crate::security::SecurityState::default(),
         }
     }
 

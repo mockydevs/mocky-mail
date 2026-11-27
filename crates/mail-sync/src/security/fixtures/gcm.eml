@@ -1,0 +1,20 @@
+To: amina@example.org
+From: boss@example.com
+Subject: GCM
+MIME-Version: 1.0
+Content-Disposition: attachment; filename="smime.p7m"
+Content-Type: application/pkcs7-mime; name="smime.p7m"
+Content-Transfer-Encoding: base64
+
+MIICAQYLKoZIhvcNAQkQARegggHwMIIB7AIBADGCAWcwggFjAgEAMEswMzEbMBkG
+A1UEAwwSTW9ja3kgVGVzdCBSb290IENBMRQwEgYDVQQKDAtNb2NreSBUZXN0cwIU
+J4c1Hv08RVSkepJ0h7qgJexeWS8wDQYJKoZIhvcNAQEBBQAEggEAYd+DzHSv+tY7
+SnOh61IbNA2PIwq/aCVHvatEOqC05ms4OHM3FwQ1oN9856foBwZzgDmEG5v6ons4
+Q5JK7oAiPN4x99gXLSHZJX6FxXDEmkBQlFU93EXVeFEhky19f1xuLCtkZpwKoSUO
+qm6KiSiSSe5ddN66g+1xhY3s4kFxGbGS3EMwK76miVgsoM4m76m5l3D0AVnqCWuj
+c3Fy7C0axNmi1dlTAnPAkD43gKuEKpeAd8rRIny1B7Ov4pJKeC+wYKUGlF9wgyfp
+Y6JpXJ3BZy52CymideGHQibXBRnpDTGhZLeBvvJmgNF6mYU4wow+uTF7tpd5BHDz
+P7ynCp/2sjBqBgkqhkiG9w0BBwEwHgYJYIZIAWUDBAEuMBEEDIY0lu/Yv2mt/6Br
+3gIBEIA9ht+4Qxxh5xAVrrfJC+GuX1o9pf7pBOFBAHe4GGKEDwGnHRslilQA+w+a
+9txagukzii4cqo3qYLSebLpYwQQQ7QjWjPf27Qc+I5xSaz71nA==
+

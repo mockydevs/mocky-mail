@@ -1177,6 +1177,8 @@ pub fn cache_body(state: &AppState, id: &str, raw: &[u8]) -> AppResult<()> {
         .and_then(|b| b.text)
         .unwrap_or_else(|| preview.clone());
     state.store.set_body(id, raw, Some(&text), &preview)?;
+    // Keys it carries (Autocrypt, attached keys) are kept for later.
+    crate::security::collect_keys(state, raw);
     // Mail synced before importance was read gets it now.
     if let Some(summary) = summary {
         state.store.set_header_importance(id, summary.importance)?;

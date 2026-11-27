@@ -14,6 +14,7 @@ pub mod error;
 pub mod imap;
 pub mod outgoing;
 pub mod secrets;
+pub mod security;
 pub mod sieve;
 pub mod smtp;
 mod tls;

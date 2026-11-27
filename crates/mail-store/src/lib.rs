@@ -23,6 +23,7 @@ mod receipts;
 mod rules;
 mod schema;
 mod search;
+mod security;
 mod settings;
 mod sync_support;
 #[cfg(test)]
@@ -48,6 +49,7 @@ pub use ops::{OpKind, PendingOp};
 pub use outbox::{NewOutbox, OutboxEntry, OutboxMessage};
 pub use receipts::read_receipt_key;
 pub use rules::{ImageSender, RuleSubject, image_sender_key};
+pub use security::{AccountKeys, KeyKind, KeyOrigin, MAX_KEY_BYTES, NewKey, StoredKey};
 
 /// How long a writer waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);

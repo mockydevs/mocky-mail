@@ -32,6 +32,7 @@ mod outbox;
 mod read_receipts;
 mod reminders;
 mod rules;
+mod security;
 mod server_rules;
 mod settings;
 mod signatures;
@@ -301,6 +302,15 @@ pub fn run() {
             compose::open_compose_window,
             compose::take_compose_draft,
             read_receipts::answer_read_receipt,
+            security::list_keys,
+            security::import_key,
+            security::export_public_key,
+            security::remove_key,
+            security::set_key_trusted,
+            security::set_account_key,
+            security::get_account_keys,
+            security::set_preferred_kind,
+            security::check_encryption,
         ])
         .run(tauri::generate_context!());
 

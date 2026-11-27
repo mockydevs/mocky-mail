@@ -81,7 +81,8 @@ async fn load(state: &AppState, id: &str) -> AppResult<(Account, String)> {
     let raw = sync::body_now(state, id).await?;
     let stored = state.store.get_message(id)?;
     let account = state.store.get_account(&stored.item.account_id)?;
-    let calendar = parse_body(&raw)?
+    let shown = crate::security::shown_bytes(state, id, raw)?;
+    let calendar = parse_body(&shown)?
         .calendar
         .ok_or_else(|| AppError::invalid("This message has no invitation."))?;
     Ok((account, calendar))

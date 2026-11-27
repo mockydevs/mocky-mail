@@ -421,8 +421,61 @@ CREATE TABLE read_receipts (
 );
 ";
 
+/// Version 10: security (0.10.0), S/MIME and `OpenPGP`.
+///
+/// - `messages.signed`, `messages.encrypted`: from the top-level
+///   Content-Type when the headers are saved (`MessageSummary`).
+/// - `security_keys`: certificates and keys, the user's own (with
+///   `secret` set: the private part, sealed with a key kept in the system
+///   keyring, never in the clear) and other people's (collected from
+///   signed mail, Autocrypt headers, attachments, imports and Web Key
+///   Directory look-ups). `public_data` is the certificate (DER) or the
+///   `OpenPGP` public key (binary); `chain_json` the S/MIME issuer
+///   certificates that came with it (base64 DER). `trusted`: the user said
+///   it really is the owner's. One row per kind and fingerprint.
+/// - `security_key_addresses`: each key's addresses, lower case, for
+///   finding a recipient's key.
+/// - `account_security`: per account, the key it signs and encrypts to
+///   itself with, per kind, and which kind it prefers.
+const V10: &str = r"
+ALTER TABLE messages ADD COLUMN signed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE security_keys (
+    id           TEXT PRIMARY KEY NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('smime', 'openpgp')),
+    fingerprint  TEXT NOT NULL,
+    owner        TEXT NOT NULL DEFAULT '',
+    expires      INTEGER,
+    can_sign     INTEGER NOT NULL DEFAULT 0,
+    can_encrypt  INTEGER NOT NULL DEFAULT 0,
+    public_data  BLOB NOT NULL,
+    chain_json   TEXT NOT NULL DEFAULT '[]',
+    secret       BLOB,
+    trusted      INTEGER NOT NULL DEFAULT 0,
+    origin       TEXT NOT NULL,
+    added_at     INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    UNIQUE (kind, fingerprint)
+);
+
+CREATE TABLE security_key_addresses (
+    key_id  TEXT NOT NULL REFERENCES security_keys(id) ON DELETE CASCADE,
+    address TEXT NOT NULL,
+    PRIMARY KEY (key_id, address)
+);
+CREATE INDEX security_key_addresses_address ON security_key_addresses (address);
+
+CREATE TABLE account_security (
+    account_id  TEXT PRIMARY KEY NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    smime_key   TEXT REFERENCES security_keys(id) ON DELETE SET NULL,
+    openpgp_key TEXT REFERENCES security_keys(id) ON DELETE SET NULL,
+    preferred   TEXT CHECK (preferred IN ('smime', 'openpgp'))
+);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -657,6 +710,77 @@ mod tests {
             .unwrap();
         let left: i64 = conn
             .query_row("SELECT count(*) FROM read_receipts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_version_nine_database_gains_the_key_store() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(9) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        conn.execute_batch(
+            r"INSERT INTO accounts (id, email, display_name, auth, color, imap_host, imap_port,
+                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at)
+                 VALUES ('a', 'a@x.co', 'A', 'password', '#000',
+                 'imap.x.co', 993, 'tls', 'smtp.x.co', 465, 'tls', NULL, 0);
+              INSERT INTO folders (id, account_id, path, name, role) VALUES ('f', 'a', 'INBOX', 'Inbox', 'inbox');
+              INSERT INTO messages (id, account_id, folder_id, uid, subject) VALUES ('m', 'a', 'f', 1, 'Old');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        // Messages saved before are neither signed nor encrypted.
+        let (signed, encrypted): (bool, bool) = conn
+            .query_row("SELECT signed, encrypted FROM messages", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert!(!signed && !encrypted);
+        conn.execute_batch(
+            r"INSERT INTO security_keys (id, kind, fingerprint, public_data, origin, added_at, updated_at)
+                 VALUES ('k', 'openpgp', 'AB', x'00', 'import', 1, 1);
+              INSERT INTO security_key_addresses (key_id, address) VALUES ('k', 'a@x.co');
+              INSERT INTO account_security (account_id, openpgp_key, preferred) VALUES ('a', 'k', 'openpgp');",
+        )
+        .unwrap();
+        // One row per kind and fingerprint, and only the two kinds.
+        assert!(
+            conn.execute_batch(
+                "INSERT INTO security_keys (id, kind, fingerprint, public_data, origin, added_at, updated_at)
+                 VALUES ('k2', 'openpgp', 'AB', x'00', 'import', 1, 1);"
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute_batch(
+                "INSERT INTO security_keys (id, kind, fingerprint, public_data, origin, added_at, updated_at)
+                 VALUES ('k3', 'pgp', 'CD', x'00', 'import', 1, 1);"
+            )
+            .is_err()
+        );
+        // Removing a key forgets its addresses and unsets it for the account.
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM security_keys;")
+            .unwrap();
+        let addresses: i64 = conn
+            .query_row("SELECT count(*) FROM security_key_addresses", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(addresses, 0);
+        let chosen: Option<String> = conn
+            .query_row("SELECT openpgp_key FROM account_security", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(chosen, None);
+        conn.execute_batch("DELETE FROM accounts;").unwrap();
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM account_security", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(left, 0);
     }

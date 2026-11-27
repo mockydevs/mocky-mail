@@ -1,0 +1,29 @@
+From: Baraka Mwangi <baraka@example.net>
+To: baraka@example.net
+Subject: PGP encrypted
+MIME-Version: 1.0
+Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="enc-b"
+
+--enc-b
+Content-Type: application/pgp-encrypted
+
+Version: 1
+
+--enc-b
+Content-Type: application/octet-stream; name="encrypted.asc"
+
+-----BEGIN PGP MESSAGE-----
+
+hF4DMW13GTCh4aoSAQdAequks9TEaHcBvx5kNiIWI2tE6aqLtD4lAy9rXLAeBAcw
+KMsfBWPCLkUEXDkMm6cWZYgbQLhUCnEsYkhqnSRFyPA5ESJ9UQtbWPF7WPcafgbg
+1MB1AQkCEKEdtoqoDhLpcbZtI+7FZCIp50sZCNnw3uelZ/YlstTa1nuuXwOufUnY
+MaxEYQgv3ZHbWSm4bMM6FIDUVDGq/1qlUj/kEfEjjJncJDUfcOLuKzvErBI8unj6
+C+tHBGVVCGqBWB3+28hSSw3vlswG3g73oJHTJtVgjpWKSdTCh88vV3EXsKkKETjm
+03OEuglU/UF7mDFZpFlmJl/Gktze22kdR+sFbLkHyam9AnHP+jgwb6jwj0u7IkOs
+DVrTvpVOI++5QVCUeb5maluf5F3dQTz+LVypSkPvWsqIJZ3qzPqdc7I5nq0lKG3A
+aGc8/vW2jANHNk/njWAlybUQqz1IdjS6OiW+uagD094xFbm2ske3G7TasMDz00RZ
+V8HmTYdLK5hBkyS4xqm5tp2hjSyHFVeO
+=Xwp6
+-----END PGP MESSAGE-----
+
+--enc-b--

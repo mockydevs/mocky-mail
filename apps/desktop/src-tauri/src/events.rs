@@ -255,6 +255,8 @@ mod tests {
             categories: Vec::new(),
             flag_due: None,
             size: 0,
+            signed: false,
+            encrypted: false,
             thread_count: 1,
             thread_ids: Vec::new(),
         }

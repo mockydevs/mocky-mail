@@ -72,6 +72,8 @@ pub(crate) fn summary(subject: &str, date: i64) -> MessageSummary {
         references: vec![],
         bulk: false,
         importance: mail_core::importance::Importance::Normal,
+        signed: false,
+        encrypted: false,
     }
 }
 
