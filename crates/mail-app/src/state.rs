@@ -1,0 +1,108 @@
+//! Shared state for commands and background tasks.
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+
+use mail_store::Store;
+use mail_sync::secrets::SecretStore;
+use tokio::sync::Notify;
+
+use crate::host::Host;
+
+/// A running sync engine for one account.
+pub struct EngineHandle {
+    /// Wake the engine early (new local changes, "sync now").
+    pub wake: Arc<Notify>,
+    /// The engine task.
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+/// Everything the app shares.
+pub struct AppState {
+    /// Local database.
+    pub store: Arc<Store>,
+    /// Passwords and refresh tokens.
+    pub secrets: Arc<dyn SecretStore>,
+    /// Access tokens in memory only: account id → (token, expires at).
+    pub access_tokens: Mutex<HashMap<String, (String, u64)>>,
+    /// One sync engine per account.
+    pub engines: Mutex<HashMap<String, EngineHandle>>,
+    /// Wakes the outbox worker.
+    pub outbox_wake: Arc<Notify>,
+    /// Files the user picked in the open dialog this session. Only these
+    /// may be attached, so a compromised page can't mail out arbitrary files.
+    pub picked_files: Mutex<HashSet<PathBuf>>,
+    /// Where temporary files (re-opened outbox attachments) go.
+    pub cache_dir: PathBuf,
+    /// Held while contacts sync, so two syncs never send the same change.
+    pub contacts_sync: tokio::sync::Mutex<()>,
+    /// Held while tasks sync.
+    pub tasks_sync: tokio::sync::Mutex<()>,
+    /// The due reminders last told to the interface (their keys).
+    pub due_reminders: Mutex<Vec<String>>,
+    /// Held while calendars sync.
+    pub calendar_sync: tokio::sync::Mutex<()>,
+    /// Drafts waiting for the compose window opened for them, by key.
+    pub compose_drafts: Mutex<Vec<(String, crate::outbox::Draft)>>,
+    /// Trusted roots and decrypted messages, in memory only.
+    pub security: crate::security::SecurityState,
+    /// The host, once a [`Ctx`](crate::Ctx) has been made, for code that
+    /// has only the state (signing in to servers with the device's own
+    /// Google accounts).
+    host: OnceLock<Arc<dyn Host>>,
+}
+
+/// Lock a mutex, recovering from a panic elsewhere instead of failing.
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl AppState {
+    /// New state around an opened store.
+    pub fn new(store: Store, secrets: Arc<dyn SecretStore>, cache_dir: PathBuf) -> Self {
+        Self {
+            store: Arc::new(store),
+            secrets,
+            access_tokens: Mutex::new(HashMap::new()),
+            engines: Mutex::new(HashMap::new()),
+            outbox_wake: Arc::new(Notify::new()),
+            picked_files: Mutex::new(HashSet::new()),
+            cache_dir,
+            contacts_sync: tokio::sync::Mutex::new(()),
+            calendar_sync: tokio::sync::Mutex::new(()),
+            tasks_sync: tokio::sync::Mutex::new(()),
+            due_reminders: Mutex::new(Vec::new()),
+            compose_drafts: Mutex::new(Vec::new()),
+            security: crate::security::SecurityState::default(),
+            host: OnceLock::new(),
+        }
+    }
+
+    /// The host this state runs in (set by [`Ctx::new`](crate::Ctx::new)).
+    pub fn host(&self) -> Option<&Arc<dyn Host>> {
+        self.host.get()
+    }
+
+    /// Remember the host; the first one stays.
+    pub(crate) fn set_host(&self, host: &Arc<dyn Host>) {
+        let _ = self.host.set(Arc::clone(host));
+    }
+
+    /// Wake one account's engine, or all when `None`.
+    pub fn wake_sync(&self, account_id: Option<&str>) {
+        for (id, engine) in lock(&self.engines).iter() {
+            if account_id.is_none_or(|wanted| wanted == id) {
+                engine.wake.notify_one();
+            }
+        }
+    }
+}
+
+/// Seconds since the Unix epoch.
+#[must_use]
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}

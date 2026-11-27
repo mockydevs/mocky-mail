@@ -1,0 +1,31 @@
+[package]
+name = "mail-app"
+version = "0.1.0"
+description = "Mocky Mail's application layer: state, background workers and every command, behind a Host trait."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+futures = "0.3.34"
+mail-auth = { version = "0.1.0", path = "../mail-auth" }
+mail-core = { version = "0.1.0", path = "../mail-core" }
+mail-store = { version = "0.1.0", path = "../mail-store" }
+mail-sync = { version = "0.1.0", path = "../mail-sync" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+base64 = "0.23.1"
+ring = "0.17.14"
+sha2 = "0.10"
+tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs", "process", "rt"] }
+# Messages exported as .eml files in one .zip (MIT), deflate only; flate2's
+# own Rust backend (miniz_oxide) does the compressing.
+zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
