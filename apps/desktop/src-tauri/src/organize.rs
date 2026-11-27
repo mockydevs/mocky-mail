@@ -27,16 +27,22 @@ pub fn copy_messages(
     target: MoveTarget,
 ) -> AppResult<()> {
     check_batch(&ids)?;
-    let groups = sync::group_by_folder(&state, &ids)?;
+    copy_groups(&state, &ids, &target)
+}
+
+/// Queue copies of messages to a folder (or role) of their own account;
+/// messages already there are skipped.
+pub(crate) fn copy_groups(state: &AppState, ids: &[String], target: &MoveTarget) -> AppResult<()> {
+    let groups = sync::group_by_folder(state, ids)?;
     for ((account_id, folder_id), messages) in &groups {
-        let (target_folder, create_target) = resolve_target(&state, account_id, &target)?;
+        let (target_folder, create_target) = resolve_target(state, account_id, target)?;
         if target_folder.id == *folder_id {
             continue;
         }
         let from = state.store.get_folder(folder_id)?.path;
         let to = target_folder.path;
         enqueue_for(
-            &state,
+            state,
             account_id,
             messages,
             |uids| Op::Copy {
@@ -275,6 +281,20 @@ pub fn set_categories(
     remove: Vec<String>,
 ) -> AppResult<()> {
     check_batch(&ids)?;
+    let touched = change_categories(&state, &ids, &add, &remove)?;
+    notify_changed(&app, &touched);
+    Ok(())
+}
+
+/// Add and remove categories on messages, here and queued for the server.
+/// Names not yet known become categories. Returns the (account, folder)
+/// pairs that changed.
+pub(crate) fn change_categories(
+    state: &AppState,
+    ids: &[String],
+    add: &[String],
+    remove: &[String],
+) -> AppResult<Vec<(String, String)>> {
     let known = state.store.list_categories()?;
     // As the category is spelled, whatever case was passed.
     let spelled = |names: &[String]| -> AppResult<Vec<String>> {
@@ -291,13 +311,11 @@ pub fn set_categories(
         }
         Ok(out)
     };
-    let add = spelled(&add)?;
-    let remove = spelled(&remove)?;
+    let add = spelled(add)?;
+    let remove = spelled(remove)?;
     state.store.ensure_categories(&add)?;
-    let changed = state.store.set_categories(&ids, &add, &remove)?;
-    let touched = queue_category_change(&state, &changed, &add, &remove)?;
-    notify_changed(&app, &touched);
-    Ok(())
+    let changed = state.store.set_categories(ids, &add, &remove)?;
+    queue_category_change(state, &changed, &add, &remove)
 }
 
 /// `set_folder_favorite`: list it under Favourites (this device only).

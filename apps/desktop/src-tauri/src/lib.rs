@@ -29,6 +29,8 @@ mod organize;
 mod out_of_office;
 mod outbox;
 mod reminders;
+mod rules;
+mod server_rules;
 mod settings;
 mod signatures;
 mod state;
@@ -161,6 +163,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     contacts::start(handle.clone(), Arc::clone(&state));
     calendar::start(handle.clone(), Arc::clone(&state));
     reminders::start(handle.clone(), Arc::clone(&state));
+    server_rules::start(&handle);
     tauri::async_runtime::spawn(outbox::run(handle, state));
     Ok(())
 }
@@ -280,6 +283,16 @@ pub fn run() {
             signatures::remove_signature_image,
             updates::check_for_update,
             updates::install_update,
+            rules::parse_search,
+            rules::list_rules,
+            rules::save_rule,
+            rules::delete_rule,
+            rules::reorder_rules,
+            rules::run_rules,
+            rules::preview_rule,
+            rules::list_image_senders,
+            rules::trust_image_sender,
+            rules::untrust_image_sender,
         ])
         .run(tauri::generate_context!());
 

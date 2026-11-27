@@ -293,8 +293,119 @@ ALTER TABLE pending_ops_v7 RENAME TO pending_ops;
 CREATE INDEX pending_ops_account ON pending_ops (account_id, created_at, seq);
 ";
 
+/// Version 8: search and rules (0.6.0).
+///
+/// - The search index gains a `cc` column (for `cc:`), so it is rebuilt
+///   from the messages and its triggers recreated.
+/// - `rules`: the user's mail rules. `spec` is the rule as JSON
+///   (`mail_core::rules::RuleSpec`); `account_id` is NULL for every
+///   account; `server_status` and `server_note` say whether the mail
+///   server runs it too.
+/// - `messages.rules_done`: rules have run on this new message (so a copy
+///   a rule made, arriving later, doesn't set them off again).
+/// - `image_senders`: addresses (or domains, `whole_domain`) whose remote
+///   pictures always load.
+const V8: &str = r"
+DROP TRIGGER messages_fts_insert;
+DROP TRIGGER messages_fts_delete;
+DROP TRIGGER messages_fts_update;
+DROP TABLE messages_fts;
+CREATE VIRTUAL TABLE messages_fts USING fts5 (
+    subject, sender, recipients, preview, body, cc,
+    content = '',
+    contentless_delete = 1,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+INSERT INTO messages_fts (rowid, subject, sender, recipients, preview, body, cc)
+SELECT
+    m.seq,
+    m.subject,
+    coalesce(m.from_name, '') || ' ' || coalesce(m.from_address, ''),
+    (SELECT coalesce(group_concat(
+        coalesce(json_extract(value, '$.name'), '') || ' ' ||
+        coalesce(json_extract(value, '$.address'), ''), ' '), '')
+     FROM json_each(m.to_json)),
+    m.preview,
+    coalesce(m.body_text, ''),
+    (SELECT coalesce(group_concat(
+        coalesce(json_extract(value, '$.name'), '') || ' ' ||
+        coalesce(json_extract(value, '$.address'), ''), ' '), '')
+     FROM json_each(m.cc_json))
+FROM messages m;
+
+CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts (rowid, subject, sender, recipients, preview, body, cc)
+    VALUES (
+        new.seq,
+        new.subject,
+        coalesce(new.from_name, '') || ' ' || coalesce(new.from_address, ''),
+        (SELECT coalesce(group_concat(
+            coalesce(json_extract(value, '$.name'), '') || ' ' ||
+            coalesce(json_extract(value, '$.address'), ''), ' '), '')
+         FROM json_each(new.to_json)),
+        new.preview,
+        coalesce(new.body_text, ''),
+        (SELECT coalesce(group_concat(
+            coalesce(json_extract(value, '$.name'), '') || ' ' ||
+            coalesce(json_extract(value, '$.address'), ''), ' '), '')
+         FROM json_each(new.cc_json))
+    );
+END;
+
+CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.seq;
+END;
+
+CREATE TRIGGER messages_fts_update
+AFTER UPDATE OF subject, from_name, from_address, to_json, cc_json, preview, body_text ON messages
+WHEN old.subject IS NOT new.subject
+  OR old.from_name IS NOT new.from_name
+  OR old.from_address IS NOT new.from_address
+  OR old.to_json IS NOT new.to_json
+  OR old.cc_json IS NOT new.cc_json
+  OR old.preview IS NOT new.preview
+  OR old.body_text IS NOT new.body_text
+BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.seq;
+    INSERT INTO messages_fts (rowid, subject, sender, recipients, preview, body, cc)
+    VALUES (
+        new.seq,
+        new.subject,
+        coalesce(new.from_name, '') || ' ' || coalesce(new.from_address, ''),
+        (SELECT coalesce(group_concat(
+            coalesce(json_extract(value, '$.name'), '') || ' ' ||
+            coalesce(json_extract(value, '$.address'), ''), ' '), '')
+         FROM json_each(new.to_json)),
+        new.preview,
+        coalesce(new.body_text, ''),
+        (SELECT coalesce(group_concat(
+            coalesce(json_extract(value, '$.name'), '') || ' ' ||
+            coalesce(json_extract(value, '$.address'), ''), ' '), '')
+         FROM json_each(new.cc_json))
+    );
+END;
+
+CREATE TABLE rules (
+    id            TEXT PRIMARY KEY NOT NULL,
+    account_id    TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+    sort_order    INTEGER NOT NULL,
+    spec          TEXT NOT NULL,
+    server_status TEXT NOT NULL DEFAULT 'local'
+        CHECK (server_status IN ('local', 'server', 'unsupported')),
+    server_note   TEXT
+);
+CREATE INDEX rules_order ON rules (sort_order, id);
+
+ALTER TABLE messages ADD COLUMN rules_done INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE image_senders (
+    sender       TEXT PRIMARY KEY NOT NULL,
+    whole_domain INTEGER NOT NULL DEFAULT 0
+);
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -436,6 +547,66 @@ mod tests {
             .query_row("SELECT count(*) FROM pending_ops", [], |row| row.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_version_seven_database_keeps_its_search_and_gains_cc() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(7) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute_batch(
+            r#"INSERT INTO accounts (id, email, display_name, auth, color, imap_host, imap_port,
+                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at)
+                 VALUES ('a', 'a@x.co', 'A', 'password', '#000',
+                 'imap.x.co', 993, 'tls', 'smtp.x.co', 465, 'tls', NULL, 0);
+             INSERT INTO folders (id, account_id, path, name, role) VALUES ('f', 'a', 'INBOX', 'Inbox', 'inbox');
+             INSERT INTO messages (id, account_id, folder_id, subject, cc_json, body_text)
+                 VALUES ('m', 'a', 'f', 'Quarterly numbers',
+                 '[{"name":"Carol Kamau","address":"carol@client.example"}]', 'see attached');"#,
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        let hits = |q: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?1",
+                [q],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(hits("\"quarter\"*"), 1);
+        assert_eq!(hits("body : \"attached\""), 1);
+        assert_eq!(hits("cc : \"kamau\""), 1);
+        assert_eq!(hits("sender : \"kamau\""), 0);
+        // The recreated triggers keep the index up to date.
+        conn.execute(
+            "UPDATE messages SET cc_json = '[{\"name\":null,\"address\":\"dan@x.co\"}]' WHERE id = 'm'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(hits("cc : \"kamau\""), 0);
+        assert_eq!(hits("cc : \"dan\""), 1);
+        conn.execute("DELETE FROM messages", []).unwrap();
+        assert_eq!(hits("\"quarter\"*"), 0);
+        // The new tables and column.
+        conn.execute_batch(
+            "INSERT INTO rules (id, account_id, sort_order, spec) VALUES ('r', 'a', 0, '{}');
+             INSERT INTO image_senders (sender, whole_domain) VALUES ('x.co', 1);",
+        )
+        .unwrap();
+        let status: String = conn
+            .query_row("SELECT server_status FROM rules", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "local");
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM accounts;")
+            .unwrap();
+        let rules: i64 = conn
+            .query_row("SELECT count(*) FROM rules", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rules, 0);
     }
 
     #[test]

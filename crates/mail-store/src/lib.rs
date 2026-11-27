@@ -19,6 +19,7 @@ mod ids;
 mod messages;
 mod ops;
 mod outbox;
+mod rules;
 mod schema;
 mod search;
 mod settings;
@@ -44,6 +45,7 @@ pub use messages::{
 };
 pub use ops::{OpKind, PendingOp};
 pub use outbox::{NewOutbox, OutboxEntry, OutboxMessage};
+pub use rules::{ImageSender, RuleSubject, image_sender_key};
 
 /// How long a writer waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);

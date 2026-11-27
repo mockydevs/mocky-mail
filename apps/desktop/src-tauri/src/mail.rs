@@ -40,9 +40,11 @@ pub fn list_folders(state: State<'_, Arc<AppState>>, account_id: &str) -> AppRes
 #[tauri::command]
 pub fn list_messages(
     state: State<'_, Arc<AppState>>,
-    query: ListQuery,
+    mut query: ListQuery,
     threads: Option<bool>,
 ) -> AppResult<MessagePage> {
+    // `before:`, `after:` and `today` are days here.
+    query.search_context = Some(crate::rules::search_context());
     if threads.unwrap_or(false) {
         Ok(state.store.list_threads(&query)?)
     } else {
@@ -106,6 +108,8 @@ pub struct MessageDetail {
     html: Option<String>,
     text: Option<String>,
     blocked_remote_images: usize,
+    /// Pictures load because the sender (or their domain) is trusted.
+    images_trusted: bool,
     attachments: Vec<AttachmentMeta>,
     message_id_header: Option<String>,
     in_reply_to: Option<String>,
@@ -125,11 +129,17 @@ pub async fn get_message(
     let raw = sync::body_now(&state, &id).await?;
     let stored = state.store.get_message(&id)?;
     let body = parse_body(&raw)?;
-    let remote = if allow_remote || settings::load(&state)?.remote_images == "allow" {
-        RemoteContent::Allow
-    } else {
-        RemoteContent::Block
+    // Senders the user trusts: their pictures always load.
+    let images_trusted = match stored.item.from.as_ref() {
+        Some(from) => state.store.images_trusted(&from.address)?,
+        None => false,
     };
+    let remote =
+        if allow_remote || images_trusted || settings::load(&state)?.remote_images == "allow" {
+            RemoteContent::Allow
+        } else {
+            RemoteContent::Block
+        };
     let invitation = match body.calendar.as_deref() {
         Some(calendar) => {
             let account = state.store.get_account(&stored.item.account_id)?;
@@ -155,6 +165,7 @@ pub async fn get_message(
         html,
         text: body.text,
         blocked_remote_images: blocked,
+        images_trusted,
         attachments: body
             .attachments
             .into_iter()
@@ -266,17 +277,29 @@ pub fn set_flags(
         return Err(AppError::invalid("That follow-up date isn't valid."));
     }
     let ids = &args.ids;
-    let (seen, flagged) = (args.seen, args.flagged());
-    let groups = sync::group_by_folder(&state, ids)?;
-    state.store.set_flags(ids, seen, flagged, None)?;
+    let touched = set_seen_flagged(&state, ids, args.seen, args.flagged())?;
     state
         .store
         .set_marks(ids, args.pinned, args.importance, args.flag_due)?;
+    notify_changed(&app, &touched);
+    Ok(())
+}
+
+/// Set read and flagged on messages, here at once and queued for the
+/// server. Returns the (account, folder) pairs they are in.
+pub(crate) fn set_seen_flagged(
+    state: &AppState,
+    ids: &[String],
+    seen: Option<bool>,
+    flagged: Option<bool>,
+) -> AppResult<Vec<(String, String)>> {
+    let groups = sync::group_by_folder(state, ids)?;
+    state.store.set_flags(ids, seen, flagged, None)?;
     if seen.is_some() || flagged.is_some() {
         for ((account_id, folder_id), messages) in &groups {
             let folder = state.store.get_folder(folder_id)?.path;
             enqueue_for(
-                &state,
+                state,
                 account_id,
                 messages,
                 |uids| Op::SetFlags {
@@ -295,8 +318,7 @@ pub fn set_flags(
             )?;
         }
     }
-    notify_changed(&app, &groups.into_keys().collect::<Vec<_>>());
-    Ok(())
+    Ok(groups.into_keys().collect())
 }
 
 /// Where to move messages.

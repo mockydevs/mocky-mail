@@ -60,9 +60,13 @@ type AttachmentMeta = {
 type MessageDetail = MessageListItem & {
   cc: Mailbox[]; replyTo: Mailbox[];
   bcc: Mailbox[];           // only on the user's own drafts and sent mail (read from the Bcc header saved with them)
-  html: string | null;      // already sanitized, inline images embedded; render only in <iframe sandbox="allow-popups allow-same-origin"> (never allow-scripts); link popups are routed to the system browser by the backend
+  html: string | null;      // already sanitized, inline images embedded; render only in <iframe sandbox="allow-popups allow-same-origin"> (never allow-scripts); link popups are routed to the system browser by the backend.
+                            // Every link has a `title` with its real address (the sender's own title is dropped); when the
+                            // link text is a web address or domain on another site, the title starts
+                            // "Link goes to <host>, not the address shown." then a line break and the address
   text: string | null;
   blockedRemoteImages: number;
+  imagesTrusted?: boolean;  // true when the sender (or their domain) is in the trusted list: pictures load even with allowRemote false
   attachments: AttachmentMeta[];
   messageIdHeader: string | null; inReplyTo: string | null; references: string[];
   invitation: InvitationView | null;  // from the first text/calendar part (iMIP)
@@ -86,7 +90,8 @@ type ListQuery = {
   role: FolderRole | null;           // a role across accounts (unified Inbox etc.)
   filter: "all" | "unread" | "flagged" | "attachments" | "toMe" | "pinned";
                                      // toMe: the account's own address is in To or Cc
-  search: string | null;             // full-text over subject, people, body
+  search: string | null;             // the query language in "Search" below
+  searchScope?: "folder" | "subfolders" | "account" | "all";  // where `search` looks (default folder); see "Search"
   offset: number; limit: number;     // limit <= 200
   focus?: "focused" | "other" | null;
   sort?: "date" | "from" | "subject" | "size";  // default date; from = sender name, else address
@@ -144,6 +149,93 @@ written as `_` and two upper-case hex digits per UTF-8 byte ("Red team" → `$Ca
 "Café" → `$Cat_Caf_C3_A9`); keywords in that form are read back as categories. A folder whose
 `PERMANENTFLAGS` lacks `\*` keeps them on this device only (and sync leaves them alone).
 
+**Search** (`ListQuery.search`, `parse_search`). Plain words must all match, each as the start
+of a word (`invoic` finds "invoice"), anywhere in the subject, sender, To, Cc, preview or
+downloaded text; accents and case are ignored. `"quoted phrases"` match as written. A leading
+`-` leaves out what a word, phrase or operator matches (`-newsletter`, `-from:boss`). `OR` in
+capitals between two terms matches either (`from:jane OR from:peter`; chains work; anywhere
+else it is the word "OR"). Operators (names any case; values with spaces in double quotes):
+
+| Operator | Matches |
+|---|---|
+| `from:` `to:` `cc:` `subject:` | words (as word starts) in that field; `from:` and `to:`/`cc:` cover names and addresses (`from:mocky.co.ke`) |
+| `body:` | words in the downloaded text, or the preview when the text isn't downloaded |
+| `has:attachment` | messages with attachments |
+| `is:unread` `is:read` `is:flagged` `is:pinned` `is:answered` | that state (`starred`, `replied`, `new`, `seen` also work) |
+| `category:` | that category, ignoring case (`category:"Red team"`) |
+| `after:` / `before:` | dated on or after / before the start of that local day: `YYYY-MM-DD` (or `YYYY/MM/DD`), `today`, `yesterday`. Undated mail never matches |
+| `in:` | `inbox`, `sent`, `drafts`, `archive`, `junk`/`spam`, `trash` (by role), else a folder name or path (ignoring case) |
+| `larger:` / `smaller:` | size in bytes, `k`, `m` or `g` (×1024; `kb`/`mb` too, decimals allowed): `larger:500k`, `smaller:2m` |
+
+Any other `word:` is searched as plain text (`10:30`, `re:`, URLs). Up to 16 terms are used.
+A bad value (`after:soon`, `is:sleepy`, `larger:big`) is left out and explained in
+`parse_search`'s `errors`; if nothing usable is left, the search matches nothing. Words and
+names never become SQL: text terms go to the FTS5 index as quoted literals, everything else is
+a bound parameter. Search results are not pinned-first.
+
+Scope (`ListQuery.searchScope`, only while `search` has text): `folder` (default) is the open
+view (folder, or role across accounts, Focused/Other as chosen). `subfolders` adds every folder
+whose path starts with the view's folder path plus its delimiter (for a unified role view, below
+each account's folder with that role). `account` is the view's account (the `accountId`, or the
+folder's account; a unified view without one is every account) and `all` every account; both
+leave out Trash and Junk and ignore Focused/Other. Any `in:` term (not negated) also widens a
+`folder`/`subfolders` search to the account, and then Trash and Junk are searched too, so
+`in:trash invoice` works from any folder.
+
+**Rules** (`Rule`, `RuleInput` in `types.ts`; `save_rule` and friends). A rule matches a
+message when its conditions do (`match: 'all'`: every one; `'any'`: one is enough; no
+conditions: every message) and none of its exceptions does. Text conditions (`from`, `to`,
+`cc`, `toOrCc`, `subject`, `body`, `subjectOrBody`) take comma-separated words or addresses;
+any one found anywhere in the field, ignoring case, matches (`from` and `to`/`cc` look at
+`Name <address>`). `header` is `Name: words` (just `Name`: the header is there); `importance`
+is `high`/`normal`/`low` as the list shows it; `sizeOver`/`sizeUnder` are kilobytes; `category`
+a category name; `toMe` the account's address in To or Cc; `onlyToMe` the account's address
+alone in To and no Cc; `hasAttachment` as the list shows it. Rules run in `order`; a matching
+rule with `stopProcessing` ends the run for that message. What every matching rule does is
+gathered first, then done in this order: read/flag (`markRead`, `flag`, `clearFlag`; later rules
+win), pin and importance (this device), categories (`clearCategories` then `categorize`; queued to
+the server like `set_categories`), copies (`copy`, queued like `copy_messages`), and last the
+move: the first `move` or `delete` (to the account's Trash) of the matching rules decides where
+the message goes; later ones are ignored. `notify` shows a desktop notification with the sender
+and subject (more than three at once: one saying how many). Rules for every account
+(`accountId` null) move and copy by `role`, to that folder in each account. Rule actions never
+set off rules again: rules run once per new message, and a copy a rule makes (same Message-ID in
+the account) and mail moved here by the app are skipped when the server's copy arrives.
+
+Rules run by themselves on mail new in an account's inbox since the last sync (not on the first
+sync of an account or folder), right after each inbox sync, using the account's rules and the
+rules for every account that are on. Bodies of new inbox mail (under 2 MB) are downloaded in
+that same sync before the rules run, so `body`/`subjectOrBody` look at the text, and `header`
+at the downloaded headers; for a message not downloaded, `body` looks at the preview and
+`header` conditions don't match. What the rules move out of the inbox or mark read is left out
+of the new-mail notification. In other folders and unified views rules only run with
+`run_rules`.
+
+`keepOnServer` also writes the rule to the mail server, so it runs while every device is off:
+password accounts with ManageSieve (IMAP host, port 4190, as for out of office), into one
+script, `mocky-mail-rules` (`header :contains`, `address :is`, `size`, `fileinto`,
+`fileinto :copy`, `addflag`, `stop`; the folder's UTF-8 name). Writes happen in the background
+(retried after 20 s, 2 and 10 minutes, and again after the account's next full sync or the next
+start); `save_rule` returns at once with `serverStatus: 'local'` and the note "Being saved to
+the mail server." while that happens, then `mail://rules-changed`. The server can't run
+`body`, `subjectOrBody`, `hasAttachment`, `category`, `onlyToMe`, `categorize`,
+`clearCategories`, `clearFlag`, `setImportance`, `notify` or `pin`, nor move/copy/flag where it
+lacks `fileinto`/`copy`/`imap4flags`; such rules are `unsupported` with a `serverNote` saying
+why, and still run here. Gmail and Microsoft accounts are always `unsupported` ("Gmail and
+Outlook keep their own filters, so this rule runs on this device."). A rule that is off isn't
+written (`local`, "Turned off, so it isn't on the mail server."). For a rule for every account,
+`server` means at least one account took it (the note names them and says why the others
+didn't). Rules on the server also run here; that is harmless (what they move never reaches the
+inbox here). Only one script runs on a server: when out of office (`mocky-mail`) is on, it
+`include`s the rules script; a script that was running before (webmail filters) keeps running
+after the rules through `include :personal` and runs alone again when no rule is kept on the
+server. Without the `include` extension, rules don't go on a server that already runs another
+script (`unsupported`, with a note).
+
+**Pictures from trusted senders.** `trust_image_sender` keeps an address, or a domain that
+covers its subdomains; `get_message` then loads remote pictures for mail from it and sets
+`imagesTrusted`. The global `remoteImages: 'allow'` loads them for everyone anyway.
+
 ## Commands
 
 | Command | Args | Returns |
@@ -167,7 +259,17 @@ written as `_` and two upper-case hex digits per UTF-8 byte ("Red team" → `$Ca
 | `take_mailto` | | `Mailto \| null` (`{ to, cc, bcc, subject, body }` from the `mailto:` link the app was started with, once; Linux `.desktop` and Windows MSIX register the app for `mailto:`, and a link opened while it runs arrives as `mail://mailto` `{ url }`) |
 | `parse_mailto` | `{ url }` | `Mailto \| null` (Android hands its SENDTO/VIEW link to the page through `window.MockyIntents.takeMailto()`; links only fill in a new message, control characters are dropped from fields) |
 | `get_thread` | `{ id }` | `MessageListItem[]` (every message in its conversation in the account, sent ones included, oldest first; Trash and Spam left out unless the message is there) |
-| `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read) |
+| `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read. Remote pictures load when `allowRemote`, when `Settings.remoteImages` is `allow`, or when the sender is trusted (`imagesTrusted: true`; see `trust_image_sender`)) |
+| `parse_search` | `{ query }` | `ParsedSearch` (`{ terms: SearchTerm[], errors: string[] }`; never rejects. Terms joined by `OR` carry `orWithNext: true` on the first of the two (absent otherwise). Terms with a bad value are left out and explained in `errors`, e.g. "after: needs a date like 2026-10-01 (or today, yesterday).") |
+| `list_rules` | | `Rule[]` (in order) |
+| `save_rule` | `{ rule: RuleInput }` | `Rule[]` (`id` null adds it last; otherwise changes it in place. `invalid` with a plain message for: no name, no action, a text condition with nothing to look for, a bad header/importance/size value, move/copy without a folder, a folder of another account, a rule for every account using a folder instead of a `role`, a category that doesn't exist (names are matched ignoring case and stored as the category is spelled). Up to 30 conditions, 30 exceptions and 20 actions. Never waits for the mail server: `serverStatus`/`serverNote` say what is known now, and `mail://rules-changed` follows when the server write finishes) |
+| `delete_rule` | `{ id }` | `Rule[]` (`not_found` if it's gone; taken off the server too) |
+| `reorder_rules` | `{ ids }` | `Rule[]` (every rule id exactly once, else `invalid`; the server script follows the new order) |
+| `run_rules` | `{ ruleIds: string[] \| null, folderId }` | `RuleRunResult` (`{ checked, matched }`: the folder's newest 5,000 messages; `ruleIds` null runs every enabled rule for the folder's account, else those rules (even if off) that are for that account or every account, in their order. Works on any folder, Trash included) |
+| `preview_rule` | `{ rule: RuleInput, folderId }` | `number` (how many of the folder's newest 5,000 messages the conditions and exceptions match; name, account and actions aren't needed yet; a bad condition value rejects `invalid`) |
+| `list_image_senders` | | `ImageSender[]` (by name) |
+| `trust_image_sender` | `{ sender, wholeDomain }` | `ImageSender[]` (`sender` an address; with `wholeDomain` its domain is stored (a bare domain is accepted too), and covers subdomains: `bank.example` covers `mail.bank.example`. Stored in lower case; `invalid` if it isn't an address/domain) |
+| `untrust_image_sender` | `{ sender }` | `ImageSender[]` (as listed; nothing happens if it isn't there) |
 | `set_flags` | `{ ids, seen?: boolean, flagged?: boolean, pinned?: boolean, importance?: Importance, flagDue?: number \| null }` | `void` (local at once. `seen`/`flagged` reach the server when online; `pinned`, `importance` and `flagDue` stay on this device. A `flagDue` number (unix seconds) also flags the message; null clears the date; unflagging, here or on another device, clears it too. At the due time the app shows one notification "Follow up: <subject>") |
 | `move_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` (a message moved again before the server gave it a new UID is found by Message-ID) |
 | `copy_messages` | `{ ids, target: { role: FolderRole } \| { folderId: string } }` | `void` (same account only; IMAP `UID COPY`, queued like moves so it works offline; nothing changes locally until the target folder syncs, when the copies appear as new messages) |
@@ -212,7 +314,7 @@ written as `_` and two upper-case hex digits per UTF-8 byte ("Red team" → `$Ca
 | `remove_cancelled_event` | `{ id }` | `InvitationView` (for a `METHOD:CANCEL`: deletes the event with that `UID` from your calendar) |
 | `apply_invitation_reply` | `{ id }` | `InvitationView` (for a `METHOD:REPLY` to your invitation: the replier's `PARTSTAT` is written into your calendar copy) |
 | `get_out_of_office` | `{ accountId }` | `{ accountId, available, message, active, settings: { enabled, subject, message, start: 'YYYY-MM-DD' \| null, end, days } }`. Read from the account's ManageSieve server (IMAP host, port 4190, STARTTLS required, PLAIN login with the mail password). `available` false (with `message`) for Gmail/Microsoft accounts or servers without ManageSieve or the `vacation` extension. |
-| `set_out_of_office` | `{ accountId, settings }` | Same. Writes the script `mocky-mail` (`vacation :days N :subject … :addresses [account email]`, inside `currentdate` tests when dated; the settings are kept as JSON in a comment). A script that was running before is kept running through `include :personal`, and becomes active again when replies are switched off. |
+| `set_out_of_office` | `{ accountId, settings }` | Same. Writes the script `mocky-mail` (`vacation :days N :subject … :addresses [account email]`, inside `currentdate` tests when dated; the settings are kept as JSON in a comment). A script that was running before is kept running through `include :personal`, and becomes active again when replies are switched off. With rules kept on the server, that script is `mocky-mail-rules`, which keeps any older one running in turn (see "Rules"). |
 | `get_signature` | `{ accountId, reply?: boolean }` | `Signature \| null` (the account's default signature for new messages, or with `reply` for replies and forwards; `{ html, text, image? }`, image `{ mimeType, data (base64), width, naturalWidth, naturalHeight }`) |
 | `list_signatures` | `{ accountId }` | `SignatureSet` (`{ items: (Signature & { id, name })[], defaultNew: string \| null, defaultReply: string \| null }`; the single signature older versions stored is moved into the list on first read) |
 | `save_signature` | `{ accountId, id: string \| null, name, html }` | `SignatureSet` (null `id` creates one; the HTML is sanitized like incoming mail; the picture is kept; the first signature becomes both defaults. Sending adds an HTML alternative with the full signature, and its picture as a `multipart/related` part `cid:signature-image@mocky.mail`, for whichever of the account's signatures still has its plain block in the body) |
@@ -234,3 +336,4 @@ written as `_` and two upper-case hex digits per UTF-8 byte ("Red team" → `$Ca
 | `mail://outbox-changed` | `{ entries: OutboxEntry[] }` |
 | `mail://new-mail` | `{ accountId: string; count: number }` (the backend also shows the desktop notification when enabled) |
 | `mail://accounts-changed` | `{}` (refetch accounts) |
+| `mail://rules-changed` | `{ rules: Rule[] }` (a background write of rules to a mail server finished or gave up, and some `serverStatus`/`serverNote` changed; the full list, in order) |

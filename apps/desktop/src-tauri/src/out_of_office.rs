@@ -38,21 +38,44 @@ fn unavailable(account: &Account, why: &str) -> OutOfOffice {
     }
 }
 
-/// A logged-in filter connection, or why there can't be one.
-async fn connect(state: &AppState, account: &Account) -> AppResult<Result<SieveClient, String>> {
+/// Why an account has no filter connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoSieve {
+    /// Gmail or Microsoft sign-in.
+    NotPassword,
+    /// No password stored to sign in with.
+    NoPassword,
+    /// The server doesn't offer `ManageSieve`.
+    NotOffered,
+}
+
+/// A logged-in filter connection, or why there can't be one. Errors are
+/// for problems worth trying again (a refused password, a lost network).
+pub(crate) async fn open_sieve(
+    state: &AppState,
+    account: &Account,
+) -> AppResult<Result<SieveClient, NoSieve>> {
     if account.auth != AuthKind::Password {
-        return Ok(Err(
-            "Automatic replies for Gmail and Microsoft accounts are set in their own web pages for now.".to_owned(),
-        ));
+        return Ok(Err(NoSieve::NotPassword));
     }
     let Credentials::Password { username, password } =
         crate::credentials::for_account(state, account).await?
     else {
-        return Ok(Err(
-            "This account has no password to sign in with.".to_owned()
-        ));
+        return Ok(Err(NoSieve::NoPassword));
     };
     match SieveClient::connect(&account.imap.host, &username, &password).await {
+        Ok(client) => Ok(Ok(client)),
+        Err(SyncError::Connect { .. } | SyncError::Config(_) | SyncError::Protocol(_)) => {
+            Ok(Err(NoSieve::NotOffered))
+        }
+        Err(other) => Err(other.into()),
+    }
+}
+
+/// A logged-in filter connection that can send automatic replies, or why
+/// there can't be one.
+async fn connect(state: &AppState, account: &Account) -> AppResult<Result<SieveClient, String>> {
+    match open_sieve(state, account).await? {
         Ok(client) if client.extensions.iter().any(|e| e == "vacation") => Ok(Ok(client)),
         Ok(client) => {
             client.logout().await;
@@ -60,10 +83,15 @@ async fn connect(state: &AppState, account: &Account) -> AppResult<Result<SieveC
                 "The mail server can't send automatic replies.".to_owned()
             ))
         }
-        Err(SyncError::Connect { .. } | SyncError::Config(_) | SyncError::Protocol(_)) => Ok(Err(
+        Err(NoSieve::NotPassword) => Ok(Err(
+            "Automatic replies for Gmail and Microsoft accounts are set in their own web pages for now.".to_owned(),
+        )),
+        Err(NoSieve::NoPassword) => Ok(Err(
+            "This account has no password to sign in with.".to_owned()
+        )),
+        Err(NoSieve::NotOffered) => Ok(Err(
             "The mail server doesn't offer automatic replies.".to_owned(),
         )),
-        Err(other) => Err(other.into()),
     }
 }
 

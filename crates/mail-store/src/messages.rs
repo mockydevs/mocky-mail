@@ -6,14 +6,13 @@ use std::collections::hash_map::Entry;
 use mail_core::folders::FolderRole;
 use mail_core::importance::Importance;
 use mail_core::message::{AttachmentInfo, Mailbox, MessageSummary};
-use rusqlite::{OptionalExtension, Row, Transaction, params};
+use rusqlite::{OptionalExtension, Row, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use crate::Store;
 use crate::error::{Result, StoreError};
-use crate::folders::role_str;
 use crate::ids::{new_id, to_i64, to_u32, to_u64};
-use crate::search::{SearchTerms, fts_query};
+use crate::search;
 
 /// Largest page [`Store::list_messages`] returns; larger limits are capped.
 pub const MAX_PAGE_SIZE: u32 = 200;
@@ -119,8 +118,16 @@ pub struct ListQuery {
     pub role: Option<FolderRole>,
     /// Unread or flagged only.
     pub filter: ListFilter,
-    /// Full-text search over subject, sender, recipients, preview and body.
+    /// The search box: words over subject, people, preview and text, and
+    /// the operators of `mail_core::search`.
     pub search: Option<String>,
+    /// Where `search` looks; `None` is the open view only.
+    #[serde(default)]
+    pub search_scope: Option<mail_core::search::SearchScope>,
+    /// The local day for `before:` and `after:` (not part of the
+    /// interface; the app sets it). `None`: today in UTC.
+    #[serde(skip)]
+    pub search_context: Option<mail_core::search::SearchContext>,
     /// Messages to skip.
     pub offset: u32,
     /// Page size, capped at [`MAX_PAGE_SIZE`].
@@ -657,54 +664,32 @@ impl Store {
     /// Fails on a database error or an unreadable row. Search text can
     /// never cause an error: it is escaped before reaching FTS5.
     pub fn list_messages(&self, query: &ListQuery) -> Result<MessagePage> {
-        let search = match fts_query(query.search.as_deref()) {
-            SearchTerms::None => None,
-            SearchTerms::Nothing => {
-                return Ok(MessagePage {
-                    items: Vec::new(),
-                    total: 0,
-                });
-            }
-            SearchTerms::Match(expr) => Some(expr),
+        let conn = self.conn();
+        let Some(sel) = search::selection(&conn, query)? else {
+            return Ok(MessagePage {
+                items: Vec::new(),
+                total: 0,
+            });
         };
-        let role = query.role.map(role_str);
         let limit = i64::from(query.limit.min(MAX_PAGE_SIZE));
         let offset = i64::from(query.offset);
-        let focus = query.focus.map(mail_core::focus::Focus::as_str);
+        let searching = query
+            .search
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
         // ?6 and ?7 (page) are unused by the count but must be bound: ?8 is the focus.
-        let selectors = params![
-            query.account_id,
-            query.folder_id,
-            role,
-            query.filter.code(),
-            search,
-            0,
-            0,
-            focus
-        ];
-        let conn = self.conn();
+        let values = sel.params(query.filter.code(), limit, offset);
         let total: i64 = conn
-            .prepare_cached(concat!("SELECT count(*)", list_where!()))?
-            .query_row(selectors, |row| row.get(0))?;
-        let order = order_by(query, "m.pinned", search.is_some());
+            .prepare_cached(&format!("SELECT count(*){}{}", list_where!(), sel.sql))?
+            .query_row(params_from_iter(values.iter()), |row| row.get(0))?;
+        let order = order_by(query, "m.pinned", searching);
         let mut stmt = conn.prepare_cached(&format!(
-            "{} ORDER BY {order} LIMIT ?6 OFFSET ?7",
-            concat!("SELECT ", item_columns!(), list_where!())
+            "{}{} ORDER BY {order} LIMIT ?6 OFFSET ?7",
+            concat!("SELECT ", item_columns!(), list_where!()),
+            sel.sql
         ))?;
         let items = stmt
-            .query_map(
-                params![
-                    query.account_id,
-                    query.folder_id,
-                    role,
-                    query.filter.code(),
-                    search,
-                    limit,
-                    offset,
-                    focus
-                ],
-                ItemRow::read,
-            )?
+            .query_map(params_from_iter(values.iter()), ItemRow::read)?
             .map(|row| row?.into_item())
             .collect::<Result<Vec<_>>>()?;
         Ok(MessagePage {
@@ -720,47 +705,38 @@ impl Store {
     /// # Errors
     /// Fails on a database error.
     pub fn list_threads(&self, query: &ListQuery) -> Result<MessagePage> {
-        let search = match fts_query(query.search.as_deref()) {
-            SearchTerms::None => None,
-            SearchTerms::Nothing => {
-                return Ok(MessagePage {
-                    items: Vec::new(),
-                    total: 0,
-                });
-            }
-            SearchTerms::Match(expr) => Some(expr),
+        let conn = self.conn();
+        let Some(sel) = search::selection(&conn, query)? else {
+            return Ok(MessagePage {
+                items: Vec::new(),
+                total: 0,
+            });
         };
-        let role = query.role.map(role_str);
         let limit = i64::from(query.limit.min(MAX_PAGE_SIZE));
         let offset = i64::from(query.offset);
-        let focus = query.focus.map(mail_core::focus::Focus::as_str);
-        let conn = self.conn();
+        let searching = query
+            .search
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let values = sel.params(query.filter.code(), limit, offset);
         let total: i64 = conn
-            .prepare_cached(concat!(
-                "SELECT count(DISTINCT m.account_id || char(0) || coalesce(m.thread_key, m.id))",
-                list_where!()
+            .prepare_cached(&format!(
+                "SELECT count(DISTINCT m.account_id || char(0) || coalesce(m.thread_key, m.id)){}{}",
+                list_where!(),
+                sel.sql
             ))?
-            .query_row(
-                params![
-                    query.account_id,
-                    query.folder_id,
-                    role,
-                    query.filter.code(),
-                    search,
-                    0,
-                    0,
-                    focus
-                ],
-                |row| row.get(0),
-            )?;
-        let order = order_by(query, "r.any_pinned", search.is_some());
+            .query_row(params_from_iter(values.iter()), |row| row.get(0))?;
+        let order = order_by(query, "r.any_pinned", searching);
         let mut stmt = conn.prepare_cached(&format!(
-            "{} ORDER BY {order} LIMIT ?6 OFFSET ?7",
+            "{}{}{} ORDER BY {order} LIMIT ?6 OFFSET ?7",
             concat!(
                 "WITH hits AS (SELECT m.seq AS seq, m.id AS id, m.account_id AS account_id,
                     coalesce(m.thread_key, m.id) AS tk, m.date AS date, m.seen AS seen,
                     m.pinned AS pinned",
-                list_where!(),
+                list_where!()
+            ),
+            sel.sql,
+            concat!(
                 "), ranked AS (SELECT seq,
                     row_number() OVER (PARTITION BY account_id, tk
                         ORDER BY date IS NULL, date DESC, seq DESC) AS rn,
@@ -776,27 +752,15 @@ impl Store {
              WHERE r.rn = 1"
             )
         ))?;
-        let rows = stmt.query_map(
-            params![
-                query.account_id,
-                query.folder_id,
-                role,
-                query.filter.code(),
-                search,
-                limit,
-                offset,
-                focus
-            ],
-            |row| {
-                Ok((
-                    ItemRow::read(row)?,
-                    row.get::<_, i64>(18)?,
-                    row.get::<_, bool>(19)?,
-                    row.get::<_, String>(20)?,
-                    row.get::<_, bool>(21)?,
-                ))
-            },
-        )?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            Ok((
+                ItemRow::read(row)?,
+                row.get::<_, i64>(18)?,
+                row.get::<_, bool>(19)?,
+                row.get::<_, String>(20)?,
+                row.get::<_, bool>(21)?,
+            ))
+        })?;
         let mut items = Vec::new();
         for row in rows {
             let (item, count, any_unread, ids, any_pinned) = row?;
@@ -1000,7 +964,8 @@ impl Store {
     /// UIDs are cleared until the server assigns new ones (see
     /// [`Store::upsert_message`]), so record the old folder and UID in a
     /// pending operation before calling this. Messages from other accounts
-    /// are skipped. Returns how many moved.
+    /// are skipped. Mail moved here isn't new mail for the rules when the
+    /// server's copy arrives. Returns how many moved.
     ///
     /// # Errors
     /// [`StoreError::NotFound`] if the target folder does not exist.
@@ -1018,7 +983,7 @@ impl Store {
         let mut moved = 0usize;
         {
             let mut stmt = tx.prepare(
-                "UPDATE messages SET folder_id = ?2, uid = NULL
+                "UPDATE messages SET folder_id = ?2, uid = NULL, rules_done = 1
                  WHERE id = ?1 AND account_id = ?3 AND folder_id <> ?2",
             )?;
             for id in ids {
@@ -1685,6 +1650,266 @@ mod tests {
         add_message(&f.store, &f.inbox, 1, &summary("Dinner", 1));
         assert!(search("lunch").is_empty());
         assert_eq!(search("dinner"), ["Dinner"]);
+    }
+
+    /// 2026-11-27 12:00 in Nairobi.
+    fn nairobi() -> mail_core::search::SearchContext {
+        mail_core::search::SearchContext::at(1_795_770_000, 3 * 3600)
+    }
+
+    fn found(store: &Store, query: &ListQuery) -> Vec<String> {
+        let page = store
+            .list_messages(&ListQuery {
+                search_context: Some(nairobi()),
+                ..query.clone()
+            })
+            .unwrap();
+        let threads = store
+            .list_threads(&ListQuery {
+                search_context: Some(nairobi()),
+                ..query.clone()
+            })
+            .unwrap();
+        // Conversations agree with messages here: every subject is its own.
+        assert_eq!(page.total, threads.total, "{query:?}");
+        let mut out: Vec<String> = subjects(&page).into_iter().map(str::to_owned).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn search_operators_compile_to_conditions() {
+        let f = fixture();
+        let mut jane = summary("Lunch plans", 1_795_700_000);
+        jane.from = Some(Mailbox {
+            name: Some("Jane Wanjiku".into()),
+            address: "jane@mocky.co.ke".into(),
+        });
+        let lunch = add_message(&f.store, &f.inbox, 1, &jane);
+        let mut report = with_attachment(summary("Quarterly report", 1_790_000_000));
+        report.cc = vec![Mailbox {
+            name: Some("Peter Otieno".into()),
+            address: "peter@client.example".into(),
+        }];
+        let report_id = add_message(&f.store, &f.inbox, 2, &report);
+        f.store
+            .upsert_message(
+                &f.inbox,
+                3,
+                &summary("Big scan", 1_795_760_000),
+                MessageFlags {
+                    seen: true,
+                    flagged: true,
+                    answered: true,
+                },
+                3 * 1024 * 1024,
+            )
+            .unwrap();
+        f.store
+            .set_raw(&report_id, b"x", Some("The M-Pesa reconciliation"))
+            .unwrap();
+        f.store.ensure_categories(&["Red team".to_owned()]).unwrap();
+        f.store
+            .set_categories(&[&lunch], &["Red team".to_owned()], &[])
+            .unwrap();
+        f.store
+            .set_marks(&[&lunch], Some(true), None, None)
+            .unwrap();
+        let search = |text: &str| {
+            found(
+                &f.store,
+                &ListQuery {
+                    search: Some(text.into()),
+                    ..query()
+                },
+            )
+        };
+        assert_eq!(search("from:jane"), ["Lunch plans"]);
+        assert_eq!(search("from:mocky.co.ke"), ["Lunch plans"]);
+        assert_eq!(search("from:\"jane wanjiku\""), ["Lunch plans"]);
+        // Sender words aren't found in the subject column and vice versa.
+        assert!(search("subject:jane").is_empty());
+        assert_eq!(search("subject:quarter"), ["Quarterly report"]);
+        assert_eq!(
+            search("to:bob"),
+            ["Big scan", "Lunch plans", "Quarterly report"]
+        );
+        assert_eq!(search("cc:otieno"), ["Quarterly report"]);
+        assert!(search("to:otieno").is_empty());
+        assert_eq!(search("body:reconcil"), ["Quarterly report"]);
+        // Not downloaded: the preview counts as the text.
+        assert_eq!(search("body:\"preview of big\""), ["Big scan"]);
+        assert_eq!(search("has:attachment"), ["Quarterly report"]);
+        assert_eq!(search("is:unread"), ["Lunch plans", "Quarterly report"]);
+        assert_eq!(search("is:read"), ["Big scan"]);
+        assert_eq!(search("is:flagged"), ["Big scan"]);
+        assert_eq!(search("is:answered"), ["Big scan"]);
+        assert_eq!(search("is:pinned"), ["Lunch plans"]);
+        assert_eq!(search("category:\"red TEAM\""), ["Lunch plans"]);
+        assert!(search("category:blue").is_empty());
+        assert_eq!(search("larger:2m"), ["Big scan"]);
+        assert_eq!(search("smaller:1k"), ["Lunch plans", "Quarterly report"]);
+        // 1_795_726_800 is midnight today in Nairobi.
+        assert_eq!(search("after:today"), ["Big scan"]);
+        assert_eq!(search("before:today"), ["Lunch plans", "Quarterly report"]);
+        assert_eq!(search("after:2026-10-01 before:today"), ["Lunch plans"]);
+        assert_eq!(search("-from:jane"), ["Big scan", "Quarterly report"]);
+        assert_eq!(search("-is:read report"), ["Quarterly report"]);
+        assert_eq!(search("-\"quarterly report\""), ["Big scan", "Lunch plans"]);
+        assert_eq!(
+            search("from:jane OR has:attachment"),
+            ["Lunch plans", "Quarterly report"]
+        );
+        assert_eq!(
+            search("from:jane OR has:attachment -is:pinned"),
+            ["Quarterly report"]
+        );
+        assert_eq!(search("\"lunch plans\""), ["Lunch plans"]);
+        assert!(search("\"plans lunch\"").is_empty());
+        assert_eq!(search("in:inbox lunch"), ["Lunch plans"]);
+        assert_eq!(search("in:INBOX lunch"), ["Lunch plans"]);
+        assert!(search("in:sent lunch").is_empty());
+        // An operator nobody knows is a word; a bad value matches nothing.
+        assert!(search("colour:red").is_empty());
+        assert!(search("after:someday").is_empty());
+        assert!(search("is:sleepy").is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "one mailbox, every scope")]
+    fn search_scopes_widen_the_view() {
+        use mail_core::search::SearchScope as S;
+        let f = fixture();
+        let clients = f
+            .store
+            .upsert_folder(
+                &f.account,
+                &crate::NewFolder {
+                    path: "INBOX/Clients",
+                    name: "Clients",
+                    role: FolderRole::Other,
+                    delimiter: Some("/"),
+                },
+            )
+            .unwrap();
+        let deep = f
+            .store
+            .upsert_folder(
+                &f.account,
+                &crate::NewFolder {
+                    path: "INBOX/Clients/Acme",
+                    name: "Acme",
+                    role: FolderRole::Other,
+                    delimiter: Some("/"),
+                },
+            )
+            .unwrap();
+        // A sibling whose name starts the same isn't below it.
+        let lookalike = add_folder(&f.store, &f.account, "INBOX/ClientsOld", FolderRole::Other);
+        let archive = add_folder(&f.store, &f.account, "Archive", FolderRole::Archive);
+        let trash = add_folder(&f.store, &f.account, "Trash", FolderRole::Trash);
+        let other = add_account(&f.store, "b@example.com");
+        let other_inbox = add_folder(&f.store, &other, "INBOX", FolderRole::Inbox);
+        for (folder, subject) in [
+            (&f.inbox, "invoice inbox"),
+            (&clients, "invoice clients"),
+            (&deep, "invoice acme"),
+            (&lookalike, "invoice old"),
+            (&archive, "invoice archive"),
+            (&trash, "invoice trash"),
+            (&other_inbox, "invoice other account"),
+        ] {
+            add_message(&f.store, folder, 1, &summary(subject, 1));
+        }
+        let look = |folder: Option<&str>, role, scope, text: &str| {
+            found(
+                &f.store,
+                &ListQuery {
+                    folder_id: folder.map(str::to_owned),
+                    role,
+                    search: Some(text.into()),
+                    search_scope: scope,
+                    ..query()
+                },
+            )
+        };
+        assert_eq!(
+            look(Some(&clients), None, None, "invoice"),
+            ["invoice clients"]
+        );
+        assert_eq!(
+            look(Some(&clients), None, Some(S::Subfolders), "invoice"),
+            ["invoice acme", "invoice clients"]
+        );
+        assert_eq!(
+            look(Some(&f.inbox), None, Some(S::Subfolders), "invoice"),
+            [
+                "invoice acme",
+                "invoice clients",
+                "invoice inbox",
+                "invoice old"
+            ]
+        );
+        assert_eq!(
+            look(Some(&clients), None, Some(S::Account), "invoice"),
+            [
+                "invoice acme",
+                "invoice archive",
+                "invoice clients",
+                "invoice inbox",
+                "invoice old"
+            ]
+        );
+        assert_eq!(look(None, None, Some(S::All), "invoice").len(), 6);
+        // A unified Inbox: both accounts' inboxes, or with subfolders.
+        assert_eq!(
+            look(None, Some(FolderRole::Inbox), Some(S::Folder), "invoice"),
+            ["invoice inbox", "invoice other account"]
+        );
+        assert_eq!(
+            look(
+                None,
+                Some(FolderRole::Inbox),
+                Some(S::Subfolders),
+                "invoice"
+            )
+            .len(),
+            5
+        );
+        // Trash only when asked for by in:, which also looks past the folder.
+        assert_eq!(
+            look(Some(&clients), None, None, "invoice in:trash"),
+            ["invoice trash"]
+        );
+        assert_eq!(
+            look(Some(&clients), None, Some(S::All), "invoice in:Trash"),
+            ["invoice trash"]
+        );
+        assert_eq!(
+            look(Some(&clients), None, None, "in:acme"),
+            ["invoice acme"]
+        );
+        assert_eq!(
+            look(None, None, Some(S::All), "invoice in:inbox"),
+            ["invoice inbox", "invoice other account"]
+        );
+        // No search: the scope changes nothing.
+        let page = f
+            .store
+            .list_messages(&ListQuery {
+                folder_id: Some(clients.clone()),
+                search_scope: Some(S::All),
+                ..query()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        // The scope arrives from the interface as a string.
+        let q: ListQuery = serde_json::from_value(serde_json::json!({
+            "accountId": null, "folderId": null, "role": null, "filter": "all",
+            "search": "x", "offset": 0, "limit": 10, "searchScope": "subfolders"
+        }))
+        .unwrap();
+        assert_eq!(q.search_scope, Some(S::Subfolders));
     }
 
     #[test]
