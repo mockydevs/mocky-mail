@@ -48,6 +48,10 @@ type MessageListItem = {
   categories: string[];     // category names in the order added (see "Categories" below)
   flagDue: number | null;   // follow-up date of a flagged message, unix seconds; this device only
   size: number;             // bytes, as the server reported
+  signed?: boolean;         // S/MIME or OpenPGP signed, from the top-level Content-Type when the headers are
+                            // saved (multipart/signed, pkcs7-mime signed-data), whatever checking it finds
+  encrypted?: boolean;      // multipart/encrypted, or pkcs7-mime enveloped-data / authEnveloped-data
+                            // (inline PGP in text/plain is only found when the message is opened)
   threadCount: number;      // 1 unless grouped
   threadIds?: string[];     // when grouped
 };
@@ -73,7 +77,35 @@ type MessageDetail = MessageListItem & {
   readReceipt: { requestedBy: string; answered: boolean } | null;
                             // the sender asked for a read receipt (see "Read receipts"); answered: sent or
                             // declined here already. null: none asked for, or one not to answer
+  signature: SignatureCheck | null;   // see "Security"; null when unsigned
+  encryption: { kind: SecurityKind; state: 'decrypted' | 'locked'; detail: string | null } | null;
+                            // encrypted: decrypted (html/text/attachments are the decrypted message) or
+                            // locked, with why in detail (no key here, keyring locked, damaged…); null: not encrypted
 };
+
+type SecurityKind = 'smime' | 'openpgp';
+type SignatureCheck = {
+  kind: SecurityKind;
+  result: 'verified' | 'unverifiedSigner' | 'changed' | 'unknown';
+  signer: { name: string | null; address: string | null; fingerprint: string | null; issuer: string | null } | null;
+                            // fingerprint: S/MIME certificate SHA-256 or OpenPGP primary key fingerprint, upper-case
+                            // hex; issuer: S/MIME only (the issuing authority's common name)
+  fromMismatch: boolean;    // none of the signer's addresses is the From address
+  detail: string;           // short plain words ("Signed with a certificate from …", "The message was changed after it was signed.")
+  signedAt: number | null;  // unix seconds, from the signature
+};
+type SecurityKey = {
+  id: string;               // opaque; "windows:<sha256>" / "gpg:<fingerprint>" for keys only listed from a system store
+  kind: SecurityKind; owner: string; addresses: string[];
+  fingerprint: string;      // upper-case hex: certificate SHA-256, or OpenPGP fingerprint
+  expires: number | null;   // unix seconds; null: doesn't expire
+  canSign: boolean;         // Mocky Mail can sign with it (an own key in its store that may sign)
+  canEncrypt: boolean;      // mail can be encrypted to it (S/MIME: RSA with key encipherment; OpenPGP: a valid encryption key)
+  isOwn: boolean;           // has its private part
+  source: 'windows' | 'keychain' | 'pkcs11' | 'gpg' | 'android' | 'mocky';   // this build lists mocky, windows and gpg
+  trusted: boolean;         // the user said it is its owner's (set_key_trusted)
+};
+type EncryptionCheck = { kind: SecurityKind; recipients: { address: string; canEncrypt: boolean }[]; ownKey: boolean };
 
 type InvitationView = {
   method: string;                     // REQUEST, CANCEL, REPLY, PUBLISH
@@ -118,6 +150,9 @@ type Draft = {
   bodyHtml?: string | null;          // rich-text compose: the editor's HTML (see "Rich-text compose"); then
                                      // bodyText is only a fallback. null/missing: plain bodyText as before
   requestReadReceipt?: boolean;      // "Disposition-Notification-To: <account address>"; default false
+  sign?: boolean;                    // missing: Settings.signByDefault (when the account has a key of the kind)
+  encrypt?: boolean;                 // to every recipient (Bcc too) and the sender; missing: Settings.encryptWhenPossible
+  securityKind?: SecurityKind;       // missing: the account's preferred kind (get_account_keys)
 };
 
 type OutboxState =
@@ -136,6 +171,8 @@ type Settings = { theme: "system" | "light" | "dark"; remoteImages: "block" | "a
   readingPane: "right" | "bottom" | "off";  // default right; stored for the interface
   workOffline: boolean;                     // default false; see "Work Offline" below
   readReceipts: "ask" | "always" | "never"; // default ask; see "Read receipts" below
+  signByDefault: boolean;                   // default false; see "Security"
+  encryptWhenPossible: boolean;             // default false; see "Security"
   /* …and the others in Settings (types.ts) */ };
 type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "error"; lastSyncedAt: number | null; message: string | null };
 ```
@@ -291,6 +328,67 @@ manual-action/MDN-sent-manually; displayed`, or `MDN-sent-automatically` with `'
 covers its subdomains; `get_message` then loads remote pictures for mail from it and sets
 `imagesTrusted`. The global `remoteImages: 'allow'` loads them for everyone anyway.
 
+**Security (S/MIME and OpenPGP).** `get_message` checks the signature and decrypts:
+
+- *S/MIME*: `multipart/signed` (`application/pkcs7-signature` or `x-pkcs7-signature`) over the signed part's
+  exact bytes in canonical CR LF form, and opaque `application/pkcs7-mime; smime-type=signed-data`; DER or BER
+  (OpenSSL/NSS streaming). The signer's certificate must be valid at the signing time the signature states (the
+  clock's time when it states none, or one in the future), allow signing (key usage digitalSignature or
+  nonRepudiation) and email (extended key usage emailProtection, or none), and chain through certificates from
+  the message (or kept from earlier mail) to a root the system trusts: Windows' Trusted Root store (only roots
+  Windows allows for secure email), the macOS keychain's trusted roots and the Linux system bundle (through
+  rustls-native-certs), Android's system and user certificate folders. MD5, SHA-1 and RSA under 2048 bits are
+  refused (`unknown`); RSA-PSS isn't checked (`unknown`); RSA PKCS #1 v1.5 and ECDSA P-256/P-384 with SHA-2 are.
+  **Revocation (CRL, OCSP) is not checked.** `verified` when the path reaches a trusted root, or the user trusts
+  that very certificate (`set_key_trusted`); `unverifiedSigner` for a good signature from an unknown authority;
+  `changed` when the digest or the signature doesn't match; `unknown` for an expired certificate, one not for
+  email, a missing certificate or a weak or unknown algorithm.
+- *OpenPGP*: PGP/MIME (`multipart/signed`, `application/pgp-signature`; also as the first part of a mailing
+  list's `multipart/mixed`), inline cleartext-signed text, and signatures inside PGP/MIME encryption. Checked
+  against the keys known here: collected from `Autocrypt:` headers (the From address's, Autocrypt Level 1) and
+  `application/pgp-keys` attachments of received mail, imported, found by WKD, and GnuPG's public keyring
+  (`pubring.kbx` or `pubring.gpg` in `GNUPGHOME`, `%APPDATA%\gnupg` or `~/.gnupg`; read only, computers).
+  `verified` only when the key is trusted (`set_key_trusted`): there is no web of trust, and gpg's trust database
+  isn't read. Otherwise `unverifiedSigner`, as is a signature over only part of a message (an inline block with
+  other text around it).
+- *Decrypting*: S/MIME `enveloped-data` (AES-128/192/256-CBC, triple DES) and `authEnveloped-data` (AES-GCM)
+  with RSA key transport (PKCS #1 v1.5 or OAEP) to one of the user's certificates (ECDH recipients are not
+  supported: `locked`); PGP/MIME `multipart/encrypted` and inline armoured `text/plain` (SEIPD v1/v2, and
+  GnuPG's own OCB packet). The decrypted message is shown like any other (its own signature checked, the received
+  From/To/Subject kept) and lives in memory only (the last 16 opened): never in the database or the search index,
+  so **search doesn't find words in encrypted mail**. `save_attachment`, `open_attachment`,
+  `preview_attachment` and `attachments_for_draft` use the same decrypted message, so their indexes match
+  `attachments`.
+- *Sending* (`send_message`): sign, then encrypt the signed message. S/MIME: `multipart/signed` with a detached
+  CMS signature (SHA-256, or SHA-384 with a P-384 key; RSA PKCS #1 v1.5 or ECDSA), carrying the certificate and
+  its issuers; encryption is `enveloped-data` with AES-256-CBC and RSA PKCS #1 v1.5 key transport (what every
+  S/MIME reader decrypts; certificates with EC keys can't be encrypted to). OpenPGP: PGP/MIME `multipart/signed`
+  (`pgp-sha256`) and `multipart/encrypted` (SEIPD v1, AES-256) to each recipient's newest valid encryption key.
+  Encrypted to every To/Cc/Bcc recipient and to the sender (so Sent stays readable; note that Bcc recipients'
+  keys are then named in the message). From, To, Cc, Subject, Date and Message-ID stay outside: **the Subject is
+  not hidden**. Rich HTML bodies, inline pictures and attachments are all inside (the whole built MIME body is
+  signed or encrypted). `encrypt: true` with a recipient whose key isn't known rejects `invalid` naming them
+  ("The message can't be encrypted: there is no OpenPGP key for a@x.co, b@y.org."); OpenPGP keys are first
+  looked up by WKD. With `encrypt` left out and `Settings.encryptWhenPossible`, the message is encrypted only
+  when every recipient's key is known here (no look-ups), else sent as it is. `sign: true` (or
+  `signByDefault`) needs the account's key: none of the kind rejects `invalid` ("This account has no S/MIME
+  certificate to sign with. Add one in Settings › Security."), a locked keyring `keyring`. When the account has
+  an OpenPGP key, every message it sends carries an `Autocrypt:` header with it (primary key, the User ID for the
+  address, the encryption subkey). `save_draft` with `encrypt: true` stores the draft encrypted to the sender
+  only, unsigned. `outbox_edit` decrypts a queued message with the sender's keys and gives back `sign`,
+  `encrypt` and `securityKind` as it was queued.
+- *Keys*: kept in the database (`security_keys`); private parts (a .p12's PKCS #8 key; an OpenPGP secret key,
+  its passphrase protection removed) sealed with AES-256-GCM under a 256-bit key held in the system keyring
+  (entry `security:vault-key`, where passwords are kept), never stored in the clear. A .p12 password or
+  OpenPGP passphrase is used once and not kept. Importing an own key makes it the key of that kind of each
+  account with its address that has none. Other people's certificates and keys are kept, untrusted, from signed
+  mail (unless `changed`), Autocrypt headers and attached keys (when bodies download, and when opened), and WKD.
+- *System stores*: the Windows "Personal" store's email certificates and GnuPG's public keyring are **listed**
+  (`source` `windows` or `gpg`, `canSign: false`), and gpg's keys are used to check signatures and to encrypt.
+  Mocky Mail does not sign or decrypt with keys held by Windows (CNG), the macOS keychain, PKCS #11 tokens or
+  gpg-agent (smartcards): export them with their private key (.p12, .asc) and import them. The macOS keychain and
+  PKCS #11 tokens are not listed yet.
+
 **Files.** `OpenedFile = { kind: 'eml' | 'ics' | 'vcf', path, name }`. Computers register
 `.eml` (`message/rfc822`), `.ics` (`text/calendar`) and `.vcf` (`text/vcard`) with the app
 (`bundle.fileAssociations`): a file opened with it comes as a command-line argument when it
@@ -306,6 +404,7 @@ Only paths handed over that way are accepted by `read_message_file`, `import_mes
 (`winmail.dat`) lists the files inside it as ordinary attachments (preview, open and save work
 on them; indexes as listed); the `winmail.dat` stays listed too when something in it couldn't
 be turned into a file, and its text is the body when the message has no other.
+
 ## Commands
 
 | Command | Args | Returns |
@@ -416,6 +515,15 @@ be turned into a file, and its text is the body when the message has no other.
 | `check_for_update` | — | `UpdateInfo \| null` (`{ version, notes, how: 'install' \| 'download', page }`); reads `latest.json` on the download site; null for store installs |
 | `install_update` | — | `void`; downloads this install's installer, checks its SHA-256, runs it (the app closes or restarts) |
 | `open_external` | `{ url }` | `void` (http, https, mailto only) |
+| `list_keys` | | `SecurityKey[]` (own first, then by name; then system-store keys not kept here) |
+| `import_key` | `{ password: string \| null }` | `SecurityKey[] \| null` (file picker, Android's on phones: .p12/.pfx (with its password; PBES2/AES or the older triple-DES and RC2 schemes), .cer/.crt/.pem/.der certificates, .asc/.gpg/.pgp/.key public or secret keys (a protected secret key needs its passphrase, else `invalid` "This key is protected by a passphrase…" or "…isn't right"); null when cancelled; `keyring` when the system keyring can't keep the sealing key) |
+| `export_public_key` | `{ id }` | `string \| null` (save dialog: `<owner>.cer` (DER) or `<owner>.asc`; null when cancelled) |
+| `remove_key` | `{ id }` | `SecurityKey[]` (accounts that chose it no longer have a key of that kind; system-store keys: `invalid`, remove them there) |
+| `set_key_trusted` | `{ id, trusted }` | `SecurityKey[]` (a system-store key is first copied into Mocky Mail's store) |
+| `set_account_key` | `{ accountId, kind, keyId: string \| null }` | `void` (an own key of that kind in Mocky Mail's store, else `invalid`) |
+| `get_account_keys` | `{ accountId }` | `{ smime: string \| null; openpgp: string \| null; preferred: SecurityKind }` (preferred: as set, else openpgp when only an OpenPGP key is chosen, else smime) |
+| `set_preferred_kind` | `{ accountId, kind }` | `void` |
+| `check_encryption` | `{ accountId, addresses, kind }` | `EncryptionCheck` (OpenPGP: unknown addresses are looked up in the Web Key Directory (advanced method at `openpgpkey.<domain>`, then the direct one; HTTPS only; at most 20 per call; not while working offline) and keys found are kept, untrusted) |
 | `import_mail_files` | `{ folderId }` | `ImportReport \| null` (a picker for `.eml` and `.mbox` files, several at once; null if cancelled. Each message is uploaded to the folder on the server (IMAP APPEND with its read, flagged and answered state from `Status`/`X-Status`/`X-Mozilla-Status` when the file has them, else read, and `INTERNALDATE` from its Date header), then arrives here with the sync (woken at the end). mbox is read as mboxrd/mboxo, a message at a time, so files of any size work; messages over 100 MB, ones marked deleted, and ones whose Message-ID is already in the folder (on the server or here) are skipped. Needs a connection: `connect` while working offline. Progress as `mail://import-progress`) |
 | `import_message_file` | `{ path, folderId }` | `void` (an opened `.eml` file uploaded to the folder as above; `invalid` if its Message-ID is already there) |
 | `export_mail` | `{ target: { folderId } \| { ids }, format: 'mbox' \| 'eml' }` | `string \| null` (save dialog, Android's "Save to" screen on phones; null if cancelled. `mbox`: one mboxrd file (`From ` lines escaped, `Status`/`X-Status` lines for each message's state); `eml`: a `.zip` of `.eml` files named after their subjects. A folder is every message on the server (bodies not on this device are fetched), oldest first; working offline, the messages here, refused with `connect` if some bodies are missing. `ids` (up to 1000) download bodies as needed) |
@@ -425,8 +533,9 @@ be turned into a file, and its text is the body when the message has no other.
 | `export_contacts` | `{ accountId: string \| null }` | `string \| null` (`Contacts.vcf`, vCard 3.0, every field kept: an account's, this device's (null), or everyone's (`'*'`)) |
 | `import_pst` | `{ accountId }` | `ImportReport \| null` (an Outlook `.pst` file (ANSI or Unicode; one with a password is refused with `invalid`, saying how to remove it). Mail goes into a new folder tree `Imported from Outlook/<the file's folders>` on the account (IMAP CREATE, then APPEND with read/flagged/answered state and arrival time; the headers it was received with when Outlook kept them, else headers from its properties; HTML body, or the HTML or text of its rich text; attachments, attached messages as `message/rfc822`), duplicates by Message-ID skipped; contacts to the account's address book when it has one on its server, else this device's; calendar items (with repeats, exceptions and reminders) to the account's first calendar, or skipped when it has none; tasks, notes and journal entries are skipped ("Tasks and notes come in a later update"). `counts` says how many of each came in, `folderId` is the new top folder. Needs a connection; progress as `mail://import-progress`) |
 | `take_opened_files` | | `OpenedFile[]` (files the app was started with, or that were shared to it before the page asked, once; after the first call each new one comes as `mail://open-file`) |
-| `read_message_file` | `{ path }` | `MessageDetail` (an opened `.eml` file, for showing; in no folder (`accountId`, `folderId` empty), id `file:<hash>`, which `preview_attachment`, `open_attachment`, `save_attachment`, `save_message` and `message_source` take as `messageId`; remote pictures blocked unless the sender is trusted; no invitation card) |
+| `read_message_file` | `{ path }` | `MessageDetail` (an opened `.eml` file, for showing; in no folder (`accountId`, `folderId` empty), id `file:<hash>`, which `preview_attachment`, `open_attachment`, `save_attachment`, `save_message` and `message_source` take as `messageId`; remote pictures blocked unless the sender is trusted; no invitation card; a signed or encrypted file is checked and decrypted as received mail is, but the keys it carries are not kept) |
 | `import_opened_file` | `{ path, target: { calendarId } \| { accountId: string \| null } }` | `ImportReport` (an opened `.ics` file into a calendar, or `.vcf` file into an address book, as `import_calendar_file` / `import_contacts_file`) |
+
 ## Events
 
 | Event | Payload |

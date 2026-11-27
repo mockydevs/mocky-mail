@@ -17,6 +17,7 @@ pub mod imap;
 pub mod outgoing;
 pub mod rest;
 pub mod secrets;
+pub mod security;
 pub mod sieve;
 pub mod smtp;
 mod tls;

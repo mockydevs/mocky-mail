@@ -55,6 +55,11 @@ pub struct Settings {
     /// interface offers to send one), "always" (sent at once, the first
     /// time it is opened) or "never" (not offered, never sent by itself).
     pub read_receipts: String,
+    /// Sign every new message when the account has a key (S/MIME or
+    /// `OpenPGP`); a message's own choice wins.
+    pub sign_by_default: bool,
+    /// Encrypt a new message when every recipient's key is known.
+    pub encrypt_when_possible: bool,
     /// Read only: what this device offers, for the Settings screen.
     pub device: Device,
 }
@@ -101,6 +106,8 @@ impl Default for Settings {
             reading_pane: "right".into(),
             work_offline: false,
             read_receipts: "ask".into(),
+            sign_by_default: false,
+            encrypt_when_possible: false,
             device: Device::default(),
         }
     }
@@ -251,9 +258,12 @@ mod tests {
             reading_pane: "sideways".into(),
             work_offline: true,
             read_receipts: "sometimes".into(),
+            sign_by_default: true,
+            encrypt_when_possible: true,
             device: Device::default(),
         }
         .normalized();
+        assert!(s.sign_by_default && s.encrypt_when_possible);
         assert_eq!(s.reading_pane, "right");
         assert_eq!(s.read_receipts, "ask");
         assert!(s.work_offline);
@@ -295,5 +305,9 @@ mod tests {
         // Older settings ask before sending read receipts.
         assert_eq!(s.read_receipts, "ask");
         assert_eq!(json["readReceipts"], "ask");
+        // And neither sign nor encrypt by themselves.
+        assert!(!s.sign_by_default && !s.encrypt_when_possible);
+        assert_eq!(json["signByDefault"], false);
+        assert_eq!(json["encryptWhenPossible"], false);
     }
 }

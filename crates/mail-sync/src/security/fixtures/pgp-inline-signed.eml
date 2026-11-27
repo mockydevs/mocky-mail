@@ -1,0 +1,17 @@
+From: baraka@example.net
+To: you@example.com
+Subject: Inline signed
+Content-Type: text/plain; charset=utf-8
+
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Jambo! This text is clear-signed.
+-----BEGIN PGP SIGNATURE-----
+
+iJEEARYIADkWIQRsaB4mKVf/Yczj+60ITEKCfj1tkwUCawmiiRsUgAAAAAAEAA5t
+YW51MiwyLjUrMS4xMiwyLDEACgkQCExCgn49bZOYqgD/WxzlsB/VbwhkGw9MYttB
+jIcMXGcDaEOwtmSHdQDdLlYA/RwA3WdcaPT1MPJje0CWVpd5nBH/pcYNiLO6tT3i
+VtsE
+=v4dN
+-----END PGP SIGNATURE-----

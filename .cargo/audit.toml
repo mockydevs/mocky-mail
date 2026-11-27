@@ -1,0 +1,18 @@
+# cargo audit settings (read from the repository root, where CI runs it).
+
+[advisories]
+# Both come in through rPGP (`pgp` 0.21.1), which Mocky Mail uses for OpenPGP:
+#
+# - RUSTSEC-2023-0071: `rsa` 0.9, Marvin attack (timing side channel in RSA
+#   decryption).
+# - RUSTSEC-2026-0387: `crypto-bigint` 0.5, timing side channel.
+#
+# Neither has a fixed release that rPGP can use. Both attacks need an attacker
+# to drive many private-key operations and time each one precisely, as against
+# a network service. Mocky Mail decrypts and signs locally on the user's own
+# device, when the user opens or sends a message, so there is no oracle to
+# time remotely.
+#
+# Remove these once rsa 0.10 (or a fixed crypto-bigint) reaches pgp and the
+# dependency is updated.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]

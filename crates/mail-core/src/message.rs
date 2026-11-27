@@ -60,6 +60,10 @@ pub struct AttachmentInfo {
 }
 
 /// Everything the list and the reading pane header need.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is a separate fact from the headers"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageSummary {
     /// The Message-ID header, used to find duplicates in Sent.
@@ -93,6 +97,15 @@ pub struct MessageSummary {
     /// From the `Importance`, `X-Priority` or `X-MSMail-Priority` header.
     #[serde(default)]
     pub importance: crate::importance::Importance,
+    /// Signed (S/MIME or `OpenPGP`), as the top-level Content-Type says:
+    /// `multipart/signed`, or S/MIME `signed-data`. Whether the signature
+    /// is good is only known once the message is opened.
+    #[serde(default)]
+    pub signed: bool,
+    /// Encrypted (S/MIME or `OpenPGP`), as the top-level Content-Type says:
+    /// `multipart/encrypted`, or S/MIME `enveloped-data`.
+    #[serde(default)]
+    pub encrypted: bool,
 }
 
 /// An image embedded in an HTML body and referenced as `cid:`.
@@ -480,6 +493,7 @@ fn has_real_html(message: &Message<'_>) -> bool {
 /// panics, whatever the input.
 pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
     let message = parse(raw)?;
+    let security = message_security(&message);
     Ok(MessageSummary {
         message_id: message.message_id().map(clean_id),
         subject: message.subject().map(display_safe).unwrap_or_default(),
@@ -507,7 +521,78 @@ pub fn parse_summary(raw: &[u8]) -> Result<MessageSummary, ParseError> {
             message.header_raw("X-Priority"),
             message.header_raw("X-MSMail-Priority"),
         ),
+        signed: security.signed,
+        encrypted: security.encrypted,
     })
+}
+
+/// Whether a message is signed or encrypted, by its top-level Content-Type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecurityFlags {
+    /// `multipart/signed`, or S/MIME `signed-data`.
+    pub signed: bool,
+    /// `multipart/encrypted`, or S/MIME `enveloped-data` (or
+    /// `authEnveloped-data`).
+    pub encrypted: bool,
+}
+
+/// [`SecurityFlags`] from a Content-Type's type, subtype, `protocol` and
+/// `smime-type` (any case). Cheap: nothing is decoded or checked.
+#[must_use]
+pub fn security_flags(
+    ctype: &str,
+    subtype: &str,
+    protocol: Option<&str>,
+    smime_type: Option<&str>,
+) -> SecurityFlags {
+    let ctype = ctype.trim().to_ascii_lowercase();
+    let subtype = subtype.trim().to_ascii_lowercase();
+    let protocol = protocol.map(|p| p.trim().to_ascii_lowercase());
+    let smime_type = smime_type.map(|t| t.trim().to_ascii_lowercase());
+    match (ctype.as_str(), subtype.as_str()) {
+        ("multipart", "signed") => SecurityFlags {
+            signed: protocol.as_deref().is_none_or(|p| {
+                matches!(
+                    p,
+                    "application/pkcs7-signature"
+                        | "application/x-pkcs7-signature"
+                        | "application/pgp-signature"
+                )
+            }),
+            encrypted: false,
+        },
+        ("multipart", "encrypted") => SecurityFlags {
+            signed: false,
+            encrypted: true,
+        },
+        ("application", "pkcs7-mime" | "x-pkcs7-mime") => match smime_type.as_deref() {
+            Some("signed-data") => SecurityFlags {
+                signed: true,
+                encrypted: false,
+            },
+            // Certificates only, or compressed: neither.
+            Some("certs-only" | "compressed-data") => SecurityFlags::default(),
+            // `enveloped-data`, `authenveloped-data`, or none said (most
+            // writers that leave it out encrypt).
+            _ => SecurityFlags {
+                signed: false,
+                encrypted: true,
+            },
+        },
+        _ => SecurityFlags::default(),
+    }
+}
+
+fn message_security(message: &Message<'_>) -> SecurityFlags {
+    let Some(ct) = message.content_type() else {
+        return SecurityFlags::default();
+    };
+    security_flags(
+        ct.ctype(),
+        ct.subtype().unwrap_or_default(),
+        ct.attribute("protocol"),
+        ct.attribute("smime-type"),
+    )
 }
 
 #[cfg(test)]
@@ -771,6 +856,31 @@ SGVsbG8=\r\n\
                 "body in {charset}"
             );
         }
+    }
+
+    #[test]
+    fn signed_and_encrypted_mail_is_told_by_its_content_type() {
+        let smime_signed = b"From: a@x.example\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; micalg=sha-256; boundary=b\r\n\r\n--b\r\n\r\nhi\r\n--b--\r\n";
+        let s = parse_summary(smime_signed).unwrap();
+        assert!(s.signed && !s.encrypted);
+        let pgp_encrypted = b"From: a@x.example\r\nSubject: s\r\nContent-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=b\r\n\r\n--b--\r\n";
+        let s = parse_summary(pgp_encrypted).unwrap();
+        assert!(!s.signed && s.encrypted);
+        let enveloped = b"From: a@x.example\r\nSubject: s\r\nContent-Type: application/pkcs7-mime; smime-type=enveloped-data; name=smime.p7m\r\nContent-Transfer-Encoding: base64\r\n\r\nMIIB\r\n";
+        assert!(parse_summary(enveloped).unwrap().encrypted);
+        let opaque = b"From: a@x.example\r\nSubject: s\r\nContent-Type: application/x-pkcs7-mime; smime-type=signed-data\r\n\r\nMIIB\r\n";
+        let s = parse_summary(opaque).unwrap();
+        assert!(s.signed && !s.encrypted);
+        let s = parse_summary(PLAIN).unwrap();
+        assert!(!s.signed && !s.encrypted);
+        assert_eq!(
+            security_flags("multipart", "signed", Some("application/unknown"), None),
+            SecurityFlags::default()
+        );
+        assert_eq!(
+            security_flags("application", "pkcs7-mime", None, Some("certs-only")),
+            SecurityFlags::default()
+        );
     }
 
     #[test]

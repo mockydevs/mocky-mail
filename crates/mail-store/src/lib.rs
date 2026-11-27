@@ -26,6 +26,7 @@ mod reminders;
 mod rules;
 mod schema;
 mod search;
+mod security;
 mod settings;
 mod sync_support;
 mod tasks;
@@ -56,6 +57,7 @@ pub use ops::{OpKind, PendingOp};
 pub use outbox::{NewOutbox, OutboxEntry, OutboxMessage};
 pub use receipts::read_receipt_key;
 pub use rules::{ImageSender, RuleSubject, image_sender_key};
+pub use security::{AccountKeys, KeyKind, KeyOrigin, MAX_KEY_BYTES, NewKey, StoredKey};
 pub use tasks::{DEVICE_TASK_LIST, MAX_TASKS, ServerTask, Task, TaskList, TaskProvider, TaskSync};
 
 /// How long a writer waits for another connection's lock before failing.

@@ -86,6 +86,8 @@ pub fn unreadable_summary(arrived: Option<i64>) -> MessageSummary {
         references: Vec::new(),
         bulk: false,
         importance: mail_core::importance::Importance::Normal,
+        signed: false,
+        encrypted: false,
     }
 }
 /// Messages larger than this are not downloaded in the background.

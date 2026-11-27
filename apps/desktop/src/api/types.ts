@@ -92,6 +92,10 @@ export interface MessageListItem {
   flagDue: number | null;
   /** Size of the whole message in bytes. */
   size: number;
+  /** Signed (S/MIME or OpenPGP), whatever the result of checking it. */
+  signed?: boolean;
+  /** Encrypted (S/MIME or OpenPGP). */
+  encrypted?: boolean;
   /** Messages in this conversation shown by the list (1, or missing, when not grouped). */
   threadCount?: number;
   /** Their ids, newest first, when grouped. Actions on the row apply to all of them. */
@@ -121,6 +125,10 @@ export type MessageDetail = MessageListItem & {
   blockedRemoteImages: number;
   /** Pictures load because the sender (or their domain) is in the trusted list. */
   imagesTrusted?: boolean;
+  /** The digital signature on the message and what checking it found; null when unsigned. */
+  signature?: SignatureCheck | null;
+  /** The message was encrypted: `decrypted` (shown here), or `locked` with why (no key, PIN refused…). */
+  encryption?: { kind: SecurityKind; state: 'decrypted' | 'locked'; detail: string | null } | null;
   /** The sender asked for a read receipt. `answered`: one was sent or declined here already. */
   readReceipt?: { requestedBy: string; answered: boolean } | null;
   attachments: AttachmentMeta[];
@@ -285,6 +293,58 @@ export interface RecipientCheck {
   ambiguous: { input: string; candidates: Mailbox[] }[];
   /** Neither an address nor a known contact. */
   invalid: string[];
+}
+
+export type SecurityKind = 'smime' | 'openpgp';
+
+/** What checking a message's digital signature found. */
+export interface SignatureCheck {
+  kind: SecurityKind;
+  /**
+   * `verified`: valid, and the signer is trusted (a certificate from a trusted
+   * authority for S/MIME; a key you trust for OpenPGP). `unverifiedSigner`:
+   * the signature is valid but who made it isn't proven. `changed`: the
+   * message was changed after signing. `unknown`: it couldn't be checked
+   * (missing key, unsupported algorithm, revoked or expired certificate…).
+   */
+  result: 'verified' | 'unverifiedSigner' | 'changed' | 'unknown';
+  /** Who signed, as far as the signature says. */
+  signer: { name: string | null; address: string | null; fingerprint: string | null; issuer: string | null } | null;
+  /** The signer's address doesn't match the From address. */
+  fromMismatch: boolean;
+  /** Plain-language explanation of the result. */
+  detail: string;
+  /** When it was signed (Unix seconds), if the signature says. */
+  signedAt: number | null;
+}
+
+/** A certificate or key on this device, yours or someone else's. */
+export interface SecurityKey {
+  id: string;
+  kind: SecurityKind;
+  /** The name on it. */
+  owner: string;
+  addresses: string[];
+  fingerprint: string;
+  /** Unix seconds; null: doesn't expire. */
+  expires: number | null;
+  canSign: boolean;
+  canEncrypt: boolean;
+  /** Has the private part (it is yours). */
+  isOwn: boolean;
+  /** Where it lives: the system store, a hardware token, gpg-agent, or Mocky Mail's own store. */
+  source: 'windows' | 'keychain' | 'pkcs11' | 'gpg' | 'android' | 'mocky';
+  /** For other people's keys: you've said it really is theirs. */
+  trusted: boolean;
+}
+
+/** Whether a message to these recipients can be encrypted. */
+export interface EncryptionCheck {
+  kind: SecurityKind;
+  /** Each recipient, and whether their key or certificate is known. */
+  recipients: { address: string; canEncrypt: boolean }[];
+  /** The account has a key of this kind to sign and to encrypt to itself. */
+  ownKey: boolean;
 }
 
 /** What an import brought in. */
@@ -662,6 +722,12 @@ export interface Draft {
   importance?: Importance;
   /** Ask for a read receipt (Disposition-Notification-To: the From address). */
   requestReadReceipt?: boolean;
+  /** Sign the message (with the account's default key of `securityKind`). */
+  sign?: boolean;
+  /** Encrypt it to every recipient (and to yourself, so Sent stays readable). */
+  encrypt?: boolean;
+  /** S/MIME or OpenPGP; default the account's preferred kind. */
+  securityKind?: SecurityKind;
   /**
    * Message-ID of the saved draft this replaces: from save_draft, or the
    * message's messageIdHeader when continuing a draft from Drafts.
@@ -728,6 +794,10 @@ export interface Settings {
   workOffline: boolean;
   /** When a message you open asks for a read receipt. */
   readReceipts: 'ask' | 'always' | 'never';
+  /** Sign every new message when the account has a key. */
+  signByDefault: boolean;
+  /** Encrypt when every recipient's key is known. */
+  encryptWhenPossible: boolean;
   /** Read only: what this device offers. */
   device: { tray: boolean; startAtLogin: boolean };
 }
@@ -866,6 +936,26 @@ export interface MailApi {
   openComposeWindow(draft: Draft): Promise<void>;
   /** The draft a compose window was opened with (`?compose=<key>` in its address); null once taken. */
   takeComposeDraft(key: string): Promise<Draft | null>;
+  /** Your keys and certificates, and the ones collected from other people. */
+  listKeys(): Promise<SecurityKey[]>;
+  /**
+   * Pick a key or certificate file (.p12/.pfx, .cer/.pem, .asc/.gpg) and add it.
+   * `password` unlocks a .p12/.pfx or a protected OpenPGP secret key; it is
+   * used once and not kept. null: cancelled.
+   */
+  importKey(password: string | null): Promise<SecurityKey[] | null>;
+  /** Save your public key or certificate to share (.cer or .asc). */
+  exportPublicKey(id: string): Promise<string | null>;
+  removeKey(id: string): Promise<SecurityKey[]>;
+  /** Say another person's key really is theirs (OpenPGP), or stop trusting it. */
+  setKeyTrusted(id: string, trusted: boolean): Promise<SecurityKey[]>;
+  /** The key an account signs with and encrypts to itself with, per kind (null: none). */
+  setAccountKey(accountId: string, kind: SecurityKind, keyId: string | null): Promise<void>;
+  /** The account's chosen keys. */
+  getAccountKeys(accountId: string): Promise<{ smime: string | null; openpgp: string | null; preferred: SecurityKind }>;
+  setPreferredKind(accountId: string, kind: SecurityKind): Promise<void>;
+  /** Before sending encrypted: which recipients' keys are known (looks up OpenPGP keys by WKD as well). */
+  checkEncryption(accountId: string, addresses: string[], kind: SecurityKind): Promise<EncryptionCheck>;
   /** Pick .eml and .mbox files and upload their messages into a folder. null: cancelled. */
   importMailFiles(folderId: string): Promise<ImportReport | null>;
   /** Save a folder as one .mbox file, or the given messages as .eml files in a .zip (`ids` with `eml`). Returns where it was saved; null if cancelled. */

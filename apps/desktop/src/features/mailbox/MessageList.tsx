@@ -460,6 +460,16 @@ export function MessageList(props: Props) {
                                 <Icon name="paperclip" size={14} />
                               </span>
                             )}
+                            {m.signed === true && (
+                              <span className="row__icon row__icon--seal" aria-label="Signed" title="Signed">
+                                <Icon name="seal" size={14} />
+                              </span>
+                            )}
+                            {m.encrypted === true && (
+                              <span className="row__icon row__icon--lock" aria-label="Encrypted" title="Encrypted">
+                                <Icon name="lock" size={14} />
+                              </span>
+                            )}
                             {m.flagged && (
                               <span className="row__icon row__icon--flag" aria-label="Flagged">
                                 <Icon name="flag" size={14} filled />

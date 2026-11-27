@@ -35,7 +35,9 @@ async fn load(
     index: usize,
 ) -> AppResult<(AttachmentInfo, Vec<u8>)> {
     let raw = sync::body_now(state, message_id).await?;
-    attachment_bytes(&raw, index)?
+    // An encrypted message's attachments are inside what is decrypted.
+    let shown = crate::security::shown_bytes(state, message_id, raw)?;
+    attachment_bytes(&shown, index)?
         .ok_or_else(|| AppError::new("not_found", "That attachment no longer exists."))
 }
 

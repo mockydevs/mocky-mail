@@ -1,0 +1,26 @@
+From: Baraka Mwangi <baraka@example.net>
+To: you@example.com
+Subject: PGP signed
+MIME-Version: 1.0
+Content-Type: multipart/signed; micalg=pgp-sha256; protocol="application/pgp-signature"; boundary="sig-b"
+
+This is an OpenPGP/MIME signed message.
+--sig-b
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Habari! This part is signed with OpenPGP.
+
+--sig-b
+Content-Type: application/pgp-signature; name="signature.asc"
+
+-----BEGIN PGP SIGNATURE-----
+
+iJEEABYIADkWIQRsaB4mKVf/Yczj+60ITEKCfj1tkwUCawmiiRsUgAAAAAAEAA5t
+YW51MiwyLjUrMS4xMiwyLDEACgkQCExCgn49bZMPNAEAzMcSdTVyXVAusZFZSIdE
+LJa6So5RVMYb0Iavvy4yiP0BAMInuDoErsdNUDyTK1HiLM718BAsH//+ahPDfBM9
+4egB
+=rS5+
+-----END PGP SIGNATURE-----
+
+--sig-b--

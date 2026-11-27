@@ -118,6 +118,10 @@ pub struct MessageDetail {
     invitation: Option<crate::invitations::InvitationView>,
     /// The read receipt the sender asked for, and whether it was answered.
     read_receipt: Option<crate::read_receipts::ReadReceiptView>,
+    /// The signature and what checking it found; `None` when unsigned.
+    signature: Option<mail_sync::security::SignatureCheck>,
+    /// Encrypted: decrypted (shown here) or locked, with why.
+    encryption: Option<mail_sync::security::EncryptionInfo>,
 }
 
 /// `get_message`: the body is downloaded if needed, cleaned and returned.
@@ -133,7 +137,11 @@ pub async fn get_message(
 ) -> AppResult<MessageDetail> {
     let raw = sync::body_now(&state, &id).await?;
     let stored = state.store.get_message(&id)?;
-    let body = parse_body(&raw)?;
+    // Signed or encrypted: checked and decrypted here; what is shown is the
+    // inner message, kept in memory only.
+    let opened = crate::security::open_message(&state, &stored, &raw)?;
+    let shown: &[u8] = opened.shown.as_deref().unwrap_or(&raw);
+    let body = parse_body(shown)?;
     // Senders the user trusts: their pictures always load.
     let images_trusted = match stored.item.from.as_ref() {
         Some(from) => state.store.images_trusted(&from.address)?,
@@ -178,6 +186,8 @@ pub async fn get_message(
         references: stored.references,
         invitation,
         read_receipt,
+        signature: opened.signature,
+        encryption: opened.encryption,
     })
 }
 
@@ -208,7 +218,9 @@ fn attachment_metas(
 /// and no account; remote pictures stay blocked.
 pub(crate) fn file_detail(state: &AppState, id: &str, raw: &[u8]) -> AppResult<MessageDetail> {
     let summary = mail_core::message::parse_summary(raw)?;
-    let body = parse_body(raw)?;
+    // Signed or encrypted: checked and decrypted, as for received mail.
+    let opened = crate::security::open_file(state, id, raw)?;
+    let body = parse_body(opened.shown.as_deref().unwrap_or(raw))?;
     let images_trusted = match summary.from.as_ref() {
         Some(from) => state.store.images_trusted(&from.address)?,
         None => false,
@@ -248,6 +260,8 @@ pub(crate) fn file_detail(state: &AppState, id: &str, raw: &[u8]) -> AppResult<M
         size: u64::try_from(raw.len()).unwrap_or(u64::MAX),
         thread_count: 1,
         thread_ids: Vec::new(),
+        signed: summary.signed,
+        encrypted: summary.encrypted,
     };
     Ok(MessageDetail {
         item,
@@ -264,6 +278,8 @@ pub(crate) fn file_detail(state: &AppState, id: &str, raw: &[u8]) -> AppResult<M
         references: summary.references,
         invitation: None,
         read_receipt: None,
+        signature: opened.signature,
+        encryption: opened.encryption,
     })
 }
 pub(crate) fn notify_changed(app: &AppHandle, folders: &[(String, String)]) {

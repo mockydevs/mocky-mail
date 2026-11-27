@@ -11,12 +11,15 @@ import type {
   Mailbox,
   OutboxEntry,
   RecipientCheck,
+  SecurityKind,
   SignatureImage,
   SignatureSet,
 } from '../../api/types';
 import { formatBytes } from '../../lib/format';
+import { useDebounced } from '../../lib/useDebounced';
+import { kindLabel, kindName, kindNoun } from '../security/securityText';
 import { Icon } from '../../ui/Icon';
-import { MenuButton, MenuItem } from '../../ui/Menu';
+import { MenuButton, MenuGroup, MenuItem, MenuSeparator } from '../../ui/Menu';
 import { Modal } from '../../ui/Modal';
 import { RichEditorSlot, type EditorHandle } from './editor/loader';
 import { ContactCardDialog, ItemDialog, NameChooser, SymbolDialog } from './InsertDialogs';
@@ -24,6 +27,8 @@ import { RecipientField } from './RecipientField';
 import { entryFor, parseRecipients, splitRecipients } from './recipients';
 import { htmlToPlainText, swapSignatureHtml, textToHtml } from './richText';
 import { signatureBlock, signatureFor, type ComposeKind } from './seed';
+import { MissingKeysDialog } from './MissingKeysDialog';
+import { kindFor, recipientAddresses, withoutRecipients, type AccountSecurity } from './security';
 
 const IMPORTANCE: readonly [Importance, string, string][] = [
   ['high', 'High', 'High importance'],
@@ -69,6 +74,9 @@ interface Props {
 
 /** Ask compose to close, then carry on with `then`. */
 export type LeaveCompose = (then: () => void) => void;
+
+/** Wait this long after the recipients stop changing before asking which can get encrypted mail. */
+const ENCRYPT_CHECK_MS = 400;
 
 type FieldName = 'to' | 'cc' | 'bcc';
 const FIELDS: readonly FieldName[] = ['to', 'cc', 'bcc'];
@@ -158,6 +166,60 @@ export function ComposeView({
   const [choices, setChoices] = useState<Choice[]>([]);
   const [sendAfterChoices, setSendAfterChoices] = useState(false);
 
+  // Signing and encryption: what the From account has, and the defaults from Settings › Security.
+  const [security, setSecurity] = useState<AccountSecurity | null>(null);
+  const [prefs, setPrefs] = useState<{ sign: boolean; encrypt: boolean } | null>(null);
+  const prefsLoad = useRef<Promise<{ sign: boolean; encrypt: boolean }> | null>(null);
+  const securityLoaded = useRef(false);
+  /** Sign or Encrypt chosen by hand: the defaults leave it alone from then on. */
+  const touched = useRef({ sign: false, encrypt: false });
+  /** The last answer to "can these recipients get encrypted mail?". */
+  const [encryptCheck, setEncryptCheck] = useState<{ missing: string[]; ownKey: boolean } | null>(null);
+  /** Send found recipients without a key: ask what to do. */
+  const [missingAsk, setMissingAsk] = useState<{ draft: Draft; missing: string[]; kind: SecurityKind } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const accountId = draft.accountId;
+    prefsLoad.current ??= api.getSettings().then(
+      (s) => ({ sign: s.signByDefault, encrypt: s.encryptWhenPossible }),
+      () => ({ sign: false, encrypt: false }),
+    );
+    void Promise.all([api.getAccountKeys(accountId).catch(() => null), prefsLoad.current]).then(([keys, defaults]) => {
+      if (!active) return;
+      const next: AccountSecurity = {
+        accountId,
+        smime: keys?.smime != null,
+        openpgp: keys?.openpgp != null,
+        preferred: keys?.preferred ?? 'smime',
+      };
+      const first = !securityLoaded.current;
+      securityLoaded.current = true;
+      setSecurity(next);
+      setPrefs(defaults);
+      // A draft carried on with keeps what it said; anything else starts from the defaults.
+      const carriedOn = first && (initial.sign !== undefined || initial.encrypt !== undefined);
+      const apply = (d: Draft): Draft => {
+        if (d.accountId !== accountId) return d;
+        const has = next[kindFor(next, d.securityKind)];
+        if (!has) {
+          // Nothing to sign or encrypt with from this account.
+          return d.sign === true || d.encrypt === true ? { ...d, sign: false, encrypt: false } : d;
+        }
+        if (!carriedOn && !touched.current.sign && defaults.sign && d.sign !== true) return { ...d, sign: true };
+        return d;
+      };
+      setDraft(apply);
+      // Defaults added as compose opens aren't changes the user made.
+      if (first) setBaseline(apply);
+    });
+    return () => {
+      active = false;
+    };
+    // `initial` is only read for the first account; reloading when it changes identity would start over.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, draft.accountId]);
+
   useEffect(() => {
     if (attachmentsFrom === null) return;
     let active = true;
@@ -238,6 +300,53 @@ export function ComposeView({
   const overLimit =
     account?.sizeLimitBytes != null && encodedEstimate(attachmentBytes) > account.sizeLimitBytes;
 
+  const securityKind = security ? kindFor(security, draft.securityKind) : (draft.securityKind ?? 'smime');
+  const hasKey = security?.accountId === draft.accountId && security[securityKind];
+  const bothKinds = security?.accountId === draft.accountId && security.smime && security.openpgp;
+  const recipients = recipientAddresses(draft);
+  const wantEncrypt = draft.encrypt === true;
+  // Ask again once the recipients (or the kind) stop changing.
+  const checkKey = useDebounced(
+    hasKey ? [draft.accountId, securityKind, ...recipients].join('\n') : '',
+    ENCRYPT_CHECK_MS,
+  );
+  useEffect(() => {
+    const [accountId = '', kind, ...addresses] = checkKey.split('\n');
+    if (accountId === '' || (kind !== 'smime' && kind !== 'openpgp') || addresses.length === 0 || !prefs) return;
+    // Encryption on, or Encrypt when possible deciding whether to turn it on.
+    const auto = prefs.encrypt && !touched.current.encrypt;
+    if (!wantEncrypt && !auto) return;
+    let active = true;
+    api.checkEncryption(accountId, addresses, kind).then(
+      (result) => {
+        if (!active) return;
+        const missing = result.recipients.filter((r) => !r.canEncrypt).map((r) => r.address);
+        setEncryptCheck({ missing, ownKey: result.ownKey });
+        if (!auto || touched.current.encrypt) return;
+        const on = missing.length === 0 && result.ownKey;
+        const follow = (d: Draft): Draft => ((d.encrypt === true) === on ? d : { ...d, encrypt: on });
+        setDraft((d) => (d.accountId === accountId ? follow(d) : d));
+        // Not a change the user made.
+        setBaseline(follow);
+      },
+      () => undefined,
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, checkKey, wantEncrypt, prefs]);
+  const current = new Set(recipients.map((a) => a.toLowerCase()));
+  const noKey = wantEncrypt && encryptCheck ? encryptCheck.missing.filter((a) => current.has(a.toLowerCase())) : [];
+  const noKeySet = new Set(noKey.map((a) => a.toLowerCase()));
+  const securityNote =
+    !hasKey || (draft.sign !== true && !wantEncrypt)
+      ? null
+      : draft.sign === true && wantEncrypt
+        ? `Signed and encrypted with your ${kindLabel(securityKind)}. Only the recipients can read it; the subject stays visible.`
+        : draft.sign === true
+          ? `Signed with your ${kindLabel(securityKind)}, so recipients can check it came from you and wasn’t changed.`
+          : `Encrypted with ${kindName(securityKind)}. Only the recipients can read it; the subject stays visible.`;
+
   const update = (patch: Partial<Draft>) => {
     setDraft((d) => ({ ...d, ...patch }));
     setStatus(null);
@@ -265,13 +374,50 @@ export function ComposeView({
   const sendNow = (d: Draft) => {
     if (!validate(d)) return;
     setBusy('send');
-    api
-      .checkDraft(d)
-      .then(() => api.sendMessage(d))
-      .then(onSent, (e: unknown) => {
+    // Signed or encrypted: say with which kind, so the backend doesn't have to guess.
+    const kind = security ? kindFor(security, d.securityKind) : d.securityKind;
+    const final: Draft = (d.sign === true || d.encrypt === true) && kind !== undefined ? { ...d, securityKind: kind } : d;
+    // Encrypted: everyone needs a key, checked now rather than trusting the last look.
+    const missing: Promise<string[]> =
+      final.encrypt === true && kind !== undefined
+        ? api
+            .checkEncryption(final.accountId, recipientAddresses(final), kind)
+            .then((r) => r.recipients.filter((x) => !x.canEncrypt).map((x) => x.address))
+        : Promise.resolve([]);
+    missing
+      .then((without) => {
+        if (without.length > 0 && kind !== undefined) {
+          setBusy(null);
+          setMissingAsk({ draft: final, missing: without, kind });
+          return;
+        }
+        return api
+          .checkDraft(final)
+          .then(() => api.sendMessage(final))
+          .then(onSent);
+      })
+      .catch((e: unknown) => {
         setError(toAppError(e));
         setBusy(null);
       });
+  };
+
+  /** Encrypt is on, but some recipients have no key: take them out, or send without encryption. */
+  const answerMissing = (answer: 'remove' | 'plain' | 'cancel') => {
+    const ask = missingAsk;
+    setMissingAsk(null);
+    if (!ask || answer === 'cancel') return;
+    if (answer === 'plain') {
+      touched.current.encrypt = true;
+      const next = { ...ask.draft, encrypt: false };
+      setDraft((d) => ({ ...d, encrypt: false }));
+      sendNow(next);
+      return;
+    }
+    const next = withoutRecipients(ask.draft, ask.missing);
+    setDraft((d) => withoutRecipients(d, ask.missing));
+    setFieldsRevision((r) => r + 1);
+    sendNow(next);
   };
 
   /**
@@ -457,6 +603,7 @@ export function ComposeView({
             label={label}
             value={draft[name]}
             invalid={message !== undefined}
+            unencryptable={noKeySet}
             describedBy={message ? `${fieldId}-error` : undefined}
             // The first field of a view the user just opened.
             // eslint-disable-next-line jsx-a11y/no-autofocus
@@ -571,6 +718,12 @@ export function ComposeView({
         {field('to', 'To', initial.to === '')}
         {showCc && field('cc', 'Cc', false)}
         {showBcc && field('bcc', 'Bcc', false)}
+        {noKey.length > 0 && (
+          <p className="compose__error compose__no-key" role="status">
+            <Icon name="lock" size={14} />
+            Can’t encrypt to {noKey.join(', ')}: there’s no {kindNoun(securityKind)} for {noKey.length === 1 ? 'them' : 'these recipients'}.
+          </p>
+        )}
         <div className="compose__row">
           <label htmlFor={`${id}-subject`} className="compose__label">
             Subject
@@ -645,7 +798,13 @@ export function ComposeView({
             </button>
           ))}
         </div>
-        <MenuButton label="Options" text="Options" className="btn btn--ghost" align="left" active={draft.requestReadReceipt === true}>
+        <MenuButton
+          label="Options"
+          text="Options"
+          className="btn btn--ghost"
+          align="left"
+          active={draft.requestReadReceipt === true || (hasKey && (draft.sign === true || wantEncrypt))}
+        >
           <MenuItem
             kind="check"
             checked={draft.requestReadReceipt === true}
@@ -655,6 +814,47 @@ export function ComposeView({
           >
             Request a read receipt
           </MenuItem>
+          <MenuSeparator />
+          <MenuItem
+            kind="check"
+            checked={hasKey && draft.sign === true}
+            disabled={!hasKey}
+            onSelect={() => {
+              touched.current.sign = true;
+              update({ sign: draft.sign !== true });
+            }}
+          >
+            Sign
+            {!hasKey && <span className="menu__note">Needs a certificate or key for this account, in Settings › Security</span>}
+          </MenuItem>
+          <MenuItem
+            kind="check"
+            checked={hasKey && wantEncrypt}
+            disabled={!hasKey}
+            onSelect={() => {
+              touched.current.encrypt = true;
+              update({ encrypt: !wantEncrypt });
+            }}
+          >
+            Encrypt
+            {!hasKey && <span className="menu__note">Needs a certificate or key for this account, in Settings › Security</span>}
+          </MenuItem>
+          {bothKinds && (
+            <MenuGroup label="Sign and encrypt with">
+              {(['smime', 'openpgp'] as const).map((kind) => (
+                <MenuItem
+                  key={kind}
+                  kind="radio"
+                  checked={securityKind === kind}
+                  onSelect={() => {
+                    if (securityKind !== kind) update({ securityKind: kind });
+                  }}
+                >
+                  {kindLabel(kind)}
+                </MenuItem>
+              ))}
+            </MenuGroup>
+          )}
         </MenuButton>
         {signatures && signatures.items.length > 0 && (
           <label className="compose__signature-pick">
@@ -679,6 +879,12 @@ export function ComposeView({
       </div>
       {draft.requestReadReceipt === true && (
         <p className="compose__option-note form-hint">A read receipt is requested. The recipient can choose not to send one.</p>
+      )}
+      {securityNote && (
+        <p className="compose__option-note compose__security-note form-hint">
+          <Icon name={wantEncrypt ? 'lock' : 'seal'} size={14} />
+          {securityNote}
+        </p>
       )}
 
       <RichEditorSlot
@@ -810,6 +1016,23 @@ export function ComposeView({
             />
           );
         })()}
+
+      {missingAsk && (
+        <MissingKeysDialog
+          missing={missingAsk.missing}
+          kind={missingAsk.kind}
+          everyone={recipientAddresses(missingAsk.draft).length <= missingAsk.missing.length}
+          onRemove={() => {
+            answerMissing('remove');
+          }}
+          onSendUnencrypted={() => {
+            answerMissing('plain');
+          }}
+          onCancel={() => {
+            answerMissing('cancel');
+          }}
+        />
+      )}
 
       {choice && (
         <NameChooser

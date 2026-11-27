@@ -71,9 +71,28 @@ pub struct Draft {
     /// Ask for a read receipt (`Disposition-Notification-To`: the account).
     #[serde(default)]
     request_read_receipt: bool,
+    /// Sign it; left out: as Settings `signByDefault` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sign: Option<bool>,
+    /// Encrypt it to every recipient and the sender; left out: as Settings
+    /// `encryptWhenPossible` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encrypt: Option<bool>,
+    /// S/MIME or `OpenPGP`; left out: the account's preferred kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    security_kind: Option<mail_sync::security::SecurityKind>,
 }
 
 impl Draft {
+    /// What it asks of signing and encrypting.
+    fn security(&self) -> crate::security::Choice {
+        crate::security::Choice {
+            sign: self.sign,
+            encrypt: self.encrypt,
+            kind: self.security_kind,
+        }
+    }
+
     /// The subject as typed.
     #[cfg_attr(mobile, allow(dead_code))]
     pub fn subject(&self) -> &str {
@@ -366,6 +385,17 @@ pub async fn send_message(
 ) -> AppResult<OutboxDto> {
     let (account, message) = prepare(&state, &draft).await?;
     let built = build(&message)?;
+    // Signed and encrypted (as asked) before it is queued: the Outbox and
+    // the copy in Sent hold only what was sent.
+    let raw = crate::security::protect_outgoing(
+        &state,
+        &account,
+        draft.security(),
+        (&message.to, &message.cc, &message.bcc),
+        built.raw,
+        false,
+    )
+    .await?;
     let created_at = now();
     let id = state.store.insert_outbox(&NewOutbox {
         account_id: account.id.clone(),
@@ -373,7 +403,7 @@ pub async fn send_message(
         to: message.to.iter().chain(&message.cc).cloned().collect(),
         subject: message.subject.clone(),
         preview: make_preview(&message.body_text, mail_core::message::PREVIEW_CHARS),
-        raw: built.raw,
+        raw,
         recipients: built.recipients,
         message_id_header: Some(built.message_id),
         reply_to_message_id: draft.reply_to_message_id.clone(),
@@ -462,9 +492,20 @@ pub async fn save_draft(
         .ok_or_else(|| AppError::invalid("This account has no Drafts folder."))?;
     let credentials = credentials::for_account(&state, &account).await?;
     let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
+    // A draft of an encrypted message is saved encrypted to the sender
+    // only (and never signed).
+    let raw = crate::security::protect_outgoing(
+        &state,
+        &account,
+        draft.security(),
+        (&message.to, &message.cc, &message.bcc),
+        built.raw,
+        true,
+    )
+    .await?;
     // The saved copy names the Bcc recipients, or reopening the draft
     // would lose them.
-    let saved = with_bcc_header(&built.raw, &bcc);
+    let saved = with_bcc_header(&raw, &bcc);
     conn.append(&path, &saved, "(\\Draft \\Seen)").await?;
     conn.logout().await;
     if let Some(old) = draft
@@ -610,9 +651,11 @@ pub async fn outbox_edit(
     let message = state.store.get_outbox(&id)?;
     let mut item = message.entry.item.clone();
     transition(item.cancel())?;
-    let summary = parse_summary(&message.raw)?;
-    let body = parse_body(&message.raw)?;
-    let attachments = copy_attachments(&state, &message.raw, &format!("outbox-{id}")).await?;
+    // Signed or encrypted when it was queued: opened with the sender's keys.
+    let (shown, signed, encrypted) = crate::security::open_own_copy(&state, &message.raw)?;
+    let summary = parse_summary(&shown)?;
+    let body = parse_body(&shown)?;
+    let attachments = copy_attachments(&state, &shown, &format!("outbox-{id}")).await?;
     // If sending started meanwhile, editing would make a second copy.
     if !state.store.delete_outbox_if(&id, &message.entry.item)? {
         return Err(changed_meanwhile());
@@ -634,6 +677,9 @@ pub async fn outbox_edit(
         importance: summary.importance,
         body_html: rich_html_of(&body),
         request_read_receipt: mail_core::receipts::requested(&message.raw).is_some(),
+        sign: signed.map(|_| true),
+        encrypt: encrypted.map(|_| true),
+        security_kind: encrypted.or(signed),
     })
 }
 
@@ -711,7 +757,8 @@ pub async fn attachments_for_draft(
     message_id: String,
 ) -> AppResult<Vec<DraftAttachment>> {
     let raw = sync::body_now(&state, &message_id).await?;
-    copy_attachments(&state, &raw, &message_id).await
+    let shown = crate::security::shown_bytes(&state, &message_id, raw)?;
+    copy_attachments(&state, &shown, &message_id).await
 }
 
 /// The worker: runs for the life of the app.

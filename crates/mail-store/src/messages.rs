@@ -188,6 +188,10 @@ pub struct MessageListItem {
     pub flag_due: Option<i64>,
     /// Size of the whole message in bytes.
     pub size: u64,
+    /// Signed (S/MIME or `OpenPGP`), whatever the result of checking it.
+    pub signed: bool,
+    /// Encrypted (S/MIME or `OpenPGP`).
+    pub encrypted: bool,
     /// Messages in this conversation shown by the list (1 when not grouped).
     pub thread_count: u32,
     /// Their ids, newest first, when grouped; empty otherwise. Actions on a
@@ -235,10 +239,10 @@ macro_rules! item_columns {
     () => {
         "m.id, m.account_id, m.folder_id, m.from_name, m.from_address, m.to_json, m.subject, \
          m.preview, m.date, m.seen, m.flagged, m.answered, m.has_attachments, m.pinned, \
-         m.importance, m.categories, m.flag_due, m.size"
+         m.importance, m.categories, m.flag_due, m.size, m.signed, m.encrypted"
     };
 }
-// 18 columns: queries that select more read them from index 18 on.
+// 20 columns: queries that select more read them from index 20 on.
 
 /// Selection shared by the page and the count. `?1` account, `?2` folder,
 /// `?3` role, `?4` filter code, `?5` FTS query; a NULL selector matches all.
@@ -311,6 +315,8 @@ struct ItemRow {
     categories: String,
     flag_due: Option<i64>,
     size: i64,
+    signed: bool,
+    encrypted: bool,
 }
 
 impl ItemRow {
@@ -334,6 +340,8 @@ impl ItemRow {
             categories: row.get(15)?,
             flag_due: row.get(16)?,
             size: row.get(17)?,
+            signed: row.get(18)?,
+            encrypted: row.get(19)?,
         })
     }
 
@@ -360,6 +368,8 @@ impl ItemRow {
             categories: serde_json::from_str(&self.categories)?,
             flag_due: self.flag_due,
             size: to_u64(self.size, "message size")?,
+            signed: self.signed,
+            encrypted: self.encrypted,
             thread_count: 1,
             thread_ids: Vec::new(),
         })
@@ -383,15 +393,15 @@ impl DetailRow {
     fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             item: ItemRow::read(row)?,
-            uid: row.get(18)?,
-            message_id_header: row.get(19)?,
-            cc_json: row.get(20)?,
-            reply_to_json: row.get(21)?,
-            references_json: row.get(22)?,
-            in_reply_to: row.get(23)?,
-            size: row.get(24)?,
-            attachments_json: row.get(25)?,
-            has_raw: row.get(26)?,
+            uid: row.get(20)?,
+            message_id_header: row.get(21)?,
+            cc_json: row.get(22)?,
+            reply_to_json: row.get(23)?,
+            references_json: row.get(24)?,
+            in_reply_to: row.get(25)?,
+            size: row.get(26)?,
+            attachments_json: row.get(27)?,
+            has_raw: row.get(28)?,
         })
     }
 
@@ -449,7 +459,7 @@ fn update_headers(
              from_address = ?6, to_json = ?7, cc_json = ?8, reply_to_json = ?9,
              references_json = ?10, attachments_json = ?11, in_reply_to = ?12, date = ?13,
              preview = ?14, has_attachments = ?15, seen = ?16, flagged = ?17, answered = ?18,
-             size = ?19, bulk = ?20,
+             size = ?19, bulk = ?20, signed = ?22, encrypted = ?23,
              importance = CASE WHEN importance_local = 1 THEN importance ELSE ?21 END,
              flag_due = CASE WHEN ?17 = 0 THEN NULL ELSE flag_due END
          WHERE id = ?1",
@@ -475,6 +485,8 @@ fn update_headers(
             size,
             s.bulk,
             s.importance.as_str(),
+            s.signed,
+            s.encrypted,
         ],
     )?;
     link_thread(tx, id, s)
@@ -755,10 +767,10 @@ impl Store {
         let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
             Ok((
                 ItemRow::read(row)?,
-                row.get::<_, i64>(18)?,
-                row.get::<_, bool>(19)?,
-                row.get::<_, String>(20)?,
+                row.get::<_, i64>(20)?,
                 row.get::<_, bool>(21)?,
+                row.get::<_, String>(22)?,
+                row.get::<_, bool>(23)?,
             ))
         })?;
         let mut items = Vec::new();
@@ -817,8 +829,8 @@ impl Store {
                 |row| {
                     Ok((
                         ItemRow::read(row)?,
-                        row.get::<_, i64>(18)?,
-                        row.get::<_, Option<String>>(19)?,
+                        row.get::<_, i64>(20)?,
+                        row.get::<_, Option<String>>(21)?,
                     ))
                 },
             )?

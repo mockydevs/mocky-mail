@@ -80,7 +80,7 @@ import { CalendarScreen, preloadScreens, TasksScreen } from './screens';
 type Screen =
   | { kind: 'mail' }
   | { kind: 'compose'; draft: Draft; title: string; compose: ComposeKind; attachmentsFrom: string | null; unsaved: boolean }
-  | { kind: 'settings' }
+  | { kind: 'settings'; section?: 'security' }
   | { kind: 'contacts' }
   | { kind: 'calendar'; focus?: { eventId: string; at: number } }
   | { kind: 'tasks'; focusTaskId?: string }
@@ -140,6 +140,8 @@ const DEFAULT_SETTINGS: Settings = {
   readingPane: 'right',
   workOffline: false,
   readReceipts: 'ask',
+  signByDefault: false,
+  encryptWhenPossible: false,
   device: { tray: false, startAtLogin: false },
 };
 
@@ -1060,6 +1062,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       main = (
         <SettingsView
           settings={currentSettings}
+          section={screen.section}
           accounts={accounts}
           onChange={changeSettings}
           onAccountsChanged={refresh}
@@ -1277,6 +1280,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           alwaysLoadImages={settings?.remoteImages === 'allow'}
           // Nothing is sent or asked until the setting is known.
           readReceipts={settings ? settings.readReceipts : 'never'}
+          onOpenSecurity={() => {
+            show({ kind: 'settings', section: 'security' });
+          }}
           theme={theme}
           onLoaded={setLoaded}
           focusTab={focusSplit ? focusTab : null}
