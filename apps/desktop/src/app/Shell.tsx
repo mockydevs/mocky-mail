@@ -20,6 +20,7 @@ import type {
 import { AddAccountForm } from '../features/accounts/AddAccountForm';
 import { Welcome } from '../features/accounts/Welcome';
 import { ComposeView, type LeaveCompose } from '../features/compose/ComposeView';
+import { preloadEditor } from '../features/compose/editor/loader';
 import { blankDraft, draftFromMessage, forwardDraft, replyDraft, type ComposeKind } from '../features/compose/seed';
 import { FolderPicker } from '../features/mailbox/FolderPicker';
 import { groupRows } from '../features/mailbox/grouping';
@@ -126,6 +127,7 @@ const DEFAULT_SETTINGS: Settings = {
   startAtLogin: false,
   readingPane: 'right',
   workOffline: false,
+  readReceipts: 'ask',
   device: { tray: false, startAtLogin: false },
 };
 
@@ -233,6 +235,18 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       window.clearTimeout(timer);
     };
   }, [sendPhase, clearSending]);
+
+  // The compose editor is a chunk of its own: fetch it when the app is idle,
+  // where the web view can say so (otherwise compose loads it when opened).
+  useEffect(() => {
+    if (typeof window.requestIdleCallback !== 'function') return;
+    const idle = window.requestIdleCallback(() => {
+      preloadEditor().catch(() => undefined);
+    });
+    return () => {
+      window.cancelIdleCallback(idle);
+    };
+  }, []);
 
   useEffect(() => {
     api.getSettings().then(setSettings, (e: unknown) => {
@@ -915,6 +929,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           kind={screen.compose}
           unsaved={screen.unsaved}
           onLeaveGuard={guardCompose}
+          phone={phone}
+          // Computers: carry on in a window of its own; it holds the message now.
+          onPoppedOut={
+            phone
+              ? undefined
+              : () => {
+                  setScreen({ kind: 'mail' });
+                }
+          }
           title={screen.title}
           accounts={accounts}
           offlineNote={offline}
@@ -1125,6 +1148,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           account={accounts.find((a) => a.id === active?.accountId)}
           role={roleOf(active)}
           alwaysLoadImages={settings?.remoteImages === 'allow'}
+          // Nothing is sent or asked until the setting is known.
+          readReceipts={settings ? settings.readReceipts : 'never'}
           theme={theme}
           onLoaded={setLoaded}
           focusTab={focusSplit ? focusTab : null}

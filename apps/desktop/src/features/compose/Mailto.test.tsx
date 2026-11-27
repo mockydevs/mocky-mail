@@ -1,7 +1,14 @@
 import { act, screen, within } from '@testing-library/react';
 
 import { createMockMailApi } from '../../api/mock/mockMailApi';
+import { messageText } from '../../test/editor';
 import { renderApp, rows } from '../../test/renderApp';
+import { preloadEditor } from './editor/loader';
+
+// Compose's editor is a chunk of its own: have it here before the first test.
+beforeAll(async () => {
+  await preloadEditor();
+});
 
 describe('mailto: links', () => {
   it('open a filled-in new message when the app starts with one', async () => {
@@ -10,7 +17,7 @@ describe('mailto: links', () => {
     renderApp({}, api);
     const form = within(await screen.findByRole('form', { name: 'New message' }));
     expect(form.getByLabelText('Subject')).toHaveValue('Website quote');
-    expect(form.getByLabelText<HTMLTextAreaElement>('Message').value).toContain('Hi Mocky,\nI need a site.');
+    expect(messageText(await form.findByLabelText('Message'))).toContain('Hi Mocky,\nI need a site.');
     expect(within(form.getByRole('list', { name: 'To recipients' })).getByText(/info@mocky\.co\.ke/)).toBeInTheDocument();
   });
 

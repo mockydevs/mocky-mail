@@ -1,3 +1,5 @@
+import type { Mailbox } from '../../api/types';
+
 export interface ParsedRecipients {
   /** Bare addresses, de-duplicated (case-insensitive), in order. */
   valid: string[];
@@ -63,4 +65,11 @@ export function parseRecipients(input: string): ParsedRecipients {
     valid.push(address);
   }
   return { valid, invalid };
+}
+
+/** A suggestion as a recipient entry; names with a comma are quoted so they stay one entry. */
+export function entryFor(person: Mailbox): string {
+  const name = person.name?.replace(/["<>]/g, '').trim();
+  if (!name) return person.address;
+  return /[,;]/.test(name) ? `"${name}" <${person.address}>` : `${name} <${person.address}>`;
 }

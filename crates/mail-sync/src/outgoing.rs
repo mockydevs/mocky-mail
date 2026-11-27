@@ -1,8 +1,10 @@
 //! Building the RFC 5322 bytes for a message the user wrote.
 
 use base64::Engine as _;
-use lettre::message::header::{ContentType, HeaderName, HeaderValue, InReplyTo, References};
-use lettre::message::{Attachment, Mailbox as LettreMailbox, MultiPart, SinglePart};
+use lettre::message::header::{
+    ContentTransferEncoding, ContentType, HeaderName, HeaderValue, InReplyTo, References,
+};
+use lettre::message::{Attachment, Body, Mailbox as LettreMailbox, MultiPart, SinglePart};
 use mail_core::importance::Importance;
 use mail_core::message::{Mailbox, display_safe};
 
@@ -59,10 +61,14 @@ pub struct OutgoingMessage {
     pub inline_images: Vec<InlineImage>,
     /// High and low importance are sent as `Importance` and `X-Priority`.
     pub importance: Importance,
+    /// Ask for a read receipt to this address (`Disposition-Notification-To`).
+    pub read_receipt_to: Option<String>,
 }
 
 const IMPORTANCE: HeaderName = HeaderName::new_from_ascii_str("Importance");
 const X_PRIORITY: HeaderName = HeaderName::new_from_ascii_str("X-Priority");
+const DISPOSITION_NOTIFICATION_TO: HeaderName =
+    HeaderName::new_from_ascii_str("Disposition-Notification-To");
 
 /// The built message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +127,8 @@ pub fn mime_for_file_name(name: &str) -> &'static str {
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "zip" => "application/zip",
         "ics" => "text/calendar",
+        "eml" => "message/rfc822",
+        "vcf" => "text/vcard",
         "mp3" => "audio/mpeg",
         "mp4" => "video/mp4",
         _ => "application/octet-stream",
@@ -144,6 +152,19 @@ fn to_lettre(mailbox: &Mailbox) -> Result<LettreMailbox, SyncError> {
     ))
 }
 
+/// An attachment's body. A message attached whole (`message/rfc822`) goes
+/// unencoded when its lines allow (RFC 2046 section 5.2.1); one that
+/// doesn't fit 7-bit lines is base64, which mail apps open as well.
+fn attachment_body(attachment: &OutgoingAttachment) -> Body {
+    if attachment.mime_type.eq_ignore_ascii_case("message/rfc822")
+        && let Ok(body) =
+            Body::new_with_encoding(attachment.data.clone(), ContentTransferEncoding::SevenBit)
+    {
+        return body;
+    }
+    Body::new(attachment.data.clone())
+}
+
 fn random_token() -> Result<String, SyncError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes)
@@ -156,6 +177,29 @@ fn angle(ids: &[String]) -> String {
         .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Importance, and the read receipt asked for.
+fn request_headers(
+    mut builder: lettre::message::MessageBuilder,
+    message: &OutgoingMessage,
+) -> lettre::message::MessageBuilder {
+    if let Some((importance, priority)) = message.importance.outgoing_headers() {
+        builder = builder
+            .raw_header(HeaderValue::new(IMPORTANCE, importance.to_owned()))
+            .raw_header(HeaderValue::new(X_PRIORITY, priority.to_owned()));
+    }
+    if let Some(address) = message
+        .read_receipt_to
+        .as_deref()
+        .filter(|a| mail_core::compose::is_valid_address(a))
+    {
+        builder = builder.raw_header(HeaderValue::new(
+            DISPOSITION_NOTIFICATION_TO,
+            format!("<{address}>"),
+        ));
+    }
+    builder
 }
 
 /// Build a message. Header values are cleaned of control characters, so a
@@ -202,11 +246,7 @@ pub fn build(message: &OutgoingMessage) -> Result<BuiltMessage, SyncError> {
     if !references.is_empty() {
         builder = builder.header(References::from(angle(&references)));
     }
-    if let Some((importance, priority)) = message.importance.outgoing_headers() {
-        builder = builder
-            .raw_header(HeaderValue::new(IMPORTANCE, importance.to_owned()))
-            .raw_header(HeaderValue::new(X_PRIORITY, priority.to_owned()));
-    }
+    builder = request_headers(builder, message);
 
     let text = SinglePart::plain(message.body_text.clone());
     // Text and HTML of the same message; readers show the HTML. Pictures the
@@ -245,7 +285,7 @@ pub fn build(message: &OutgoingMessage) -> Result<BuiltMessage, SyncError> {
                     .map_err(|e| SyncError::Invalid(e.to_string()))?;
                 parts = parts.singlepart(
                     Attachment::new(mail_core::message::safe_file_name(&a.file_name))
-                        .body(a.data.clone(), content_type),
+                        .body(attachment_body(a), content_type),
                 );
             }
             builder.multipart(parts)
@@ -311,6 +351,69 @@ pub fn build_calendar_reply(
     })
 }
 
+/// A read receipt (RFC 8098): `multipart/report;
+/// report-type=disposition-notification` with a note and the
+/// `message/disposition-notification` fields, to `to` from `from`, in the
+/// original's thread.
+///
+/// # Errors
+/// [`SyncError::Invalid`] for bad addresses.
+pub fn build_read_receipt(
+    from: &Mailbox,
+    to: &str,
+    receipt: &mail_core::receipts::Receipt<'_>,
+) -> Result<BuiltMessage, SyncError> {
+    let domain = from
+        .address
+        .rsplit_once('@')
+        .map_or("localhost", |(_, d)| d);
+    let message_id = format!("{}@{domain}", random_token()?);
+    let to_mailbox = Mailbox {
+        name: None,
+        address: to.to_owned(),
+    };
+    let mut builder = lettre::Message::builder()
+        .from(to_lettre(from)?)
+        .to(to_lettre(&to_mailbox)?)
+        .subject(mail_core::receipts::subject(receipt.subject))
+        .message_id(Some(format!("<{message_id}>")))
+        .user_agent("Mocky Mail".to_owned());
+    if let Some(original) = receipt
+        .original_message_id
+        .map(|id| display_safe(id.trim().trim_start_matches('<').trim_end_matches('>')))
+        .filter(|id| !id.is_empty() && !id.contains(char::is_whitespace))
+    {
+        builder = builder
+            .header(InReplyTo::from(format!("<{original}>")))
+            .header(References::from(format!("<{original}>")));
+    }
+    let report_type = ContentType::parse(&format!(
+        "multipart/report; report-type=disposition-notification; boundary=\"{}\"",
+        random_token()?
+    ))
+    .map_err(|e| SyncError::Invalid(e.to_string()))?;
+    let fields = SinglePart::builder()
+        .header(
+            ContentType::parse("message/disposition-notification")
+                .map_err(|e| SyncError::Invalid(e.to_string()))?,
+        )
+        .body(mail_core::receipts::disposition_fields(receipt));
+    let report = MultiPart::builder()
+        .header(report_type)
+        .build()
+        .singlepart(SinglePart::plain(mail_core::receipts::note(receipt)))
+        .singlepart(fields);
+    let email = builder
+        .multipart(report)
+        .map_err(|e| SyncError::Invalid(e.to_string()))?;
+    Ok(BuiltMessage {
+        raw: email.formatted(),
+        message_id,
+        envelope_from: from.address.clone(),
+        recipients: vec![to.to_owned()],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,7 +462,129 @@ mod tests {
             }],
             inline_images: vec![],
             importance: Importance::Normal,
+            read_receipt_to: None,
         }
+    }
+
+    #[test]
+    fn a_read_receipt_is_asked_for_only_when_wanted() {
+        let none = String::from_utf8_lossy(&build(&base()).unwrap().raw).into_owned();
+        assert!(!none.contains("Disposition-Notification-To"));
+        let built = build(&OutgoingMessage {
+            read_receipt_to: Some("me@work.example".into()),
+            ..base()
+        })
+        .unwrap();
+        let raw = String::from_utf8_lossy(&built.raw).into_owned();
+        assert!(
+            raw.contains("Disposition-Notification-To: <me@work.example>\r\n"),
+            "{raw}"
+        );
+        let request = mail_core::receipts::requested(&built.raw).unwrap();
+        assert_eq!(request.address, "me@work.example");
+        // Nothing that could add a header gets in.
+        let bad = build(&OutgoingMessage {
+            read_receipt_to: Some("me@work.example>\r\nBcc: x@evil.example".into()),
+            ..base()
+        })
+        .unwrap();
+        let raw = String::from_utf8_lossy(&bad.raw).into_owned();
+        assert!(!raw.contains("Disposition-Notification-To"));
+        assert!(!raw.contains("evil"));
+    }
+
+    #[test]
+    fn read_receipts_are_disposition_reports() {
+        let receipt = mail_core::receipts::Receipt {
+            final_recipient: "me@work.example",
+            original_message_id: Some("q-1@client.example"),
+            subject: "Quote",
+            automatic: false,
+        };
+        let built = build_read_receipt(
+            &mb("me@work.example", Some("Don")),
+            "peter@client.example",
+            &receipt,
+        )
+        .unwrap();
+        let raw = String::from_utf8_lossy(&built.raw).into_owned();
+        assert!(
+            raw.contains("multipart/report; report-type=disposition-notification;"),
+            "{raw}"
+        );
+        assert!(raw.contains("Content-Type: message/disposition-notification"));
+        assert!(raw.contains("Disposition: manual-action/MDN-sent-manually; displayed"));
+        assert!(raw.contains("Original-Message-ID: <q-1@client.example>"));
+        assert!(raw.contains("Final-Recipient: rfc822;me@work.example"));
+        assert!(raw.contains("Subject: Read: Quote"));
+        assert!(!raw.contains("Disposition-Notification-To"));
+        assert_eq!(built.recipients, ["peter@client.example"]);
+        let summary = mail_core::message::parse_summary(&built.raw).unwrap();
+        assert_eq!(summary.in_reply_to.as_deref(), Some("q-1@client.example"));
+        assert_eq!(summary.to[0].address, "peter@client.example");
+        // A receipt never asks for one back.
+        assert_eq!(mail_core::receipts::requested(&built.raw), None);
+    }
+
+    #[test]
+    fn a_rich_text_message_goes_as_text_and_html_with_its_pictures() {
+        use base64::Engine as _;
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRpixels".to_vec();
+        let html = format!(
+            "<p>Hi <b>Peter</b></p><ul><li>Paint</li></ul><img src=\"data:image/png;base64,{}\" alt=\"plan\"><script>x()</script>",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        let rich = mail_core::rich::finish(&mail_core::rich::clean(&html), None).unwrap();
+        let mut m = base();
+        m.attachments.clear();
+        m.body_text = rich.text.clone();
+        m.body_html = Some(rich.html.clone());
+        m.inline_images = rich
+            .inline_images
+            .into_iter()
+            .map(|i| InlineImage {
+                content_id: i.content_id,
+                mime_type: i.mime_type,
+                data: i.data,
+            })
+            .collect();
+        let built = build(&m).unwrap();
+        let raw = String::from_utf8_lossy(&built.raw).into_owned();
+        assert!(raw.contains("multipart/alternative"));
+        assert!(raw.contains("multipart/related"));
+        let body = mail_core::message::parse_body(&built.raw).unwrap();
+        let sent_html = body.html.unwrap();
+        assert!(sent_html.contains("<b>Peter</b>"));
+        assert!(!sent_html.contains("script"));
+        assert!(sent_html.contains(mail_core::rich::RICH_MARKER));
+        assert_eq!(
+            body.text.unwrap().replace("\r\n", "\n").trim_end(),
+            "Hi Peter\n\n- Paint\n\n[plan]"
+        );
+        assert!(body.attachments.is_empty());
+        assert_eq!(body.inline_images.len(), 1);
+        assert_eq!(body.inline_images[0].data, png);
+    }
+
+    #[test]
+    fn a_message_attached_whole_is_message_rfc822() {
+        assert_eq!(mime_for_file_name("Quote.eml"), "message/rfc822");
+        assert_eq!(mime_for_file_name("Peter.VCF"), "text/vcard");
+        let inner =
+            b"From: a@x.example\r\nTo: b@x.example\r\nSubject: Inner\r\n\r\nHello\r\n".to_vec();
+        let mut m = base();
+        m.attachments = vec![OutgoingAttachment {
+            file_name: "Inner.eml".into(),
+            mime_type: mime_for_file_name("Inner.eml").into(),
+            data: inner,
+        }];
+        let built = build(&m).unwrap();
+        let raw = String::from_utf8_lossy(&built.raw).into_owned();
+        assert!(raw.contains("Content-Type: message/rfc822"), "{raw}");
+        assert!(raw.contains("Content-Transfer-Encoding: 7bit"), "{raw}");
+        let body = mail_core::message::parse_body(&built.raw).unwrap();
+        assert_eq!(body.attachments.len(), 1);
+        assert_eq!(body.attachments[0].file_name, "Inner.eml");
     }
 
     #[test]

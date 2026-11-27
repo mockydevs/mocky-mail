@@ -83,6 +83,7 @@ async fn send(host: &str, subject: &str, with_attachment: bool) -> String {
         },
         inline_images: vec![],
         importance: mail_core::importance::Importance::Normal,
+        read_receipt_to: None,
     })
     .unwrap();
     smtp::send(

@@ -172,6 +172,7 @@ export function MessageWindow({ messageId, now = nowSeconds }: { messageId: stri
           account={account}
           role={role}
           alwaysLoadImages={settings?.remoteImages === 'allow'}
+          readReceipts={settings ? settings.readReceipts : 'never'}
           theme={theme}
           categories={categories}
           now={now()}

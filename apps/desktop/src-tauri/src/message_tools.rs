@@ -14,7 +14,7 @@ use crate::sync;
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The `.eml` file name for a subject.
-fn eml_name(subject: &str) -> String {
+pub(crate) fn eml_name(subject: &str) -> String {
     let base: String = subject.trim().chars().take(80).collect();
     // Characters files can't have become spaces, so "Re: a/b" stays readable.
     let spaced = base.replace([':', '*', '?', '"', '<', '>', '|', '/', '\\'], " ");

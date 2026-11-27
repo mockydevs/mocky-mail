@@ -116,12 +116,17 @@ pub struct MessageDetail {
     references: Vec<String>,
     /// A meeting invitation (or a cancellation or answer) in the message.
     invitation: Option<crate::invitations::InvitationView>,
+    /// The read receipt the sender asked for, and whether it was answered.
+    read_receipt: Option<crate::read_receipts::ReadReceiptView>,
 }
 
 /// `get_message`: the body is downloaded if needed, cleaned and returned.
 /// Opening a message never marks it read; the interface calls `set_flags`.
+/// With Settings `readReceipts: 'always'`, a read receipt it asks for is
+/// queued the first time.
 #[tauri::command]
 pub async fn get_message(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     id: String,
     allow_remote: bool,
@@ -157,6 +162,7 @@ pub async fn get_message(
         }
         None => (None, 0),
     };
+    let read_receipt = crate::read_receipts::for_message(&app, &state, &stored, &raw)?;
     Ok(MessageDetail {
         item: stored.item,
         cc: stored.cc,
@@ -187,6 +193,7 @@ pub async fn get_message(
         in_reply_to: stored.in_reply_to,
         references: stored.references,
         invitation,
+        read_receipt,
     })
 }
 

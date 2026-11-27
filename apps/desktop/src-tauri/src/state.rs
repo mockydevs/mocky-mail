@@ -37,6 +37,8 @@ pub struct AppState {
     pub contacts_sync: tokio::sync::Mutex<()>,
     /// Held while calendars sync.
     pub calendar_sync: tokio::sync::Mutex<()>,
+    /// Drafts waiting for the compose window opened for them, by key.
+    pub compose_drafts: Mutex<Vec<(String, crate::outbox::Draft)>>,
 }
 
 /// Lock a mutex, recovering from a panic elsewhere instead of failing.
@@ -57,6 +59,7 @@ impl AppState {
             cache_dir,
             contacts_sync: tokio::sync::Mutex::new(()),
             calendar_sync: tokio::sync::Mutex::new(()),
+            compose_drafts: Mutex::new(Vec::new()),
         }
     }
 

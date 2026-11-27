@@ -147,14 +147,41 @@ pub fn load_default(
 /// # Errors
 /// Database errors.
 pub fn in_body(state: &AppState, account_id: &str, body: &str) -> AppResult<Option<Signature>> {
+    Ok(in_body_named(state, account_id, body)?.map(|s| s.signature))
+}
+
+/// [`in_body`], with the signature's id and name.
+///
+/// # Errors
+/// Database errors.
+pub fn in_body_named(
+    state: &AppState,
+    account_id: &str,
+    body: &str,
+) -> AppResult<Option<NamedSignature>> {
     Ok(load_set(state, account_id)?
         .items
         .into_iter()
-        .map(|s| s.signature)
-        .filter(|s| !s.text.is_empty())
+        .filter(|s| !s.signature.text.is_empty())
         // A longer signature first, so "Don\nMocky" wins over "Don".
-        .max_by_key(|s| (html_with_signature(body, s).is_some(), s.text.len()))
-        .filter(|s| html_with_signature(body, s).is_some()))
+        .max_by_key(|s| {
+            (
+                html_with_signature(body, &s.signature).is_some(),
+                s.signature.text.len(),
+            )
+        })
+        .filter(|s| html_with_signature(body, &s.signature).is_some()))
+}
+
+/// One of the account's signatures by id.
+///
+/// # Errors
+/// Database errors.
+pub fn by_id(state: &AppState, account_id: &str, id: &str) -> AppResult<Option<NamedSignature>> {
+    Ok(load_set(state, account_id)?
+        .items
+        .into_iter()
+        .find(|s| s.id == id))
 }
 
 /// Forget an account's signatures (the account is being removed).

@@ -121,6 +121,8 @@ export type MessageDetail = MessageListItem & {
   blockedRemoteImages: number;
   /** Pictures load because the sender (or their domain) is in the trusted list. */
   imagesTrusted?: boolean;
+  /** The sender asked for a read receipt. `answered`: one was sent or declined here already. */
+  readReceipt?: { requestedBy: string; answered: boolean } | null;
   attachments: AttachmentMeta[];
   messageIdHeader: string | null;
   /** In-Reply-To of this message (for continuing a saved reply draft). */
@@ -271,6 +273,16 @@ export interface RuleRunResult {
 }
 
 /** A sender whose remote pictures always load. */
+/** Check Names: what the recipients typed in a field resolve to. */
+export interface RecipientCheck {
+  /** Recognised addresses, with names from your contacts filled in. */
+  resolved: Mailbox[];
+  /** A name that matches more than one contact: pick one. */
+  ambiguous: { input: string; candidates: Mailbox[] }[];
+  /** Neither an address nor a known contact. */
+  invalid: string[];
+}
+
 export interface ImageSender {
   /** An address, or a domain when `wholeDomain`. */
   sender: string;
@@ -480,6 +492,13 @@ export interface Draft {
   bcc: string;
   subject: string;
   bodyText: string;
+  /**
+   * The message as written in the rich-text editor (HTML). When set, it is
+   * what is sent (sanitized by the backend, with a plain-text part made from
+   * it) and `bodyText` is only a plain-text fallback; null or missing: plain
+   * `bodyText` with the old inline marks, as before 0.7.0.
+   */
+  bodyHtml?: string | null;
   inReplyTo: string | null;
   references: string[];
   attachments: DraftAttachment[];
@@ -487,6 +506,8 @@ export interface Draft {
   replyToMessageId: string | null;
   /** Sent as the Importance and X-Priority headers; default normal. */
   importance?: Importance;
+  /** Ask for a read receipt (Disposition-Notification-To: the From address). */
+  requestReadReceipt?: boolean;
   /**
    * Message-ID of the saved draft this replaces: from save_draft, or the
    * message's messageIdHeader when continuing a draft from Drafts.
@@ -551,6 +572,8 @@ export interface Settings {
   readingPane: 'right' | 'bottom' | 'off';
   /** Pause all syncing and sending until switched off. */
   workOffline: boolean;
+  /** When a message you open asks for a read receipt. */
+  readReceipts: 'ask' | 'always' | 'never';
   /** Read only: what this device offers. */
   device: { tray: boolean; startAtLogin: boolean };
 }
@@ -669,6 +692,18 @@ export interface MailApi {
   /** Always load pictures from this sender (or their whole domain). */
   trustImageSender(sender: string, wholeDomain: boolean): Promise<ImageSender[]>;
   untrustImageSender(sender: string): Promise<ImageSender[]>;
+  /** Check Names for one recipient field's text. */
+  resolveRecipients(text: string): Promise<RecipientCheck>;
+  /** A contact as a .vcf file to attach (Insert › Contact card). */
+  contactCardAttachment(contactId: string): Promise<DraftAttachment>;
+  /** A message as an attached .eml file (Insert › Item). */
+  messageAsAttachment(messageId: string): Promise<DraftAttachment>;
+  /** Send (true) or decline (false) the read receipt a message asked for. */
+  answerReadReceipt(messageId: string, send: boolean): Promise<void>;
+  /** Computers: continue writing this draft in a window of its own. Phones reject `invalid`. */
+  openComposeWindow(draft: Draft): Promise<void>;
+  /** The draft a compose window was opened with (`?compose=<key>` in its address); null once taken. */
+  takeComposeDraft(key: string): Promise<Draft | null>;
   /** The mailto: link the app was started with, once (desktop). */
   takeMailto(): Promise<Mailto | null>;
   /** Read a mailto: link (from Android, or the mail://mailto event). */

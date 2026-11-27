@@ -70,6 +70,9 @@ type MessageDetail = MessageListItem & {
   attachments: AttachmentMeta[];
   messageIdHeader: string | null; inReplyTo: string | null; references: string[];
   invitation: InvitationView | null;  // from the first text/calendar part (iMIP)
+  readReceipt: { requestedBy: string; answered: boolean } | null;
+                            // the sender asked for a read receipt (see "Read receipts"); answered: sent or
+                            // declined here already. null: none asked for, or one not to answer
 };
 
 type InvitationView = {
@@ -112,6 +115,9 @@ type Draft = {
                                      // MessageDetail.messageIdHeader when continuing a draft from Drafts)
   importance?: Importance;           // high: "Importance: High" + "X-Priority: 1 (Highest)"; low: "Low" +
                                      // "5 (Lowest)"; normal (default): no headers. outbox_edit returns it.
+  bodyHtml?: string | null;          // rich-text compose: the editor's HTML (see "Rich-text compose"); then
+                                     // bodyText is only a fallback. null/missing: plain bodyText as before
+  requestReadReceipt?: boolean;      // "Disposition-Notification-To: <account address>"; default false
 };
 
 type OutboxState =
@@ -129,6 +135,7 @@ type OutboxEntry = {
 type Settings = { theme: "system" | "light" | "dark"; remoteImages: "block" | "allow"; notifications: boolean;
   readingPane: "right" | "bottom" | "off";  // default right; stored for the interface
   workOffline: boolean;                     // default false; see "Work Offline" below
+  readReceipts: "ask" | "always" | "never"; // default ask; see "Read receipts" below
   /* …and the others in Settings (types.ts) */ };
 type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "error"; lastSyncedAt: number | null; message: string | null };
 ```
@@ -232,6 +239,54 @@ after the rules through `include :personal` and runs alone again when no rule is
 server. Without the `include` extension, rules don't go on a server that already runs another
 script (`unsupported`, with a note).
 
+**Rich-text compose** (`Draft.bodyHtml`). The HTML is cleaned before it is sent or saved: kept are
+`p br div span b strong i em u s strike del ins sub sup small big font code pre ol ul li blockquote a
+table thead tbody tfoot tr td th caption colgroup col img hr h1 h2 h3`; attributes `style`, `dir`,
+`align` everywhere, `href` on `a` (http, https, mailto only), `src alt width height` on `img`, `face
+size color` on `font`, simple table attributes (`width border cellpadding cellspacing bgcolor colspan
+rowspan valign nowrap`), `start`/`type` on lists. `style` keeps colour, background colour, font
+family/size/weight/style, text decoration and alignment, indent, line height, margins, padding,
+borders, width/height; any declaration with `url(`, `image`, `expression`, `var(`, `@`, `\`… is
+dropped. Scripts, event handlers, forms (with their contents), iframes, objects, media, SVG,
+stylesheets, comments, classes and ids go; pictures stay only with `cid:` or `data:image/png|jpeg|gif|webp;base64`
+sources (others are removed), and `data:` pictures are sent as `multipart/related` parts by
+`cid:` (checked by their bytes; over 5 MB each rejects `too_large`). Lists nest 8 deep at most
+(deeper ones are flattened). The message goes as `multipart/alternative`: a text part made from the
+HTML (paragraphs and line breaks kept, `- ` and `1. ` list items indented by level, links as
+`text (address)` unless the text is the address, quotes prefixed `> `, table cells split by tabs,
+pictures as `[alt]`) and the HTML in a document whose head has
+`<meta name="mocky-compose" content="rich">`. Size checks count the cleaned HTML, the text part,
+the pictures and attachments. Two marks steer it:
+- `data-mocky-quote` on the element holding the quoted original (ideally a wrapper with the
+  "On …, … wrote:" line and the `<blockquote>` inside: `<div data-mocky-quote><p>On …</p><blockquote>…</blockquote></div>`).
+  The signature goes right before it; with no such element, at the end.
+- `data-mocky-signature="<signature id>"` on an element standing for the signature (empty, or
+  showing a preview): it is replaced, whole, by that signature as saved (its HTML, remote logo and
+  picture as `cid:signature-image@mocky.mail`), wrapped in
+  `<div class="signature" data-mocky-signature="<id>">`, which is also how a sent or saved message
+  carries it, so a continued draft gets the current signature again. Without the mark, a signature
+  whose plain `-- ` block is still in `bodyText` is put in (as before 0.7.0), unless the HTML
+  already shows its words. Put the signature in the editor only inside a marked element, or it is
+  sent as ordinary text (its remote logo removed).
+
+Both marks survive `get_message` (so `MessageDetail.html` of a saved draft can be loaded back into
+the editor; its pictures arrive as `data:` URLs). `outbox_edit` returns `bodyHtml` (cleaned, pictures
+as `data:`) only for messages written in rich-text compose, and `requestReadReceipt`.
+
+**Read receipts.** `Draft.requestReadReceipt` asks for one. For received mail,
+`MessageDetail.readReceipt` is set when `Disposition-Notification-To` names exactly one valid address,
+the message is not itself a receipt, is not in Sent, Drafts or Junk, and neither its sender nor that
+address is the account's own; with `readReceipts: 'never'` it is always null. `answered` is kept on
+this device per account and Message-ID (moving the message doesn't ask again). With `'always'`,
+`get_message` queues the receipt the first time (once, even if opened in two windows) and returns
+`answered: true`, unless the message's `Return-Path` is at another domain than the address (or `<>`),
+when it is left to the user as with `'ask'` (RFC 8098). A receipt is an RFC 8098 report from the
+account to the address, through the Outbox (sent at once, no undo delay; a copy goes to Sent like any
+message): `Subject: Read: <subject>`, In-Reply-To/References the original, `multipart/report;
+report-type=disposition-notification` with a short text note and a `message/disposition-notification`
+part (`Reporting-UA`, `Final-Recipient: rfc822;<account>`, `Original-Message-ID`, `Disposition:
+manual-action/MDN-sent-manually; displayed`, or `MDN-sent-automatically` with `'always'`).
+
 **Pictures from trusted senders.** `trust_image_sender` keeps an address, or a domain that
 covers its subdomains; `get_message` then loads remote pictures for mail from it and sets
 `imagesTrusted`. The global `remoteImages: 'allow'` loads them for everyone anyway.
@@ -259,7 +314,13 @@ covers its subdomains; `get_message` then loads remote pictures for mail from it
 | `take_mailto` | | `Mailto \| null` (`{ to, cc, bcc, subject, body }` from the `mailto:` link the app was started with, once; Linux `.desktop` and Windows MSIX register the app for `mailto:`, and a link opened while it runs arrives as `mail://mailto` `{ url }`) |
 | `parse_mailto` | `{ url }` | `Mailto \| null` (Android hands its SENDTO/VIEW link to the page through `window.MockyIntents.takeMailto()`; links only fill in a new message, control characters are dropped from fields) |
 | `get_thread` | `{ id }` | `MessageListItem[]` (every message in its conversation in the account, sent ones included, oldest first; Trash and Spam left out unless the message is there) |
-| `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read. Remote pictures load when `allowRemote`, when `Settings.remoteImages` is `allow`, or when the sender is trusted (`imagesTrusted: true`; see `trust_image_sender`)) |
+| `get_message` | `{ id, allowRemote: boolean }` | `MessageDetail` (fetches body if not cached; marks nothing read. Remote pictures load when `allowRemote`, when `Settings.remoteImages` is `allow`, or when the sender is trusted (`imagesTrusted: true`; see `trust_image_sender`). `readReceipt` as in "Read receipts"; with `readReceipts: 'always'` opening queues the receipt once) |
+| `answer_read_receipt` | `{ messageId, send }` | `void` (`send: true` queues the read receipt (see "Read receipts") from the message's account; false declines it; either way `answered` becomes true and it isn't asked again; answering again does nothing. Works whatever `readReceipts` says, since the user chose. `invalid` when the message asks for none (or is one not to answer)) |
+| `resolve_recipients` | `{ text }` | `RecipientCheck` (`{ resolved: Mailbox[], ambiguous: { input, candidates: Mailbox[] }[], invalid: string[] }`: Check Names for one To/Cc/Bcc field, split on `,`/`;` as when sending. An address (`a@b.co` or `Name <a@b.co>`) is resolved, its name filled from contacts (then people from mail) when missing; anything else is looked up like `suggest_recipients` (contacts first, up to 8): one match resolves it; of several, the one whose name, address or address before `@` is exactly the entry (ignoring case); otherwise `ambiguous`; none: `invalid` (as typed). Resolved addresses are listed once) |
+| `contact_card_attachment` | `{ contactId }` | `DraftAttachment` (the contact as a vCard 3.0 file `<name>.vcf` in the app cache, attachable like picked files; sent as `text/vcard`; `not_found` for a deleted contact) |
+| `message_as_attachment` | `{ messageId }` | `DraftAttachment` (the message as received, `<subject>.eml` (as `save_message` names it), in the app cache; sent as `message/rfc822`, 7bit when its lines allow, else base64; body downloaded if needed) |
+| `open_compose_window` | `{ draft }` | `void` (computers: keeps the draft in memory under a random key and opens a window `compose-<key>` (900×760, titled with the subject or "New message") loading the app with `?compose=<key>`; same permissions and link rules as the main window; closing it never hides to the tray; the draft is held until taken (at most 32 wait). Phones: `invalid`) |
+| `take_compose_draft` | `{ key }` | `Draft \| null` (the draft a compose window was opened with, once; null after that or for an unknown key) |
 | `parse_search` | `{ query }` | `ParsedSearch` (`{ terms: SearchTerm[], errors: string[] }`; never rejects. Terms joined by `OR` carry `orWithNext: true` on the first of the two (absent otherwise). Terms with a bad value are left out and explained in `errors`, e.g. "after: needs a date like 2026-10-01 (or today, yesterday).") |
 | `list_rules` | | `Rule[]` (in order) |
 | `save_rule` | `{ rule: RuleInput }` | `Rule[]` (`id` null adds it last; otherwise changes it in place. `invalid` with a plain message for: no name, no action, a text condition with nothing to look for, a bad header/importance/size value, move/copy without a folder, a folder of another account, a rule for every account using a folder instead of a `role`, a category that doesn't exist (names are matched ignoring case and stored as the category is spelled). Up to 30 conditions, 30 exceptions and 20 actions. Never waits for the mail server: `serverStatus`/`serverNote` say what is known now, and `mail://rules-changed` follows when the server write finishes) |
@@ -291,13 +352,13 @@ covers its subdomains; `get_message` then loads remote pictures for mail from it
 | `check_draft` | `{ draft }` | `{ estimatedBytes: number; limitBytes: number }` or rejects `invalid`/`too_large` |
 | `send_message` | `{ draft }` | `OutboxEntry` (validated, queued and held for `Settings.undoSendSecs` so `outbox_edit`/`outbox_cancel` can undo it; outbox worker then sends; removes the saved draft `draft.draftMessageId` if set) |
 | `attachments_for_draft` | `{ messageId }` | `DraftAttachment[]` (copies of a message's attachments, usable in a Draft: forwarding, continuing a draft) |
-| `save_draft` | `{ draft }` | `{ draftMessageId: string }` (stored in Drafts; replaces `draft.draftMessageId` if set; pass the returned id on the next save) |
+| `save_draft` | `{ draft }` | `{ draftMessageId: string }` (stored in Drafts, built exactly as it would be sent (a rich-text draft keeps its HTML, marks and pictures); replaces `draft.draftMessageId` if set; pass the returned id on the next save) |
 | `list_outbox` | | `OutboxEntry[]` |
 | `outbox_send_now` | `{ id }` | `void` |
 | `outbox_cancel` | `{ id }` | `void` |
-| `outbox_edit` | `{ id }` | `Draft` (removes it from the outbox) |
+| `outbox_edit` | `{ id }` | `Draft` (removes it from the outbox; `bodyHtml` for a rich-text message, `requestReadReceipt` as it was) |
 | `sync_now` | `{ accountId: string \| null }` | `void` |
-| `get_settings` / `set_settings` | `{ settings }` | `Settings`. `readingPane` (`right`, `bottom`, `off`; anything else becomes `right`) is only stored; changing `workOffline` wakes every sync engine and the outbox. On computers also `closeToTray` (closing the window hides it to the tray icon: Open, New message (emits `mail://compose`), Check for mail, Quit) and `startAtLogin` (applied to the system through tauri-plugin-autostart, launching with `--hidden` into the tray); `device: { tray, startAtLogin }` is read only (start at login is off inside a Store package). |
+| `get_settings` / `set_settings` | `{ settings }` | `Settings`. `readReceipts` (`ask`, `always`, `never`; anything else becomes `ask`). `readingPane` (`right`, `bottom`, `off`; anything else becomes `right`) is only stored; changing `workOffline` wakes every sync engine and the outbox. On computers also `closeToTray` (closing the window hides it to the tray icon: Open, New message (emits `mail://compose`), Check for mail, Quit) and `startAtLogin` (applied to the system through tauri-plugin-autostart, launching with `--hidden` into the tray); `device: { tray, startAtLogin }` is read only (start at login is off inside a Store package). |
 | `list_contacts` | `{ query }` | `Contact[]` (saved contacts matching name, email, phone or company, by name; `Contact = { id, accountId: string \| null, uid, name, emails, phones, organization, title, notes, state: 'synced' \| 'changed' \| 'deleted' }`) |
 | `get_contact` | `{ id }` | `Contact` |
 | `save_contact` | `{ contact: { id?, accountId: string \| null, name, emails, phones, organization, title, notes } }` | `Contact` (saved here at once; a contact of an account syncs to its server's address book in the background; null `accountId` keeps it on this device) |

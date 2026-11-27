@@ -202,6 +202,7 @@ export const MOCK_MESSAGES: MockMessage[] = [
     preview: 'Payment received, thank you. Receipt attached for your records.',
     date: at('2026-11-11T12:47:00Z'), answered: true, categories: ['Invoices'],
     text: para('Hello,', 'Payment for INV-0142 has gone through.', 'Regards,\nPeter'),
+    readReceipt: { requestedBy: 'peter@client.example', answered: false },
     attachments: [{ index: 0, fileName: 'Receipt-INV-0142.pdf', mimeType: 'application/pdf', size: 96 * 1024, preview: 'pdf' }],
   }),
   message({
@@ -277,5 +278,6 @@ export const MOCK_SETTINGS: Settings = {
   startAtLogin: false,
   readingPane: 'right',
   workOffline: false,
+  readReceipts: 'ask',
   device: { tray: true, startAtLogin: true },
 };

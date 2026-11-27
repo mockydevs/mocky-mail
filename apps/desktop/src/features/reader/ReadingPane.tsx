@@ -33,6 +33,7 @@ import { linkify } from './linkify';
 import { SandboxedHtml } from './SandboxedHtml';
 import { InvitationCard } from '../calendar/InvitationCard';
 import { ThreadHistory } from './ThreadHistory';
+import { ReadReceiptBar } from './ReadReceiptBar';
 
 export interface ReaderActions {
   onReply: (message: MessageDetail, all: boolean) => void;
@@ -88,6 +89,8 @@ interface Props extends ReaderActions {
   showBack?: boolean;
   /** Work Offline is on: a message not yet on this device can't be fetched. */
   workOffline?: boolean;
+  /** Settings › Reading: what to do when a message asks for a read receipt. Default: ask. */
+  readReceipts?: 'ask' | 'always' | 'never';
 }
 
 /** Free mail services: trusting the whole domain would trust everyone on it. */
@@ -754,6 +757,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
             {attachmentList}
             {viewer}
             {sourceDialog}
+            <ReadReceiptBar message={message} mode={props.readReceipts ?? 'ask'} />
             {notices}
             <ThreadHistory messageId={message.id} theme={theme} />
           </div>
@@ -1073,6 +1077,7 @@ const MessageView = forwardRef<HTMLElement, Props & { item: MessageListItem; id:
         {viewer}
         {sourceDialog}
 
+        <ReadReceiptBar message={message} mode={props.readReceipts ?? 'ask'} />
         {notices}
 
         <ThreadHistory messageId={message.id} theme={theme} />

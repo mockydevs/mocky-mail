@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } 
 import { useMailApi } from '../../api/MailApiContext';
 import type { Mailbox } from '../../api/types';
 import { Icon } from '../../ui/Icon';
-import { addressOf, isPlausibleAddress, splitRecipients } from './recipients';
+import { addressOf, entryFor, isPlausibleAddress, splitRecipients } from './recipients';
 
 interface Props {
   id: string;
@@ -36,13 +36,6 @@ function chipLabel(entry: string): string {
   const angle = /^(.*?)<[^<>]*>\s*$/.exec(entry);
   const name = angle?.[1]?.trim().replace(/^"|"$/g, '');
   return name !== undefined && name !== '' ? name : entry;
-}
-
-/** A suggestion as a recipient entry; names with a comma are quoted so they stay one entry. */
-function entryFor(person: Mailbox): string {
-  const name = person.name?.replace(/["<>]/g, '').trim();
-  if (!name) return person.address;
-  return /[,;]/.test(name) ? `"${name}" <${person.address}>` : `${name} <${person.address}>`;
 }
 
 /** Wait this long after typing stops before looking people up. */

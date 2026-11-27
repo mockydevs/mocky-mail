@@ -327,7 +327,7 @@ fn id_list(value: &HeaderValue<'_>) -> Vec<String> {
     ids.into_iter().filter(|id| !id.is_empty()).collect()
 }
 
-fn parse(raw: &[u8]) -> Result<Message<'_>, ParseError> {
+pub(crate) fn parse(raw: &[u8]) -> Result<Message<'_>, ParseError> {
     if raw.is_empty() {
         return Err(ParseError::Empty);
     }
