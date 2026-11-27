@@ -32,6 +32,29 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "fileAssociations": [
+      {
+        "ext": ["eml"],
+        "name": "Email message",
+        "description": "Email message",
+        "mimeType": "message/rfc822",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["ics"],
+        "name": "Calendar file",
+        "description": "Calendar file",
+        "mimeType": "text/calendar",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["vcf"],
+        "name": "Contact card",
+        "description": "Contact card",
+        "mimeType": "text/vcard",
+        "role": "Viewer"
+      }
+    ],
     "macOS": {
       "signingIdentity": "-"
     },

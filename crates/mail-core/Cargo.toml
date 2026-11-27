@@ -15,7 +15,12 @@ ammonia = "4.2.5"
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 chrono-tz = "0.10"
-mail-parser = "0.11.9"
+mail-parser = { version = "0.11.9", features = ["full_encoding"] }
+# MailCraft's readers (MIT OR Apache-2.0): character sets, winmail.dat and
+# Outlook .pst files. Pinned to one commit; see THIRD_PARTY_NOTICES.md.
+mailcraft-charset = { git = "https://github.com/UCSLabs/mailcraft", rev = "61e9f46f069a3f0cf016283d7c329c07bd60c7cc" }
+mailcraft-pst = { git = "https://github.com/UCSLabs/mailcraft", rev = "61e9f46f069a3f0cf016283d7c329c07bd60c7cc" }
+mailcraft-tnef = { git = "https://github.com/UCSLabs/mailcraft", rev = "61e9f46f069a3f0cf016283d7c329c07bd60c7cc" }
 markdown = "1.0"
 rrule = "0.14"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -23,5 +28,8 @@ serde_json = "1.0.154"
 thiserror = "2.0.21"
 
 [dev-dependencies]
+# Synthetic .pst files and TNEF streams for the import's tests.
+mailcraft-pst = { git = "https://github.com/UCSLabs/mailcraft", rev = "61e9f46f069a3f0cf016283d7c329c07bd60c7cc", features = ["test-writer"] }
+mailcraft-tnef = { git = "https://github.com/UCSLabs/mailcraft", rev = "61e9f46f069a3f0cf016283d7c329c07bd60c7cc", features = ["test-writer"] }
 proptest = "1.12.0"
 serde_json = "1.0.154"

@@ -16,11 +16,14 @@ class MainActivity : TauriActivity() {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     rememberMailto(intent)
+    // .eml, .ics and .vcf files opened with the app or shared to it.
+    SharedFiles.receive(this, intent)
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     rememberMailto(intent)
+    SharedFiles.receive(this, intent)
   }
 
   /** A mailto: link this app was opened with, until the page takes it. */

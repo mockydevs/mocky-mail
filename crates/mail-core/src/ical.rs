@@ -598,7 +598,7 @@ fn windows_zone(id: &str) -> Option<&'static str> {
 
 /// A time zone from a `TZID`: an IANA name, a name with a vendor prefix
 /// (`/mozilla.org/.../Europe/Berlin`), or a common Windows name.
-fn zone_for(id: &str) -> Option<chrono_tz::Tz> {
+pub(crate) fn zone_for(id: &str) -> Option<chrono_tz::Tz> {
     let id = id.trim().trim_matches('"');
     if let Ok(tz) = id.parse::<chrono_tz::Tz>() {
         return Some(tz);
@@ -1319,7 +1319,7 @@ const RULE_YEARS: i32 = 12;
 /// Zones that change their clocks on a regular day get a yearly rule,
 /// which holds for a repeating event's later years too; others get their
 /// changes listed from the year before `year` to the year after.
-fn vtimezone(zone: chrono_tz::Tz, year: i32) -> Vec<String> {
+pub(crate) fn vtimezone(zone: chrono_tz::Tz, year: i32) -> Vec<String> {
     let first_year = year.saturating_sub(1);
     let changes = clock_changes(zone, first_year, RULE_YEARS);
     let block =

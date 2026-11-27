@@ -14,6 +14,7 @@ mod calendar;
 mod categories;
 mod contacts;
 mod error;
+mod files;
 mod folders;
 mod ids;
 mod messages;
@@ -39,6 +40,7 @@ pub use calendar::{Calendar, FoundCalendar, StoredEvent, new_event_uid};
 pub use categories::Category;
 pub use contacts::{Contact, ContactState, ContactSync, MAX_CONTACTS};
 pub use error::{Result, StoreError};
+pub use files::{Book, ContactKeys, ExportRow, message_id_key, person_key};
 pub use folders::{Folder, NewFolder};
 pub use messages::{
     ListFilter, ListQuery, ListSort, MAX_PAGE_SIZE, MAX_SUGGESTIONS, MAX_THREAD_MESSAGES,
