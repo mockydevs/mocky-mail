@@ -924,7 +924,8 @@ export interface MailApi {
   /** Create or change an event on the server (needs a connection). Returns the event itself. */
   saveEvent(event: EventInput): Promise<CalendarEvent>;
   /** Delete an event or whole series; with `occurrence` (a `recurrenceId`), only that date. */
-  deleteEvent(id: string, occurrence: number | null): Promise<void>;
+  /** `notify`: send cancellations to the attendees (you organise it). Default false. */
+  deleteEvent(id: string, occurrence: number | null, notify?: boolean): Promise<void>;
   /** Sync every account's calendars now. */
   syncCalendars(): Promise<CalendarStatus[]>;
   /** Answer an invitation in a message: saved in your calendar (a decline removes it); with `notify`, the organiser is emailed. */

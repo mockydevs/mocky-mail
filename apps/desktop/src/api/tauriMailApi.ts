@@ -104,7 +104,7 @@ export function createTauriMailApi(): MailApi {
     listEvents: (from, to) => call('list_events', { from, to }),
     getEvent: (id) => call('get_event', { id }),
     saveEvent: (event) => call('save_event', { event }),
-    deleteEvent: (id, occurrence) => call('delete_event', { id, occurrence }),
+    deleteEvent: (id, occurrence, notify) => call('delete_event', { id, occurrence, notify: notify ?? false }),
     syncCalendars: () => call('sync_calendars'),
     answerInvitation: (id, answer, notify) => call('answer_invitation', { id, answer, notify }),
     removeCancelledEvent: (id) => call('remove_cancelled_event', { id }),
