@@ -22,6 +22,7 @@ use crate::sync;
 /// Longest recipient field Check Names reads.
 const MAX_FIELD_BYTES: usize = 64 * 1024;
 /// Most drafts waiting for their compose window.
+#[cfg_attr(mobile, allow(dead_code))]
 const MAX_WAITING_DRAFTS: usize = 32;
 
 /// `resolve_recipients`: Check Names for one recipient field.
@@ -129,6 +130,7 @@ pub async fn message_as_attachment(
 }
 
 /// A key nobody can guess, for a waiting draft.
+#[cfg_attr(mobile, allow(dead_code))]
 fn new_key() -> AppResult<String> {
     use ring::rand::SecureRandom as _;
     let mut bytes = [0u8; 16];
@@ -155,6 +157,7 @@ fn window_title(subject: &str) -> String {
 
 /// Keep a draft for its window; the oldest waiting one goes if too many
 /// are waiting (a window that never opened).
+#[cfg_attr(mobile, allow(dead_code))]
 fn keep(state: &AppState, key: &str, draft: Draft) {
     let mut waiting = lock(&state.compose_drafts);
     while waiting.len() >= MAX_WAITING_DRAFTS {

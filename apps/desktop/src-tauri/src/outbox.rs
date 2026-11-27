@@ -75,6 +75,7 @@ pub struct Draft {
 
 impl Draft {
     /// The subject as typed.
+    #[cfg_attr(mobile, allow(dead_code))]
     pub fn subject(&self) -> &str {
         &self.subject
     }
