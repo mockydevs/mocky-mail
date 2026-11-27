@@ -85,8 +85,12 @@ crates/mail-store/       Local SQLite database: accounts, folders, messages, sea
                          the outbox and offline changes waiting for the server.
 crates/mail-sync/        IMAP and SMTP connections, and the system keyring.
 crates/mail-auth/        Browser sign-in (OAuth with PKCE) for Gmail and Microsoft.
+crates/mail-app/         The application: shared state, the sync, outbox, reminder,
+                         calendar, contacts, tasks and rules workers, and every
+                         command in docs/ipc.md as a plain function. No Tauri.
 apps/desktop/            React + TypeScript interface (Vite).
-apps/desktop/src-tauri/  Tauri shell: window, sync and outbox workers, IPC commands.
+apps/desktop/src-tauri/  Tauri shell: windows, tray, Android plugins, the Host
+                         for mail-app, and thin #[tauri::command] wrappers.
 docs/                    IPC contract, install guide, OAuth setup, store release notes.
 ```
 
@@ -112,7 +116,17 @@ without them those two options show a configuration error and password
 sign-in still works. See [docs/oauth-setup.md](docs/oauth-setup.md).
 
 The interface and the native side talk through the commands in
-[docs/ipc.md](docs/ipc.md).
+[docs/ipc.md](docs/ipc.md). Their bodies live in `crates/mail-app`, as
+`pub fn name(ctx: &Ctx, args…)`; `Ctx` carries the `AppState` and a
+`Host`, the trait through which the application reaches the program it runs
+in: events to the interface, file pickers and save dialogs, notifications,
+opening links and files, windows of their own, start at login, updates and
+Android's own Google sign-in. The desktop app implements it as
+`TauriHost` (`apps/desktop/src-tauri/src/host.rs`); anything a host can't
+do answers `invalid` ("… is not available here"). `mail_app::registry`
+runs any command by name with JSON arguments (`dispatch`) and lists them
+with whether each one changes anything (`commands`), for tools that drive
+the app without its interface.
 
 Before opening a pull request, all of these must pass:
 

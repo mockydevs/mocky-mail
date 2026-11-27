@@ -5,6 +5,15 @@ events with `listen(name, cb)`. Argument keys are camelCase on the JS side
 (Tauri maps them to snake_case Rust parameters). Every command that can fail
 rejects with an `AppError`. IDs are opaque strings.
 
+Each command is a thin `#[tauri::command]` wrapper in
+`apps/desktop/src-tauri/src/commands.rs` around a function of the same name
+in `crates/mail-app`, which holds the logic and reaches the platform only
+through its `Host` trait. `mail_app::registry::dispatch(ctx, name, args)`
+runs the same commands with the same names and camelCase arguments (a JSON
+object) for programs other than the interface, and
+`mail_app::registry::commands()` lists them, each with a one-line
+description and whether it changes anything.
+
 ```ts
 type AppError = {
   kind: "auth" | "connect" | "tls" | "config" | "not_found" | "invalid" | "too_large" | "storage" | "keyring" | "internal";
