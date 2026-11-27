@@ -4,7 +4,7 @@ A fast, private email app for **Windows, Linux and Android** (macOS coming
 soon), by [Mocky Digital](https://mocky.co.ke). Free and open source under the
 GPL-3.0.
 
-> Status: version 0.8, in testing. It syncs and sends real mail over IMAP
+> Status: version 0.9, in testing. It syncs and sends real mail over IMAP
 > and SMTP, with password sign-in for any provider and browser sign-in for
 > Gmail and Microsoft 365/Outlook.
 
