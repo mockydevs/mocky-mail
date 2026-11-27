@@ -55,6 +55,8 @@ class FileArgs {
  *   read access to that one file only.
  *
  * - printHtml: the system print screen for a page (print, or save as PDF).
+ * - waitSharedFiles: .eml, .ics and .vcf files opened with the app or
+ *   shared to it (see SharedFiles), as soon as there are any.
  *
  * Only files inside the app's own cache are ever read, saved or opened.
  * Called from Rust only.
@@ -186,6 +188,12 @@ class FilesPlugin(private val activity: Activity) : Plugin(activity) {
     } catch (e: Exception) {
       invoke.reject("The file couldn't be opened: ${e.message}")
     }
+  }
+
+  /** Resolves when files are shared to the app; Rust calls it again each time. */
+  @Command
+  fun waitSharedFiles(invoke: Invoke) {
+    SharedFiles.wait(invoke)
   }
 
   /** Kept until printing has its pages, or it would be collected mid-print. */

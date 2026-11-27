@@ -6,6 +6,7 @@ import { MOCK_ACCOUNTS } from '../../api/mock/mockData';
 import { MOCK_CALENDARS, mockEvent, type MockEvent } from '../../api/mock/mockCalendar';
 import { createMockMailApi, type MockOptions } from '../../api/mock/mockMailApi';
 import type { Account, CalendarEvent } from '../../api/types';
+import { FileTasksProvider } from '../files/FileTasks';
 import { CalendarView } from './CalendarView';
 import { dayText } from './calendarTime';
 
@@ -49,7 +50,9 @@ async function setup({ options = {}, phone = false, accounts = MOCK_ACCOUNTS }: 
   const onWrite = vi.fn();
   render(
     <MailApiProvider api={api}>
-      <CalendarView accounts={accounts} phone={phone} onClose={vi.fn()} onWrite={onWrite} defaultReminder={15} today={TODAY} />
+      <FileTasksProvider value={{ run: vi.fn(), busy: false }}>
+        <CalendarView accounts={accounts} phone={phone} onClose={vi.fn()} onWrite={onWrite} defaultReminder={15} today={TODAY} />
+      </FileTasksProvider>
     </MailApiProvider>,
   );
   await screen.findByRole('region', { name: 'November 2026' });

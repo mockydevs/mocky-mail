@@ -1120,6 +1120,68 @@ impl ImapConnection {
         Ok(())
     }
 
+    /// Store a message brought in from a file: with its flags (such as
+    /// `(\Seen)`) and, when known, its arrival time (`INTERNALDATE`, an IMAP
+    /// `date-time` in quotes such as `mail_core::mbox::imap_date` writes).
+    ///
+    /// # Errors
+    /// Network or server errors (a message the server refuses among them).
+    pub async fn append_dated(
+        &mut self,
+        path: &str,
+        raw: &[u8],
+        flags: &str,
+        internal_date: Option<&str>,
+    ) -> Result<(), SyncError> {
+        if flags.contains(['\r', '\n'])
+            || internal_date.is_some_and(|d| d.contains(['\r', '\n']) || !d.starts_with('"'))
+        {
+            return Err(SyncError::Invalid(
+                "a message's flags or date can't be sent like that".to_owned(),
+            ));
+        }
+        let host = self.host.clone();
+        let limit = transfer_timeout(u64::try_from(raw.len()).unwrap_or(u64::MAX));
+        within_for(
+            &host,
+            limit,
+            self.session.append(path, Some(flags), internal_date, raw),
+        )
+        .await??;
+        self.selected = None;
+        Ok(())
+    }
+
+    /// The Message-IDs of every message in a folder (without angle
+    /// brackets, lower case), for leaving out what is already there.
+    ///
+    /// # Errors
+    /// Network or server errors.
+    pub async fn message_ids(&mut self, path: &str) -> Result<HashSet<String>, SyncError> {
+        let status = self.select(path).await?;
+        if status.exists == 0 {
+            return Ok(HashSet::new());
+        }
+        let limit = transfer_timeout(u64::from(status.exists).saturating_mul(1024));
+        let fetches = self
+            .fetch_within(path, "1:*", "(UID ENVELOPE)", limit)
+            .await?;
+        Ok(fetches
+            .iter()
+            .filter_map(|f| {
+                let id = f.envelope()?.message_id.as_ref()?;
+                let id = String::from_utf8_lossy(id);
+                let key = id
+                    .trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .trim()
+                    .to_ascii_lowercase();
+                (!key.is_empty()).then_some(key)
+            })
+            .collect())
+    }
+
     /// Check that the connection still works (NOOP), for one that sat quiet
     /// for a while before being used again.
     ///

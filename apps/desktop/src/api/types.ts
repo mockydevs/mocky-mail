@@ -287,6 +287,36 @@ export interface RecipientCheck {
   invalid: string[];
 }
 
+/** What an import brought in. */
+export interface ImportReport {
+  /** Items that came in (messages, events, contacts…). */
+  imported: number;
+  /** Items left out (duplicates, unreadable, too large). */
+  skipped: number;
+  /** Plain-language notes on what was left out and why (at most 50). */
+  problems: string[];
+  /** For a .pst file: how many of each kind came in. */
+  counts?: { messages: number; contacts: number; events: number; tasks: number; notes: number };
+  /** Where imported mail went (a folder created for it), if any. */
+  folderId?: string | null;
+}
+
+/** A long import or export under way (mail://import-progress). */
+export interface ImportProgress {
+  /** What is being done, e.g. "Reading Inbox" or "Uploading messages". */
+  phase: string;
+  done: number;
+  /** 0 while unknown. */
+  total: number;
+}
+
+/** A file the app was asked to open (double-clicked, "Open with", or shared to it on Android). */
+export interface OpenedFile {
+  kind: 'eml' | 'ics' | 'vcf';
+  path: string;
+  name: string;
+}
+
 export interface ImageSender {
   /** An address, or a domain when `wholeDomain`. */
   sender: string;
@@ -768,6 +798,10 @@ export interface MailEvents {
   'mail://tasks-changed': Record<string, never>;
   /** A rule's server copy was written, or writing it gave up. */
   'mail://rules-changed': { rules: Rule[] };
+  /** A long import or export moved on. */
+  'mail://import-progress': ImportProgress;
+  /** A file was opened with the app while it runs. */
+  'mail://open-file': { file: OpenedFile };
   'mail://contacts-changed': { books: AddressBookStatus[] };
   /** After a calendar sync (with each account's status) or a change made here (empty). */
   'mail://calendar-changed': { calendars: CalendarStatus[] };
@@ -832,6 +866,33 @@ export interface MailApi {
   openComposeWindow(draft: Draft): Promise<void>;
   /** The draft a compose window was opened with (`?compose=<key>` in its address); null once taken. */
   takeComposeDraft(key: string): Promise<Draft | null>;
+  /** Pick .eml and .mbox files and upload their messages into a folder. null: cancelled. */
+  importMailFiles(folderId: string): Promise<ImportReport | null>;
+  /** Save a folder as one .mbox file, or the given messages as .eml files in a .zip (`ids` with `eml`). Returns where it was saved; null if cancelled. */
+  exportMail(target: { folderId: string } | { ids: string[] }, format: 'mbox' | 'eml'): Promise<string | null>;
+  /** Pick an .ics file and add its events to a calendar. */
+  importCalendarFile(calendarId: string): Promise<ImportReport | null>;
+  /** Save a calendar as an .ics file. */
+  exportCalendar(calendarId: string): Promise<string | null>;
+  /** Pick a .vcf file and add its contacts (accountId null: this device). */
+  importContactsFile(accountId: string | null): Promise<ImportReport | null>;
+  /** Save contacts as one .vcf file (accountId null: this device's; '*': everyone). */
+  exportContacts(accountId: string | null): Promise<string | null>;
+  /**
+   * Pick an Outlook .pst file: its mail is uploaded into a new folder tree
+   * "Imported from Outlook" on the account; contacts, calendar, tasks and notes
+   * go to that account's address book, calendar and task list (or this
+   * device's when it has none). Progress comes as mail://import-progress.
+   */
+  importPst(accountId: string): Promise<ImportReport | null>;
+  /** Files the app was started with (desktop) or that were shared to it (Android), once each. */
+  takeOpenedFiles(): Promise<OpenedFile[]>;
+  /** An opened .eml file, read for showing (it is not added to any folder). */
+  readMessageFile(path: string): Promise<MessageDetail>;
+  /** Add an opened .eml file to a folder. */
+  importMessageFile(path: string, folderId: string): Promise<void>;
+  /** Add an opened .ics or .vcf file's items (calendarId for .ics, accountId for .vcf). */
+  importOpenedFile(path: string, target: { calendarId: string } | { accountId: string | null }): Promise<ImportReport>;
   /**
    * Gmail and Microsoft accounts: sign in again in the browser asking for
    * calendar, contacts, tasks and automatic-reply access (mail access is

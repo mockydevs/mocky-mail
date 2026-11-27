@@ -22,6 +22,9 @@ import { Welcome } from '../features/accounts/Welcome';
 import { ComposeView, type LeaveCompose } from '../features/compose/ComposeView';
 import { preloadEditor } from '../features/compose/editor/loader';
 import { blankDraft, draftFromMessage, forwardDraft, replyDraft, type ComposeKind } from '../features/compose/seed';
+import { FileTasksProvider, useFileTaskRunner } from '../features/files/FileTasks';
+import { OpenedFiles } from '../features/files/OpenedFiles';
+import { exportFolderTask, exportMessagesTask, importMailTask } from '../features/files/tasks';
 import { FolderPicker } from '../features/mailbox/FolderPicker';
 import { groupRows } from '../features/mailbox/grouping';
 import { ListTools } from '../features/mailbox/ListTools';
@@ -311,6 +314,15 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   };
   const currentSettings = settings ?? DEFAULT_SETTINGS;
   const workOffline = currentSettings.workOffline;
+  /** "Open folder" after an import, waiting for a folder the import made to load. */
+  const [pendingFolder, setPendingFolder] = useState<string | null>(null);
+  const files = useFileTaskRunner({
+    onNotice: setNotice,
+    onOpenFolder: (folderId) => {
+      openFolder(folderId);
+    },
+    workOffline,
+  });
 
   const theme = useTheme(settings?.theme ?? 'system');
 
@@ -496,6 +508,28 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       setScreen({ kind: 'mail' });
     });
   };
+
+  /** Show a folder by id; one an import just made may still be loading. */
+  const openFolder = (folderId: string) => {
+    const folder = allFolders.find((f) => f.id === folderId);
+    if (folder) {
+      goTo({ type: 'folder', accountId: folder.accountId, folderId });
+    } else {
+      setPendingFolder(folderId);
+      refresh();
+    }
+  };
+  if (pendingFolder !== null && screen.kind !== 'compose') {
+    const folder = allFolders.find((f) => f.id === pendingFolder);
+    if (folder) {
+      setPendingFolder(null);
+      listView.goTo({ type: 'folder', accountId: folder.accountId, folderId: folder.id });
+      setSelectedId(null);
+      setKept(null);
+      selection.clearChecked();
+      setScreen({ kind: 'mail' });
+    }
+  }
 
   /** The messages an action applies to: the ticked rows, else the open one. */
   const targets = (): MessageListItem[] => (selecting ? checkedRows : active ? [active] : []);
@@ -982,6 +1016,9 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
       onCreateRule={() => {
         setRuleDraft(ruleFromMessages(checkedRows, allFolders));
       }}
+      onSaveEml={() => {
+        files.tasks.run(exportMessagesTask(api, checkedRows.flatMap((r) => idsOf(r))));
+      }}
     />
   );
 
@@ -1330,6 +1367,7 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     : `panes${screen.kind === 'mail' && pane !== 'right' ? ` panes--${pane}` : ''}`;
 
   return (
+    <FileTasksProvider value={files.tasks}>
     <div className={phone && reading && screen.kind === 'mail' ? 'app app--reading' : 'app'}>
       <TopBar
         search={searchInput}
@@ -1403,6 +1441,14 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
                 api.setFolderFavorite(folder.id, favorite).then(refresh, (e: unknown) => {
                   report(toAppError(e), favorite ? 'Could not add to Favourites' : 'Could not remove from Favourites');
                 });
+              }}
+              onImportInto={(folder) => {
+                setDrawer(false);
+                files.tasks.run(importMailTask(api, folder, refresh));
+              }}
+              onExportFolder={(folder) => {
+                setDrawer(false);
+                files.tasks.run(exportFolderTask(api, folder));
               }}
               onReorderAccounts={(ids) => {
                 api.reorderAccounts(ids).then(refresh, (e: unknown) => {
@@ -1567,6 +1613,19 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
           }}
         />
       )}
+      <OpenedFiles
+        accounts={accounts}
+        folders={foldersByAccount}
+        theme={theme}
+        workOffline={workOffline}
+        onNotice={setNotice}
+        onOpenFolder={openFolder}
+        onCompose={(draft, title, kind, attachmentsFrom) => {
+          compose(draft, title, kind, { attachmentsFrom });
+        }}
+      />
+      {files.dialog}
     </div>
+    </FileTasksProvider>
   );
 }

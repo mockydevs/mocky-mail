@@ -3,6 +3,7 @@ import { addressOf, isPlausibleAddress, parseRecipients, splitRecipients } from 
 import type {
   Account,
   AddressBookStatus,
+  CalendarEvent,
   CalendarInfo,
   CalendarStatus,
   OutOfOffice,
@@ -25,6 +26,8 @@ import type {
   DraftAttachment,
   DraftCheck,
   Folder,
+  ImportProgress,
+  ImportReport,
   Mailbox,
   MailApi,
   MailEventName,
@@ -32,6 +35,7 @@ import type {
   MessageDetail,
   MessageListItem,
   OutboxEntry,
+  OpenedFile,
   RecipientCheck,
   Rule,
   RuleAction,
@@ -41,7 +45,9 @@ import type {
 import { MOCK_CALENDARS, MOCK_EVENTS, mockOccurrences, mockSave, type MockEvent } from './mockCalendar';
 import { dueReminders, MOCK_TASK_LISTS, MOCK_TASKS, mockFreeBusy, sortTasks } from './mockPlanner';
 import {
+  at,
   foldersFor,
+  message as sampleMessage,
   MOCK_ACCOUNTS,
   MOCK_CATEGORIES,
   MOCK_FOLDERS,
@@ -97,6 +103,10 @@ export interface MockOptions {
   rules?: Rule[];
   /** Senders whose pictures always load; default: none. */
   imageSenders?: ImageSender[];
+  /** Files the app was started with, for takeOpenedFiles. */
+  openedFiles?: OpenedFile[];
+  /** Milliseconds between import and export progress steps; default 10. */
+  fileTickMs?: number;
   /** Contact groups; default: none. */
   groups?: ContactGroup[];
   /** To-do lists; default: a device list and a work list. */
@@ -133,6 +143,10 @@ export interface MockMailApi extends MailApi {
   launchWith(url: string): void;
   /** A new message arrives, as a sync would bring it in. */
   receive(message: MockMessage): void;
+  /** The next file or save picker is cancelled (its command returns null). */
+  cancelNextPick(): void;
+  /** Imports and exports stop after their first progress step until the returned function is called. */
+  holdFileTasks(): () => void;
   /** Events deleted with notify (cancellations sent), for assertions. */
   readonly cancellations: { eventId: string; occurrence: number | null }[];
   /** The reminder clock ticks: emit mail://reminders with what is due at now(). */
@@ -346,6 +360,14 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   const outboxDrafts = new Map<string, Draft>();
   /** Attachments of drafts saved in this session, by message id. */
   const draftFiles = new Map<string, DraftAttachment[]>();
+  /** Opened .eml files read with readMessageFile, by the id they were shown with. */
+  const openedMessages = new Map<string, MockMessage>();
+  /** Files waiting for takeOpenedFiles. */
+  let openedQueue: OpenedFile[] = clone(options.openedFiles ?? []);
+  const fileTickMs = options.fileTickMs ?? 10;
+  let cancelPick = false;
+  /** While set, imports and exports wait here after their first step. */
+  let fileGate: Promise<void> | null = null;
   const now = options.now ?? (() => MOCK_NOW);
   /** Play a sent message through sending and sent, then drop it, as Rust does. */
   const deliver = (id: string, holdSecs: number) => {
@@ -442,7 +464,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   };
   const folderOf = (id: string) => folders.find((f) => f.id === id);
   const stored = (id: string): MockMessage => {
-    const found = messages.find((m) => m.id === id);
+    const found = messages.find((m) => m.id === id) ?? openedMessages.get(id);
     if (!found) throw appError('not_found', 'That message is no longer available.');
     return found;
   };
@@ -522,6 +544,155 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   };
   const ruleWorld = () => ({ accounts, folders, categories });
 
+  const wait = (ms: number) =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
+  /**
+   * A long import or export, as the backend runs it: honours failNext, checks
+   * what it can at once, then reports each step as mail://import-progress
+   * before it finishes.
+   */
+  const slow = <T>(method: Method, steps: ImportProgress[], body: () => T, check?: () => void): Promise<T> => {
+    const failure = failures.get(method);
+    if (failure) {
+      failures.delete(method);
+      return Promise.reject(toAppError(failure));
+    }
+    try {
+      check?.();
+    } catch (error: unknown) {
+      return Promise.reject(error instanceof MailError ? error : toAppError(error));
+    }
+    return (async () => {
+      for (const [index, step] of steps.entries()) {
+        await wait(fileTickMs);
+        emit('mail://import-progress', step);
+        if (index === 0 && fileGate) await fileGate;
+      }
+      await wait(fileTickMs);
+      try {
+        return clone(body());
+      } catch (error: unknown) {
+        throw error instanceof MailError ? error : toAppError(error);
+      }
+    })();
+  };
+  /** The user cancelled the file or save picker (see cancelNextPick). */
+  const pickCancelled = () => {
+    const was = cancelPick;
+    cancelPick = false;
+    return was;
+  };
+  const counting = (phase: string, total: number): ImportProgress[] =>
+    Array.from({ length: total }, (_, i) => ({ phase, done: i + 1, total }));
+  const needsServer = () => {
+    if (settings.workOffline) throw appError('connect', 'Work Offline is on, so nothing can go to the mail server.');
+  };
+  const baseName = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+  /** The mock's damaged files: any path naming itself broken or unreadable. */
+  const readable = (path: string) => {
+    if (/broken|unreadable/i.test(path)) {
+      throw appError('invalid', `${baseName(path)} could not be read. It may be damaged, or not the kind of file its name says.`);
+    }
+  };
+  const calendarOf = (id: string): CalendarInfo => {
+    const found = calendars.find((c) => c.id === id && accounts.some((a) => a.id === c.accountId));
+    if (!found) throw appError('not_found', 'That calendar no longer exists.');
+    return found;
+  };
+  const folderFor = (id: string) => {
+    const found = folderOf(id);
+    if (!found) throw appError('not_found', 'That folder no longer exists.');
+    return found;
+  };
+  const accountOrDevice = (accountId: string | null) => {
+    if (accountId !== null && accountId !== '*') account(accountId);
+  };
+  /** Events from an imported file, a day apart from tomorrow. */
+  const addEvents = (calendar: CalendarInfo, titles: string[]) => {
+    const day = Math.floor(now() / 86_400) * 86_400 + 86_400;
+    for (const [i, title] of titles.entries()) {
+      const id = `e${String(seq++)}`;
+      const start = day + i * 86_400 + 9 * 3600;
+      const event: CalendarEvent = {
+        id,
+        calendarId: calendar.id,
+        accountId: calendar.accountId,
+        color: calendar.color,
+        uid: `${id}@import`,
+        recurrenceId: null,
+        title,
+        location: '',
+        notes: '',
+        start,
+        end: start + 3600,
+        allDay: false,
+        repeat: 'none',
+        recurring: false,
+        organizer: null,
+        attendees: [],
+        tentative: false,
+        reminders: [15],
+        showAs: 'busy',
+        private: false,
+        repeatRule: null,
+        isOrganizer: true,
+      };
+      events = [...events, { event, skipped: [] }];
+    }
+    emit('mail://calendar-changed', { calendars: [] });
+  };
+  /** Contacts from an imported file. */
+  const addContacts = (accountId: string | null, people: [string, string][]) => {
+    for (const [name, email] of people) {
+      const id = `c${String(seq++)}`;
+      contacts = [
+        ...contacts,
+        { id, uid: `u${id}`, accountId, name, emails: [email], phones: [], organization: '', title: '', notes: '', favorite: false, categories: [], photo: null, state: accountId ? 'changed' : 'synced' },
+      ];
+    }
+    emit('mail://contacts-changed', {
+      books: options.books ?? accounts.map((a) => ({ accountId: a.id, state: 'synced' as const, message: null })),
+    });
+  };
+  /** Messages uploaded into a folder from imported files. */
+  const addMessages = (folder: Omit<Folder, 'unread' | 'total'>, subjects: string[]) => {
+    const date = now();
+    for (const [i, subject] of subjects.entries()) {
+      const id = `imp${String(seq++)}`;
+      messages = [
+        ...messages,
+        sampleMessage({
+          id,
+          accountId: folder.accountId,
+          folderId: folder.id,
+          subject,
+          from: { name: 'Imported sender', address: 'sender@imported.example' },
+          preview: `${subject}, brought in from a file.`,
+          text: `${subject}, brought in from a file.`,
+          date: date - (i + 1) * 86_400,
+        }),
+      ];
+    }
+    changed(folder.accountId, [folder.id]);
+  };
+  /** The message in an opened .eml file. */
+  const messageFile = (path: string): MockMessage =>
+    sampleMessage({
+      id: `file:${path}`,
+      accountId: '',
+      folderId: '',
+      subject: 'Signed drawings for the Kilimani house',
+      from: { name: 'Amina Hassan', address: 'amina@studio.example' },
+      to: [{ name: null, address: 'you@work.example' }],
+      preview: 'Here are the signed drawings. The client approved the kitchen layout.',
+      text: 'Hi,\n\nHere are the signed drawings. The client approved the kitchen layout.\n\nAmina',
+      date: at('2026-11-10T08:30:00Z'),
+      attachments: [{ index: 0, fileName: 'Drawings-signed.pdf', mimeType: 'application/pdf', size: 240 * 1024, preview: 'pdf' }],
+      messageIdHeader: '<drawings-77@studio.example>',
+    });
+
   /** Do what a rule says to one message. */
   const applyAction = (id: string, action: RuleAction) => {
     const m = messages.find((x) => x.id === id);
@@ -589,6 +760,19 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     emit,
     failNext(method, error) {
       failures.set(method, error);
+    },
+    cancelNextPick: () => {
+      cancelPick = true;
+    },
+    holdFileTasks: () => {
+      let release: () => void = () => undefined;
+      fileGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        fileGate = null;
+        release();
+      };
     },
 
     suggestRecipients: (query) =>
@@ -940,6 +1124,210 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         return draft;
       }),
 
+    importMailFiles: (folderId) => {
+      if (pickCancelled()) return Promise.resolve(null);
+      const subjects = ['Site visit notes, Karen', 'Invoice INV-0098', 'Holiday plans'];
+      return slow(
+        'importMailFiles',
+        [{ phase: 'Reading files', done: 0, total: 0 }, ...counting('Uploading messages', subjects.length)],
+        (): ImportReport => {
+          const folder = folderFor(folderId);
+          addMessages(folder, subjects);
+          return {
+            imported: subjects.length,
+            skipped: 1,
+            problems: ['newsletter.eml was left out: it is not an email message.'],
+            folderId: folder.id,
+          };
+        },
+        () => {
+          folderFor(folderId);
+          needsServer();
+        },
+      );
+    },
+
+    exportMail: (target, format) => {
+      if (pickCancelled()) return Promise.resolve(null);
+      const check = () => {
+        if ('folderId' in target) {
+          folderFor(target.folderId);
+          if (format !== 'mbox') throw appError('invalid', 'A folder is saved as one .mbox file.');
+        } else {
+          if (format !== 'eml') throw appError('invalid', 'Chosen messages are saved as .eml files in a .zip.');
+          if (target.ids.length === 0) throw appError('invalid', 'Choose at least one message.');
+          for (const id of target.ids) stored(id);
+        }
+      };
+      const count = 'folderId' in target ? messages.filter((m) => m.folderId === target.folderId).length : target.ids.length;
+      return slow(
+        'exportMail',
+        [{ phase: 'Saving messages', done: 0, total: count }, ...counting('Saving messages', count)],
+        () =>
+          'folderId' in target
+            ? `/home/you/Documents/${folderFor(target.folderId).name}.mbox`
+            : `/home/you/Documents/Messages (${String(target.ids.length)}).zip`,
+        check,
+      );
+    },
+
+    importCalendarFile: (calendarId) => {
+      if (pickCancelled()) return Promise.resolve(null);
+      const titles = ['Board meeting', 'Site handover, Kilimani'];
+      return slow(
+        'importCalendarFile',
+        [{ phase: 'Reading the calendar file', done: 0, total: 0 }, ...counting('Adding events', titles.length)],
+        (): ImportReport => {
+          const calendar = calendarOf(calendarId);
+          if (!calendar.writable) throw appError('invalid', "Events can't be added to this calendar. Choose another one.");
+          addEvents(calendar, titles);
+          return { imported: titles.length, skipped: 1, problems: ['“Team lunch” is already in this calendar.'] };
+        },
+        () => {
+          calendarOf(calendarId);
+        },
+      );
+    },
+
+    exportCalendar: (calendarId) => {
+      if (pickCancelled()) return Promise.resolve(null);
+      return slow(
+        'exportCalendar',
+        [{ phase: 'Saving events', done: 0, total: 0 }],
+        () => `/home/you/Documents/${calendarOf(calendarId).name}.ics`,
+        () => {
+          calendarOf(calendarId);
+        },
+      );
+    },
+
+    importContactsFile: (accountId) => {
+      if (pickCancelled()) return Promise.resolve(null);
+      const people: [string, string][] = [
+        ['Grace Otieno', 'grace@supplier.example'],
+        ['Daniel Kiptoo', 'daniel@kiptoo.example'],
+      ];
+      return slow(
+        'importContactsFile',
+        [{ phase: 'Reading contacts', done: 0, total: 0 }, ...counting('Adding contacts', people.length)],
+        (): ImportReport => {
+          addContacts(accountId, people);
+          return { imported: people.length, skipped: 0, problems: [] };
+        },
+        () => {
+          if (accountId === '*') throw appError('invalid', 'Choose an account or this device.');
+          accountOrDevice(accountId);
+        },
+      );
+    },
+
+    exportContacts: (accountId) => {
+      if (pickCancelled()) return Promise.resolve(null);
+      return slow(
+        'exportContacts',
+        [{ phase: 'Saving contacts', done: 0, total: 0 }],
+        () => {
+          const who = accountId === '*' ? 'All contacts' : accountId === null ? 'This device' : account(accountId).displayName;
+          return `/home/you/Documents/${who}.vcf`;
+        },
+        () => {
+          accountOrDevice(accountId);
+        },
+      );
+    },
+
+    importPst: (accountId) => {
+      if (pickCancelled()) return Promise.resolve(null);
+      const inbox = ['Quarterly report', 'Re: Kitchen tiles', 'Staff party'];
+      const sent = ['Signed contract'];
+      return slow(
+        'importPst',
+        [
+          { phase: 'Reading the Outlook file', done: 0, total: 0 },
+          ...counting('Uploading Inbox', inbox.length),
+          { phase: 'Uploading Sent Items', done: 1, total: 1 },
+          { phase: 'Adding contacts and calendar', done: 1, total: 1 },
+        ],
+        (): ImportReport => {
+          const acc = account(accountId);
+          const delimiter = folders.find((f) => f.accountId === acc.id)?.delimiter ?? '/';
+          const top = 'Imported from Outlook';
+          const made = (name: string, path: string) => {
+            const id = `${acc.id}:${path}`;
+            const existing = folders.find((f) => f.id === id);
+            if (existing) return existing;
+            const folder = { id, accountId: acc.id, name, path, role: 'other' as const, delimiter, favorite: false };
+            folders = [...folders, folder];
+            return folder;
+          };
+          const parent = made(top, top);
+          addMessages(made('Inbox', `${top}${delimiter}Inbox`), inbox);
+          addMessages(made('Sent Items', `${top}${delimiter}Sent Items`), sent);
+          addContacts(acc.id, [['Peter Njoroge', 'peter@njoroge.example']]);
+          const calendar = calendars.find((c) => c.accountId === acc.id);
+          if (calendar) addEvents(calendar, ['Planning day']);
+          const counts = { messages: inbox.length + sent.length, contacts: 1, events: calendar ? 1 : 0, tasks: 2, notes: 1 };
+          return {
+            imported: counts.messages + counts.contacts + counts.events + counts.tasks + counts.notes,
+            skipped: 1,
+            problems: ['“Scanned drawings” was left out: it is larger than the server accepts (25 MB).'],
+            counts,
+            folderId: parent.id,
+          };
+        },
+        () => {
+          account(accountId);
+          needsServer();
+        },
+      );
+    },
+
+    takeOpenedFiles: () =>
+      run('takeOpenedFiles', () => {
+        const files = openedQueue;
+        openedQueue = [];
+        return files;
+      }),
+
+    readMessageFile: (path) =>
+      run('readMessageFile', () => {
+        readable(path);
+        const found = messageFile(path);
+        openedMessages.set(found.id, found);
+        return found;
+      }),
+
+    importMessageFile: (path, folderId) =>
+      run('importMessageFile', () => {
+        readable(path);
+        const folder = folderFor(folderId);
+        needsServer();
+        messages = [
+          ...messages,
+          { ...messageFile(path), id: `imp${String(seq++)}`, accountId: folder.accountId, folderId: folder.id },
+        ];
+        changed(folder.accountId, [folder.id]);
+      }),
+
+    importOpenedFile: (path, target) =>
+      slow(
+        'importOpenedFile',
+        [{ phase: 'calendarId' in target ? 'Adding events' : 'Adding contacts', done: 0, total: 2 }, ...counting('calendarId' in target ? 'Adding events' : 'Adding contacts', 2)],
+        (): ImportReport => {
+          if ('calendarId' in target) addEvents(calendarOf(target.calendarId), ['Kilimani site meeting', 'Final inspection']);
+          else
+            addContacts(target.accountId, [
+              ['Faith Wambui', 'faith@wambui.example'],
+              ['Otieno Builders', 'office@otieno.example'],
+            ]);
+          return { imported: 2, skipped: 0, problems: [] };
+        },
+        () => {
+          readable(path);
+          if ('calendarId' in target) calendarOf(target.calendarId);
+          else accountOrDevice(target.accountId);
+        },
+      ),
     connectCalendarAndContacts: (accountId) =>
       run('connectCalendarAndContacts', () => {
         const acc = account(accountId);

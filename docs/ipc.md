@@ -291,6 +291,21 @@ manual-action/MDN-sent-manually; displayed`, or `MDN-sent-automatically` with `'
 covers its subdomains; `get_message` then loads remote pictures for mail from it and sets
 `imagesTrusted`. The global `remoteImages: 'allow'` loads them for everyone anyway.
 
+**Files.** `OpenedFile = { kind: 'eml' | 'ics' | 'vcf', path, name }`. Computers register
+`.eml` (`message/rfc822`), `.ics` (`text/calendar`) and `.vcf` (`text/vcard`) with the app
+(`bundle.fileAssociations`): a file opened with it comes as a command-line argument when it
+starts (Windows, Linux), through the single-instance plugin when it runs, or as an open event
+(macOS). On Android the activity takes VIEW intents of those types and SEND/SEND_MULTIPLE of
+calendar and contact files (`text/calendar`, `text/vcard`…; SEND of `message/rfc822` is
+"write an email", not a file, so it is not taken), copies the file into the app cache
+(`shared-files/`, up to 100 MB, kept a day) and hands it to Rust (`FilesPlugin.waitSharedFiles`).
+Only paths handed over that way are accepted by `read_message_file`, `import_message_file` and
+`import_opened_file` (`invalid` otherwise). `ImportReport = { imported, skipped, problems
+(plain words, at most 50, each once), counts?: { messages, contacts, events, tasks, notes }
+(.pst only), folderId?: string | null }`. A message with an `application/ms-tnef` part
+(`winmail.dat`) lists the files inside it as ordinary attachments (preview, open and save work
+on them; indexes as listed); the `winmail.dat` stays listed too when something in it couldn't
+be turned into a file, and its text is the body when the message has no other.
 ## Commands
 
 | Command | Args | Returns |
@@ -401,7 +416,17 @@ covers its subdomains; `get_message` then loads remote pictures for mail from it
 | `check_for_update` | — | `UpdateInfo \| null` (`{ version, notes, how: 'install' \| 'download', page }`); reads `latest.json` on the download site; null for store installs |
 | `install_update` | — | `void`; downloads this install's installer, checks its SHA-256, runs it (the app closes or restarts) |
 | `open_external` | `{ url }` | `void` (http, https, mailto only) |
-
+| `import_mail_files` | `{ folderId }` | `ImportReport \| null` (a picker for `.eml` and `.mbox` files, several at once; null if cancelled. Each message is uploaded to the folder on the server (IMAP APPEND with its read, flagged and answered state from `Status`/`X-Status`/`X-Mozilla-Status` when the file has them, else read, and `INTERNALDATE` from its Date header), then arrives here with the sync (woken at the end). mbox is read as mboxrd/mboxo, a message at a time, so files of any size work; messages over 100 MB, ones marked deleted, and ones whose Message-ID is already in the folder (on the server or here) are skipped. Needs a connection: `connect` while working offline. Progress as `mail://import-progress`) |
+| `import_message_file` | `{ path, folderId }` | `void` (an opened `.eml` file uploaded to the folder as above; `invalid` if its Message-ID is already there) |
+| `export_mail` | `{ target: { folderId } \| { ids }, format: 'mbox' \| 'eml' }` | `string \| null` (save dialog, Android's "Save to" screen on phones; null if cancelled. `mbox`: one mboxrd file (`From ` lines escaped, `Status`/`X-Status` lines for each message's state); `eml`: a `.zip` of `.eml` files named after their subjects. A folder is every message on the server (bodies not on this device are fetched), oldest first; working offline, the messages here, refused with `connect` if some bodies are missing. `ids` (up to 1000) download bodies as needed) |
+| `import_calendar_file` | `{ calendarId }` | `ImportReport \| null` (an `.ics` file; each event, with its changed occurrences and the `VTIMEZONE`s it uses, becomes one resource saved on the calendar's server (CalDAV PUT), then here; events whose `UID` the calendar has are skipped; a time zone named but not defined in the file is made from its name; to-dos and journal entries are counted as skipped. Needs a connection; refused with `invalid` for a read-only calendar) |
+| `export_calendar` | `{ calendarId }` | `string \| null` (`<calendar name>.ics`: one `VCALENDAR` with every stored event as the server has it and each `VTIMEZONE` once) |
+| `import_contacts_file` | `{ accountId: string \| null }` | `ImportReport \| null` (a `.vcf` file of any number of cards, vCard 2.1, 3.0 or 4.0: quoted-printable values, `CHARSET=` (Windows, ISO-8859, KOI8, Shift_JIS, GBK, Big5, EUC-KR…), base64 photos and UTF-16 files are read. Each card keeps all its fields; a card whose `UID`, or name and first address, is in that address book already is skipped. null: this device; an account's are sent to its server on the next contacts sync) |
+| `export_contacts` | `{ accountId: string \| null }` | `string \| null` (`Contacts.vcf`, vCard 3.0, every field kept: an account's, this device's (null), or everyone's (`'*'`)) |
+| `import_pst` | `{ accountId }` | `ImportReport \| null` (an Outlook `.pst` file (ANSI or Unicode; one with a password is refused with `invalid`, saying how to remove it). Mail goes into a new folder tree `Imported from Outlook/<the file's folders>` on the account (IMAP CREATE, then APPEND with read/flagged/answered state and arrival time; the headers it was received with when Outlook kept them, else headers from its properties; HTML body, or the HTML or text of its rich text; attachments, attached messages as `message/rfc822`), duplicates by Message-ID skipped; contacts to the account's address book when it has one on its server, else this device's; calendar items (with repeats, exceptions and reminders) to the account's first calendar, or skipped when it has none; tasks, notes and journal entries are skipped ("Tasks and notes come in a later update"). `counts` says how many of each came in, `folderId` is the new top folder. Needs a connection; progress as `mail://import-progress`) |
+| `take_opened_files` | | `OpenedFile[]` (files the app was started with, or that were shared to it before the page asked, once; after the first call each new one comes as `mail://open-file`) |
+| `read_message_file` | `{ path }` | `MessageDetail` (an opened `.eml` file, for showing; in no folder (`accountId`, `folderId` empty), id `file:<hash>`, which `preview_attachment`, `open_attachment`, `save_attachment`, `save_message` and `message_source` take as `messageId`; remote pictures blocked unless the sender is trusted; no invitation card) |
+| `import_opened_file` | `{ path, target: { calendarId } \| { accountId: string \| null } }` | `ImportReport` (an opened `.ics` file into a calendar, or `.vcf` file into an address book, as `import_calendar_file` / `import_contacts_file`) |
 ## Events
 
 | Event | Payload |
@@ -416,3 +441,5 @@ covers its subdomains; `get_message` then loads remote pictures for mail from it
 | `mail://reminders` | `{ reminders: DueReminder[] }` (the whole due list, whenever it changes: a reminder came due, was dismissed or snoozed, or tasks changed) |
 | `mail://tasks-changed` | `{}` (tasks changed: a sync, or a change here; refetch task lists and tasks) |
 | `mail://rules-changed` | `{ rules: Rule[] }` (a background write of rules to a mail server finished or gave up, and some `serverStatus`/`serverNote` changed; the full list, in order) |
+| `mail://import-progress` | `ImportProgress` (`{ phase, done, total }`: a long import or export moved on, a few times a second at most; `total` 0 while unknown, as for an mbox file, whose phase then counts the messages) |
+| `mail://open-file` | `{ file: OpenedFile }` (a file opened with the app while it runs, after the page called `take_opened_files`) |

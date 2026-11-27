@@ -5982,3 +5982,122 @@ button.contact-row:hover,
     min-height: 44px;
   }
 }
+
+/* Import and export (0.9.0): progress, the summary, Settings and opened files. */
+.file-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.file-progress__bar {
+  width: 100%;
+  height: 8px;
+  border: 0;
+  border-radius: 4px;
+  overflow: hidden;
+  appearance: none;
+  background: var(--info-border);
+  accent-color: var(--info-bar);
+}
+
+.file-progress__bar::-webkit-progress-bar { background: var(--info-border); }
+.file-progress__bar::-webkit-progress-value { background: var(--info-bar); }
+.file-progress__bar::-moz-progress-bar { background: var(--info-bar); }
+
+.file-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.file-summary__line {
+  font-weight: 600;
+}
+
+.file-summary__counts {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.file-summary__counts li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.file-summary__problems summary {
+  cursor: pointer;
+  color: var(--text-2);
+}
+
+.file-summary__problems ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.files-section__head {
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.files-section__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.file-message {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.file-message__people {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-message__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.file-message__frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.file-message__text {
+  white-space: pre-wrap;
+}
+
+@media (max-width: 640px) {
+  .files-section__row .btn,
+  .file-message__actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .file-message__frame {
+    min-height: 240px;
+  }
+}

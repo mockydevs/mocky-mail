@@ -283,8 +283,19 @@ pub async fn sync_contacts(
     Ok(sync_all(&app, &state).await)
 }
 
+/// Whether an account's contacts have an address book on its server (as
+/// found by the last sync).
+pub(crate) fn has_address_book(state: &AppState, account_id: &str) -> bool {
+    state
+        .store
+        .get_setting(&book_key(account_id))
+        .ok()
+        .flatten()
+        .is_some_and(|saved| Url::parse(&saved).is_ok())
+}
+
 /// Sync shortly, after a change made here.
-fn soon(app: &AppHandle, state: &Arc<AppState>) {
+pub(crate) fn soon(app: &AppHandle, state: &Arc<AppState>) {
     let (app, state) = (app.clone(), Arc::clone(state));
     tauri::async_runtime::spawn(async move {
         sync_all(&app, &state).await;

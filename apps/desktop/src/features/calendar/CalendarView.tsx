@@ -1,11 +1,14 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
 import type { Account, AppError, CalendarEvent, CalendarInfo, CalendarStatus, EventInput } from '../../api/types';
 import { Icon } from '../../ui/Icon';
+import { MenuButton, MenuGroup, MenuItem } from '../../ui/Menu';
 import { Modal } from '../../ui/Modal';
 import { ConnectCards } from '../connect/ConnectCard';
+import { useFileTasks } from '../files/FileTasks';
+import { exportCalendarTask, importCalendarTask } from '../files/tasks';
 import { CalendarList, MiniMonth } from './CalendarSide';
 import {
   addDays,
@@ -91,6 +94,7 @@ const typing = (target: EventTarget) =>
  */
 export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminder, today, focus }: Props) {
   const api = useMailApi();
+  const files = useFileTasks();
   const id = useId();
   const [clock, setClock] = useState(() => today ?? new Date());
   const now = today ?? clock;
@@ -229,6 +233,11 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
   const calendarName = (calendarId: string) => calendarOf(calendarId)?.name ?? 'Calendar';
   const writable = known.filter((c) => c.writable);
   const defaultCalendar = writable.find((c) => c.visible) ?? writable[0];
+  /** A calendar's name, with its account's address when that tells two apart. */
+  const calendarTitle = (c: CalendarInfo) => {
+    const email = accounts.find((a) => a.id === c.accountId)?.email;
+    return email ? `${c.name} (${email})` : c.name;
+  };
   const ownEmails = accounts.map((a) => a.email);
 
   // Once the reminder's event is loaded, open it.
@@ -649,6 +658,46 @@ export function CalendarView({ accounts, phone, onClose, onWrite, defaultReminde
         >
           <Icon name="sync" />
         </button>
+        {known.length > 0 && (
+          <MenuButton label="Import and export calendars" icon="more" title="Import and export">
+            {known.map((c) => {
+              // Events can only be imported into a calendar the account can change.
+              const items = (
+                <>
+                  {c.writable && (
+                    <MenuItem
+                      icon="upload"
+                      onSelect={() => {
+                        files.run(
+                          importCalendarTask(api, c, () => {
+                            setRevision((r) => r + 1);
+                          }),
+                        );
+                      }}
+                    >
+                      Import .ics…
+                    </MenuItem>
+                  )}
+                  <MenuItem
+                    icon="download"
+                    onSelect={() => {
+                      files.run(exportCalendarTask(api, c));
+                    }}
+                  >
+                    Export calendar…
+                  </MenuItem>
+                </>
+              );
+              return known.length > 1 ? (
+                <MenuGroup key={c.id} label={calendarTitle(c)}>
+                  {items}
+                </MenuGroup>
+              ) : (
+                <Fragment key={c.id}>{items}</Fragment>
+              );
+            })}
+          </MenuButton>
+        )}
         <button
           type="button"
           className="btn btn--primary calendar__new"

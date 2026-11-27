@@ -225,3 +225,97 @@ async fn gmail_labels_are_read_and_written() {
         ]
     );
 }
+
+/// A server that takes APPEND (its literal) and lists Message-IDs by
+/// ENVELOPE: what an import of mail files sends.
+async fn start_appending() -> (u16, Log, Arc<Mutex<Vec<Vec<u8>>>>) {
+    use tokio::io::AsyncReadExt;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let log: Log = Arc::default();
+    let stored: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+    let (seen, kept) = (Arc::clone(&log), Arc::clone(&stored));
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        write.write_all(b"* OK fake IMAP ready\r\n").await.unwrap();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break;
+            }
+            let line = line.trim_end().to_owned();
+            let (tag, command) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+            seen.lock().unwrap().push(command.to_owned());
+            let upper = command.to_ascii_uppercase();
+            let mut reply = String::new();
+            if upper.starts_with("APPEND") {
+                let size: usize = command
+                    .rsplit_once('{')
+                    .and_then(|(_, n)| n.trim_end_matches('}').parse().ok())
+                    .unwrap();
+                write.write_all(b"+ go ahead\r\n").await.unwrap();
+                let mut literal = vec![0u8; size.saturating_add(2)];
+                reader.read_exact(&mut literal).await.unwrap();
+                literal.truncate(size);
+                kept.lock().unwrap().push(literal);
+            } else if upper.starts_with("CAPABILITY") {
+                reply.push_str("* CAPABILITY IMAP4rev1 UIDPLUS\r\n");
+            } else if upper.starts_with("SELECT") {
+                reply.push_str("* FLAGS (\\Seen)\r\n* 2 EXISTS\r\n* OK [UIDVALIDITY 7] UIDs\r\n* OK [UIDNEXT 9] next\r\n");
+            } else if upper.starts_with("UID FETCH") {
+                reply.push_str("* 1 FETCH (UID 5 ENVELOPE (\"Wed, 4 Nov 2026 09:30:00 +0000\" \"a\" NIL NIL NIL NIL NIL NIL NIL \"<Old-1@Shop.example>\"))\r\n* 2 FETCH (UID 8 ENVELOPE (NIL \"b\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n");
+            } else if upper.starts_with("LOGOUT") {
+                reply.push_str("* BYE\r\n");
+            }
+            reply.push_str(&format!("{tag} OK done\r\n"));
+            if write.write_all(reply.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+    (port, log, stored)
+}
+
+#[tokio::test]
+async fn messages_from_files_are_appended_with_their_date_and_flags() {
+    let (port, log, stored) = start_appending().await;
+    let mut conn = connect(port).await;
+    let ids = conn.message_ids("Archive").await.unwrap();
+    assert_eq!(ids.len(), 1);
+    assert!(ids.contains("old-1@shop.example"));
+    let raw = b"Subject: From a file\r\nMessage-ID: <new-1@shop.example>\r\n\r\nHello\r\n";
+    conn.append_dated(
+        "Archive",
+        raw,
+        "(\\Seen)",
+        Some("\"13-Nov-2026 06:42:00 +0000\""),
+    )
+    .await
+    .unwrap();
+    conn.append_dated("Archive", b"Subject: b\r\n\r\nx\r\n", "()", None)
+        .await
+        .unwrap();
+    // A date that would end the command line never reaches the server.
+    assert!(
+        conn.append_dated("Archive", raw, "()", Some("\"x\"\r\nA1 LOGOUT"))
+            .await
+            .is_err()
+    );
+    conn.logout().await;
+    assert_eq!(
+        sent(&log, "APPEND"),
+        [
+            format!(
+                "APPEND \"Archive\" (\\Seen) \"13-Nov-2026 06:42:00 +0000\" {{{}}}",
+                raw.len()
+            ),
+            "APPEND \"Archive\" () {17}".to_owned(),
+        ]
+    );
+    assert_eq!(sent(&log, "UID FETCH"), ["UID FETCH 1:* (UID ENVELOPE)"]);
+    let stored = stored.lock().unwrap();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[0], raw.to_vec());
+}
