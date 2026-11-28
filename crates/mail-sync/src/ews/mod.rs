@@ -37,6 +37,8 @@ use crate::SyncError;
 
 /// How long one request may take.
 const TIMEOUT: Duration = Duration::from_secs(90);
+/// How long making a connection may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Largest answer read, bytes.
 const MAX_REPLY_BYTES: usize = 160 * 1024 * 1024;
 /// Items per `GetItem` for list entries, and for MIME content.
@@ -109,6 +111,8 @@ impl Transport {
     fn new(login: EwsLogin) -> Result<Self, SyncError> {
         let http = Client::builder()
             .timeout(TIMEOUT)
+            // Autodiscover asks hosts that often don't exist: don't wait long.
+            .connect_timeout(CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("Mocky Mail")
             // An NTLM sign-in lives on its connection: keep just one.
