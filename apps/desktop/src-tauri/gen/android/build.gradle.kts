@@ -13,10 +13,13 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        // Kotlin half of rustls-platform-verifier (Android certificate checks),
-        // published by the rustls project. Only that group is taken from here.
+        // Kotlin half of rustls-platform-verifier (Android certificate checks).
+        // A copy is kept in maven/ (from the rustls project's maven-archive branch,
+        // checked against its published SHA-1), so builds don't depend on
+        // GitHub's raw file server, which times out now and then. Update it
+        // together with rustls-platform-verifier-android in Cargo.lock.
         maven {
-            url = uri("https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/")
+            url = uri(rootProject.file("maven"))
             content { includeGroup("org.rustls") }
         }
     }
