@@ -40,8 +40,11 @@ built() {
 }
 
 if [ "$target" = "universal-apple-darwin" ]; then
+    # Tauri builds a universal app one processor at a time, and each of those
+    # builds wants its own sidecar; the joined one goes into the final bundle.
     for arch in aarch64-apple-darwin x86_64-apple-darwin; do
         build "$arch"
+        cp "$(built "$arch")" "$out/mocky-mail-$arch"
     done
     lipo -create -output "$out/mocky-mail-universal-apple-darwin" \
         "$(built aarch64-apple-darwin)" "$(built x86_64-apple-darwin)"
