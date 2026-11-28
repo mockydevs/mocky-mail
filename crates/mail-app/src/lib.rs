@@ -19,6 +19,7 @@
 
 pub mod accounts;
 pub mod attachments;
+pub mod automation;
 pub mod calendar;
 pub mod compose;
 pub mod connections;
@@ -91,7 +92,8 @@ pub fn open(
 }
 
 /// Start the background work: one sync engine per account, contacts,
-/// calendars, reminders, rules kept on mail servers, and the outbox.
+/// calendars, reminders, rules kept on mail servers, the outbox, and the
+/// automation channel when it is turned on.
 ///
 /// # Errors
 /// When the accounts can't be read.
@@ -104,5 +106,7 @@ pub fn start(ctx: &Ctx) -> Result<(), mail_store::StoreError> {
     reminders::start(ctx.clone(), Arc::clone(&ctx.state));
     server_rules::start(ctx);
     ctx.spawn(outbox::run(ctx.clone(), Arc::clone(&ctx.state)));
+    // Settings › Automation: the command line and MCP server (computers).
+    automation::apply(ctx);
     Ok(())
 }

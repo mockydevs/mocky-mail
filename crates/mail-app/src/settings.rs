@@ -61,6 +61,10 @@ pub struct Settings {
     pub sign_by_default: bool,
     /// Encrypt a new message when every recipient's key is known.
     pub encrypt_when_possible: bool,
+    /// Scripts and AI tools on this computer (the `mocky-mail` command
+    /// line and its MCP server): "off", "read" (look only) or "full" (also
+    /// send, move, delete and change things). See [`crate::automation`].
+    pub automation: String,
     /// Read only: what this device offers, for the Settings screen.
     pub device: Device,
 }
@@ -109,6 +113,7 @@ impl Default for Settings {
             read_receipts: "ask".into(),
             sign_by_default: false,
             encrypt_when_possible: false,
+            automation: "off".into(),
             device: Device::default(),
         }
     }
@@ -142,6 +147,9 @@ impl Settings {
         }
         if !matches!(self.read_receipts.as_str(), "ask" | "always" | "never") {
             self.read_receipts = "ask".into();
+        }
+        if !matches!(self.automation.as_str(), "off" | "read" | "full") {
+            self.automation = "off".into();
         }
         self
     }
@@ -200,6 +208,7 @@ pub fn set_settings(ctx: &Ctx, settings: Settings) -> AppResult<Settings> {
         ctx.host.set_start_at_login(settings.start_at_login)?;
     }
     let was_offline = working_offline(state);
+    let automation_before = load(state).map(|s| s.automation).unwrap_or_default();
     let json = serde_json::to_string(&settings)
         .map_err(|e| crate::error::AppError::internal(e.to_string()))?;
     state.store.set_setting(KEY, &json)?;
@@ -208,6 +217,10 @@ pub fn set_settings(ctx: &Ctx, settings: Settings) -> AppResult<Settings> {
         // waited, and the outbox sends.
         state.wake_sync(None);
         state.outbox_wake.notify_one();
+    }
+    if automation_before != settings.automation {
+        // Starts, stops or changes the channel; connections made before stop.
+        crate::automation::apply(ctx);
     }
     Ok(as_shown(ctx, settings))
 }
@@ -238,9 +251,11 @@ mod tests {
             read_receipts: "sometimes".into(),
             sign_by_default: true,
             encrypt_when_possible: true,
+            automation: "everything".into(),
             device: Device::default(),
         }
         .normalized();
+        assert_eq!(s.automation, "off");
         assert!(s.sign_by_default && s.encrypt_when_possible);
         assert_eq!(s.reading_pane, "right");
         assert_eq!(s.read_receipts, "ask");
@@ -287,5 +302,8 @@ mod tests {
         assert!(!s.sign_by_default && !s.encrypt_when_possible);
         assert_eq!(json["signByDefault"], false);
         assert_eq!(json["encryptWhenPossible"], false);
+        // Automation stays off until turned on.
+        assert_eq!(s.automation, "off");
+        assert_eq!(json["automation"], "off");
     }
 }

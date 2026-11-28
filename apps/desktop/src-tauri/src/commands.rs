@@ -76,6 +76,22 @@ pub fn remove_account(ctx: State<'_, Ctx>, id: String) -> AppResult<()> {
     mail_app::accounts::remove_account(&ctx, id)
 }
 
+// ---------------------------------------------------------------- automation
+
+/// `get_automation_info`: how the command line and MCP server reach the app.
+#[tauri::command]
+pub fn get_automation_info(ctx: State<'_, Ctx>) -> AppResult<mail_app::automation::AutomationInfo> {
+    mail_app::automation::get_automation_info(&ctx)
+}
+
+/// `reset_automation_token`: a new secret; the old one stops working.
+#[tauri::command]
+pub fn reset_automation_token(
+    ctx: State<'_, Ctx>,
+) -> AppResult<mail_app::automation::AutomationInfo> {
+    mail_app::automation::reset_automation_token(&ctx)
+}
+
 // ---------------------------------------------------------------- attachments
 
 /// `preview_attachment`: the attachment's bytes, for the in-app preview.

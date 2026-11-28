@@ -24,7 +24,7 @@ serde_json = "1.0.154"
 base64 = "0.23.1"
 ring = "0.17.14"
 sha2 = "0.10"
-tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs", "process", "rt"] }
+tokio = { version = "1.54.1", features = ["sync", "time", "macros", "fs", "process", "rt", "net", "io-util"] }
 # Messages exported as .eml files in one .zip (MIT), deflate only; flate2's
 # own Rust backend (miniz_oxide) does the compressing.
 zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2"] }
