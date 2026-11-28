@@ -12,17 +12,25 @@ through its `Host` trait. `mail_app::registry::dispatch(ctx, name, args)`
 runs the same commands with the same names and camelCase arguments (a JSON
 object) for programs other than the interface, and
 `mail_app::registry::commands()` lists them, each with a one-line
-description and whether it changes anything.
+description, whether it changes anything, whether a program outside the app
+may run it (`remote`; see "Automation" below), and its arguments (name,
+whether it is required, and a JSON schema, also as one `inputSchema` per
+command).
 
 ```ts
 type AppError = {
   kind: "auth" | "connect" | "tls" | "config" | "not_found" | "invalid" | "too_large" | "storage" | "keyring" | "internal";
   message: string; // safe to show the user; never contains passwords or tokens
+  adminConsentUrl?: string; // Microsoft 365 sign-in refused because only an administrator may approve new apps
+                            // (AADSTS65001, AADSTS90094, AADSTS90095, consent_required): kind "auth", and the page
+                            // https://login.microsoftonline.com/<tenant or "organizations">/adminconsent?client_id=<app>
+                            // an administrator opens to approve Mocky Mail for the organisation. No user data in it;
+                            // absent when the build has no Microsoft registration.
 };
 
 type Security = "tls" | "starttls";
 type ServerConfig = { host: string; port: number; security: Security };
-type AuthKind = "password" | "google" | "microsoft";
+type AuthKind = "password" | "google" | "microsoft" | "exchange";
 
 type Account = {
   id: string; email: string; displayName: string; auth: AuthKind; createdAt: number;
@@ -31,6 +39,7 @@ type Account = {
   sortOrder: number;        // place in the sidebar from 0; list_accounts is sorted by it. Until the user
                             // reorders, oldest first; accounts added after a reorder go last
   syncMonths: number | null; // months of mail kept in full (bodies downloaded); null: current behaviour
+  protocol: "imap" | "ews"; // ews: an Exchange Server account (auth "exchange"); imap/smtp hold the EWS host, port 443
 };
 
 type FolderRole = "inbox" | "sent" | "drafts" | "archive" | "junk" | "trash" | "all" | "flagged" | "other";
@@ -182,7 +191,19 @@ type Settings = { theme: "system" | "light" | "dark"; remoteImages: "block" | "a
   readReceipts: "ask" | "always" | "never"; // default ask; see "Read receipts" below
   signByDefault: boolean;                   // default false; see "Security"
   encryptWhenPossible: boolean;             // default false; see "Security"
+  automation: "off" | "read" | "full";      // default off; see "Automation" below
   /* …and the others in Settings (types.ts) */ };
+type ExchangeAccountInput = { email: string; displayName: string;
+  username: string;      // DOMAIN\user or user@domain; "" signs in with the address
+  password: string;
+  ewsUrl: string | null; // https://…/EWS/Exchange.asmx (a server name is enough); null: Autodiscover
+};
+type AutomationInfo = { mode: "off" | "read" | "full";
+  endpoint: string | null;  // \\.\pipe\mocky-mail-<user> on Windows, <data dir>/automation.sock elsewhere; null when off or on phones
+  tokenFile: string | null; // <data dir>/automation-token (user-only); null when off
+  cliPath: string | null;   // the mocky-mail program installed next to the app, if found
+  mcpConfig: string | null; // {"mcpServers":{"mocky-mail":{"command":"<cliPath or mocky-mail>","args":["mcp"]}}}; null on phones
+};
 type SyncStatus = { accountId: string; state: "syncing" | "idle" | "offline" | "error"; lastSyncedAt: number | null; message: string | null };
 ```
 
@@ -420,6 +441,7 @@ be turned into a file, and its text is the body when the message has no other.
 |---|---|---|
 | `suggest_servers` | `{ email }` | `{ imap: ServerConfig; smtp: ServerConfig; auth: AuthKind } \| null` |
 | `add_account` | `{ input: { email, displayName, password, imap, smtp } }` | `Account` (logs in to IMAP and SMTP first; nothing saved on failure) |
+| `add_exchange_account` | `{ input: ExchangeAccountInput }` | `Account` (an organisation's own Exchange Server over Exchange Web Services. Without `ewsUrl`, Autodiscover finds it (see "Exchange Server"); then a sign-in (NTLMv2, or Basic where that is all the server offers) and a read of the Inbox must work, or nothing is saved: `auth` for a refused sign-in, `config` when no server was found. The password goes to the keyring like any password account's. `auth: "exchange"`, `protocol: "ews"`) |
 | `add_oauth_account` | `{ input: { email, displayName, provider: "google" \| "microsoft" } }` | `Account` (opens the system browser at the provider's account chooser; `email` may be `""`, and the account picked there is used; may reject `config` until OAuth is configured) |
 | `update_account` | `{ id, patch: { displayName?, password?, syncMonths?: number \| null } }` | `Account` (`syncMonths` 1–240, or null for the default; with a window, headers are synced for the newest 1000 messages per folder plus every message inside it (IMAP `SEARCH SINCE`) and bodies under 2 MB inside it are downloaded, 500 per folder per pass; changing it wakes that account's sync; bodies already downloaded stay) |
 | `reorder_accounts` | `{ ids }` | `void` (every account id exactly once, in the new sidebar order, else `invalid`; local only; emits `mail://accounts-changed`) |
@@ -541,9 +563,80 @@ be turned into a file, and its text is the body when the message has no other.
 | `import_contacts_file` | `{ accountId: string \| null }` | `ImportReport \| null` (a `.vcf` file of any number of cards, vCard 2.1, 3.0 or 4.0: quoted-printable values, `CHARSET=` (Windows, ISO-8859, KOI8, Shift_JIS, GBK, Big5, EUC-KR…), base64 photos and UTF-16 files are read. Each card keeps all its fields; a card whose `UID`, or name and first address, is in that address book already is skipped. null: this device; an account's are sent to its server on the next contacts sync) |
 | `export_contacts` | `{ accountId: string \| null }` | `string \| null` (`Contacts.vcf`, vCard 3.0, every field kept: an account's, this device's (null), or everyone's (`'*'`)) |
 | `import_pst` | `{ accountId }` | `ImportReport \| null` (an Outlook `.pst` file (ANSI or Unicode; one with a password is refused with `invalid`, saying how to remove it). Mail goes into a new folder tree `Imported from Outlook/<the file's folders>` on the account (IMAP CREATE, then APPEND with read/flagged/answered state and arrival time; the headers it was received with when Outlook kept them, else headers from its properties; HTML body, or the HTML or text of its rich text; attachments, attached messages as `message/rfc822`), duplicates by Message-ID skipped; contacts to the account's address book when it has one on its server, else this device's; calendar items (with repeats, exceptions and reminders) to the account's first calendar, or skipped when it has none; tasks, notes and journal entries are skipped ("Tasks and notes come in a later update"). `counts` says how many of each came in, `folderId` is the new top folder. Needs a connection; progress as `mail://import-progress`) |
+| `get_automation_info` | | `AutomationInfo` (computers; see "Automation") |
+| `reset_automation_token` | | `AutomationInfo` (a new secret in the token file; programs holding the old one are refused and connections made with it are closed. The app's own window only) |
 | `take_opened_files` | | `OpenedFile[]` (files the app was started with, or that were shared to it before the page asked, once; after the first call each new one comes as `mail://open-file`) |
 | `read_message_file` | `{ path }` | `MessageDetail` (an opened `.eml` file, for showing; in no folder (`accountId`, `folderId` empty), id `file:<hash>`, which `preview_attachment`, `open_attachment`, `save_attachment`, `save_message` and `message_source` take as `messageId`; remote pictures blocked unless the sender is trusted; no invitation card; a signed or encrypted file is checked and decrypted as received mail is, but the keys it carries are not kept) |
 | `import_opened_file` | `{ path, target: { calendarId } \| { accountId: string \| null } }` | `ImportReport` (an opened `.ics` file into a calendar, or `.vcf` file into an address book, as `import_calendar_file` / `import_contacts_file`) |
+
+## Exchange Server
+
+`add_exchange_account` adds an account on an organisation's own Exchange Server
+(2010 SP2 and later; requests ask for the `Exchange2010_SP2` schema). Everything goes over
+Exchange Web Services (SOAP over HTTPS; never plain HTTP):
+
+- **Sign-in**: NTLMv2 (MS-NLMP; no NTLMv1, no LM hash, no machine name sent; channel
+  binding sent as zeros, so a server that *requires* Extended Protection refuses it) on one
+  kept connection, or Basic when the server offers only that. Kerberos-only and OAuth-only
+  servers (Exchange Online) are refused with `config`.
+- **Autodiscover** (when `ewsUrl` is null): POX `autodiscover.xml` at `https://<domain>/`, then
+  `https://autodiscover.<domain>/`, then the HTTP redirect method (`http://autodiscover.<domain>/…`,
+  asked without the password; only an `https` target is followed), then the
+  `_autodiscover._tcp.<domain>` SRV record. `redirectAddr` starts again for the new address and
+  `redirectUrl` asks that server (`https` only), at most 10 steps and never the same one twice.
+- **Mail** is stored as for IMAP: each message gets a UID here beside its Exchange id, list
+  entries come from the received header block (`PR_TRANSPORT_MESSAGE_HEADERS`) or one written
+  from its properties, bodies are the MIME content (`GetItem` `IncludeMimeContent`), so search,
+  rules, S/MIME and OpenPGP, attachments and read receipts work unchanged. Folders come from
+  `SyncFolderHierarchy` (mail folders only; roles from the well-known folders; `path` is the
+  names from the top joined with `/`, `delimiter` `/`), messages from `SyncFolderItems` (the first
+  sync keeps the newest 1000 per folder, or every one inside `syncMonths` up to 20000).
+  Read, flagged (`PR_FLAG_STATUS`), categories, moves, copies and deletes made here are queued
+  and replayed with `UpdateItem`, `MoveItem`, `CopyItem` and `DeleteItem` (`HardDelete` for
+  `delete_forever`). Sending hands the whole MIME message to `CreateItem` (`SendAndSaveCopy`, Bcc
+  added as `BccRecipients`); Exchange files the Sent copy. Drafts are `CreateItem` `SaveOnly`
+  into Drafts (marked unsent). Imports (`.eml`, `.mbox`, `.pst`) save MIME into the folder.
+  There are no push notifications: the server is asked every `checkEveryMins`, at once for a
+  change made here, and every folder every 10 minutes.
+- **Calendar**: every calendar folder, read with `SyncFolderItems` and `GetItem` as iCalendar.
+  `save_event` and `delete_event` use `CreateItem`/`UpdateItem`/`DeleteItem` with EWS fields
+  (subject, notes, times, all day, show as, private, location, reminder, required attendees,
+  repeat rules) and `SendMeetingInvitations`/`SendMeetingCancellations` as `notifyAttendees` /
+  `notify` say. Changing or deleting one date of a series is refused (`invalid`) for now;
+  answering invitations sends the reply mail, but the calendar copy is left to Exchange.
+  `get_free_busy` asks `GetUserAvailability`.
+- **Contacts**: the Contacts folder, name, three addresses, three phone numbers (mobile,
+  business, home), company, job title, notes and categories, both ways.
+- **Automatic replies**: `GetUserOofSettings`/`SetUserOofSettings`, with `externalMessage` and
+  `externalAudience` (none, contacts = Known, all). Exchange has no subject or days setting.
+- **Not synced**: tasks (the device's own list stays), rules on the server (rules run here).
+
+## Automation
+
+On computers, `Settings.automation` lets scripts and AI tools on the same computer use the
+app through the `mocky-mail` command line and its MCP server (`docs/automation.md`).
+`off` (the default) listens nowhere. `read` and `full` open a local channel, changed or
+closed whenever the setting changes:
+
+- **Endpoint**: on Windows the named pipe `\\.\pipe\mocky-mail-<user>` (remote clients refused;
+  made only if no other program holds the name), elsewhere the Unix socket
+  `<data dir>/automation.sock` (mode 0600). Nothing listens on the network. Phones never listen.
+- **Secret**: `<data dir>/automation-token`, 32 random bytes as hex, made when automation is
+  first turned on (mode 0600 on Unix; on Windows the user's own data folder).
+  `reset_automation_token` replaces it.
+- **Protocol**: one JSON object per line each way. A request is
+  `{"id": any, "token": "…", "command": "name", "args": {…}}`; the answer is `{"id": …, "ok": value}`
+  or `{"id": …, "error": {"kind", "message"}}` (an `AppError`). Every request carries the
+  secret (wrong or missing: `auth`). `{"command": "__commands"}` lists the commands the mode
+  allows (`name`, `description`, `writes`, `args`, `inputSchema`); `{"command": "__subscribe"}`
+  answers `{"ok": {"subscribed": true}}` and then streams every `mail://` event on that
+  connection as `{"event": name, "payload": …}` lines (between answers). A connection made before
+  the mode or secret changed is answered `auth` and closed.
+- **Modes**: `read` runs only commands with `writes: false`; `full` runs every command with
+  `remote: true`. Never remotely: pickers and save dialogs, windows, browser sign-in
+  (`add_oauth_account`, `reconnect_account`, `connect_calendar_and_contacts`), opening links and
+  files, printing, installing updates, what the app was started with, files by path, and
+  `reset_automation_token`. `set_settings` from a program keeps `automation` as it is.
 
 ## Events
 

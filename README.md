@@ -4,7 +4,7 @@ A fast, private email app for **Windows, Linux and Android** (macOS coming
 soon), by [Mocky Digital](https://mocky.co.ke). Free and open source under the
 GPL-3.0.
 
-> Status: version 0.10, in testing. It syncs and sends real mail over IMAP
+> Status: version 0.11, in testing. It syncs and sends real mail over IMAP
 > and SMTP, with password sign-in for any provider and browser sign-in for
 > Gmail and Microsoft 365/Outlook.
 
@@ -26,6 +26,15 @@ GPL-3.0.
 - Several accounts side by side, each with its full folder tree.
 - Gmail and Microsoft 365/Outlook sign-in through your browser, or a
   password for any IMAP/SMTP provider (server settings are suggested).
+  When a Microsoft 365 organisation lets only its administrator approve new
+  apps, Mocky Mail says so and gives the approval link to send them.
+- Your organisation's own Exchange Server (2010 SP2 and later) over Exchange
+  Web Services: mail, calendar, contacts, automatic replies and free/busy,
+  with Autodiscover to find the server.
+- Scripts and AI tools on your computer can use Mocky Mail through the
+  `mocky-mail` command line and its MCP server (for Claude Desktop and other
+  MCP clients), read only or with full access, when you turn on Settings ›
+  Automation. See [docs/automation.md](docs/automation.md).
 - On Android, pick a Google account already on the phone; no typing.
 - Fast search across all your mail, even offline.
 - Undo send (5 seconds by default, adjustable) and Undo after archive or
@@ -83,11 +92,13 @@ crates/mail-core/        Pure mail rules: parsing, HTML cleaning, outbox, size l
                          No network, disk or clock, so every rule is unit tested.
 crates/mail-store/       Local SQLite database: accounts, folders, messages, search,
                          the outbox and offline changes waiting for the server.
-crates/mail-sync/        IMAP and SMTP connections, and the system keyring.
+crates/mail-sync/        IMAP and SMTP connections, Exchange Web Services, and the system keyring.
 crates/mail-auth/        Browser sign-in (OAuth with PKCE) for Gmail and Microsoft.
 crates/mail-app/         The application: shared state, the sync, outbox, reminder,
                          calendar, contacts, tasks and rules workers, and every
                          command in docs/ipc.md as a plain function. No Tauri.
+apps/cli/                The mocky-mail command line and MCP server: talks to the running
+                         app over its local automation channel (docs/automation.md).
 apps/desktop/            React + TypeScript interface (Vite).
 apps/desktop/src-tauri/  Tauri shell: windows, tray, Android plugins, the Host
                          for mail-app, and thin #[tauri::command] wrappers.
@@ -125,8 +136,14 @@ Android's own Google sign-in. The desktop app implements it as
 `TauriHost` (`apps/desktop/src-tauri/src/host.rs`); anything a host can't
 do answers `invalid` ("… is not available here"). `mail_app::registry`
 runs any command by name with JSON arguments (`dispatch`) and lists them
-with whether each one changes anything (`commands`), for tools that drive
-the app without its interface.
+with whether each one changes anything, whether programs outside the app
+may run it, and their arguments with JSON schemas (`commands`), for tools
+that drive the app without its interface; `mail_app::automation` serves
+them to the command line over a local channel.
+
+The installers bundle the command line as a Tauri sidecar: build it first
+with `scripts/build-cli.sh`, then pass `--config src-tauri/tauri.cli.conf.json`
+to `tauri build` (the release and CI workflows do both).
 
 Before opening a pull request, all of these must pass:
 

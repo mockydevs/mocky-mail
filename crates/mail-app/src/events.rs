@@ -165,6 +165,7 @@ mod tests {
             created_at: 0,
             sort_order: 0,
             sync_months: None,
+            protocol: mail_store::Protocol::Imap,
         }
     }
 

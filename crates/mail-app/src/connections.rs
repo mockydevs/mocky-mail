@@ -51,6 +51,8 @@ pub enum Service {
     Microsoft,
     /// A Gmail or Microsoft account not connected yet.
     NotConnected,
+    /// An Exchange Server account: Exchange Web Services.
+    Exchange,
 }
 
 /// How an account's calendar, contacts and tasks are reached.
@@ -60,6 +62,7 @@ pub enum Service {
 pub fn service(state: &AppState, account: &Account) -> AppResult<Service> {
     Ok(match account.auth {
         AuthKind::Password => Service::Dav,
+        AuthKind::Exchange => Service::Exchange,
         _ if state.store.account_connection(&account.id)?.is_none() => Service::NotConnected,
         AuthKind::Google => Service::Google,
         AuthKind::Microsoft => Service::Microsoft,
@@ -176,7 +179,7 @@ pub async fn connect_calendar_and_contacts(ctx: &Ctx, account_id: String) -> App
     let provider = match account.auth {
         AuthKind::Google => Provider::Google,
         AuthKind::Microsoft => Provider::Microsoft,
-        AuthKind::Password => {
+        AuthKind::Password | AuthKind::Exchange => {
             return Err(AppError::invalid(
                 "This account's calendar and contacts come from its mail server; there is nothing to connect.",
             ));

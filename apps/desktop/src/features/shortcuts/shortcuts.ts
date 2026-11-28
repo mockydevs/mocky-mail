@@ -16,6 +16,7 @@ export type ShortcutAction =
   | 'compose'
   | 'search'
   | 'help'
+  | 'palette'
   | 'close';
 
 export interface Shortcut {
@@ -43,6 +44,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { keys: 'c', action: 'compose', label: 'New message' },
   { keys: '/', action: 'search', label: 'Search' },
   { keys: '?', action: 'help', label: 'Show shortcuts' },
+  { keys: 'Ctrl+K', action: 'palette', label: 'Find a command, folder or setting (Cmd+K on a Mac)' },
   { keys: 'Esc', action: 'close', label: 'Close' },
 ];
 
@@ -89,12 +91,20 @@ function isTyping(target: EventTarget | null): boolean {
  * never while typing, where these keys belong to the field.
  */
 function withModifier(input: KeyInput): ShortcutAction | null {
-  if (isTyping(input.target)) return null;
   const key = input.key.toLowerCase();
+  // The command palette opens from a one-line field too (the search box),
+  // but not from the message editor, where Ctrl+K inserts a link.
+  if (key === 'k' && !input.shiftKey) return isWriting(input.target) ? null : 'palette';
+  if (isTyping(input.target)) return null;
   if (key === 'a' && !input.shiftKey) return 'selectAll';
   if (key === 'z') return input.shiftKey ? 'redo' : 'undo';
   if (key === 'y' && !input.shiftKey) return 'redo';
   return null;
+}
+
+/** A multi-line field or the rich-text editor. */
+function isWriting(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA');
 }
 
 function isActivatable(target: EventTarget | null): boolean {

@@ -359,6 +359,9 @@ async fn sync_account(state: &AppState, account: &Account) -> AppResult<Option<S
             "Contacts for this account are kept on this device. Connect its calendar and contacts to sync them.".to_owned(),
         )),
         Service::Microsoft => sync_microsoft(state, account).await.map(|()| None),
+        Service::Exchange => crate::ews_sync::sync_contacts(state, account)
+            .await
+            .map(|()| None),
         Service::Google => {
             let token = connections::google_token(state, account).await?;
             let client = DavClient::bearer(token)?;

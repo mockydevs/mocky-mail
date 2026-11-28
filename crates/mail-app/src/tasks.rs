@@ -164,7 +164,8 @@ pub(crate) async fn sync_all(ctx: &Ctx, state: &Arc<AppState>) {
 
 async fn sync_account(state: &AppState, account: &Account) -> AppResult<()> {
     match connections::service(state, account)? {
-        Service::NotConnected => Ok(()),
+        // Exchange tasks aren't synced (yet): the device's own list stays.
+        Service::NotConnected | Service::Exchange => Ok(()),
         Service::Dav => sync_dav(state, account).await,
         Service::Google => {
             if !connections::granted(state, account, "/auth/tasks") {

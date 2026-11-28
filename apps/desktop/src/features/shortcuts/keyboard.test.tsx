@@ -127,7 +127,8 @@ describe('keyboard shortcuts', () => {
     await user.keyboard('?');
     const dialog = screen.getByRole('dialog', { name: 'Keyboard shortcuts' });
     expect(within(dialog).getByText('Reply all')).toBeInTheDocument();
-    expect(within(dialog).getAllByRole('term')).toHaveLength(18);
+    expect(within(dialog).getAllByRole('term')).toHaveLength(19);
+    expect(within(dialog).getByText('Ctrl+K')).toBeInTheDocument();
     expect(within(dialog).getByText('Move to a folder')).toBeInTheDocument();
     expect(within(dialog).getByText('Undo')).toBeInTheDocument();
     await user.keyboard('{Escape}');

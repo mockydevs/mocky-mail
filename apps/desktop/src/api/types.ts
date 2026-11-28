@@ -19,6 +19,12 @@ export interface AppError {
   kind: AppErrorKind;
   /** Safe to show; never contains passwords or tokens. */
   message: string;
+  /**
+   * Microsoft 365 sign-in refused because the organisation lets only an
+   * administrator approve new apps: the page an administrator opens to
+   * approve Mocky Mail for everyone there (no personal data in it).
+   */
+  adminConsentUrl?: string;
 }
 
 export type Security = 'tls' | 'starttls';
@@ -27,7 +33,7 @@ export interface ServerConfig {
   port: number;
   security: Security;
 }
-export type AuthKind = 'password' | 'google' | 'microsoft';
+export type AuthKind = 'password' | 'google' | 'microsoft' | 'exchange';
 
 export interface Account {
   id: string;
@@ -41,6 +47,8 @@ export interface Account {
   imap: ServerConfig;
   smtp: ServerConfig;
   sizeLimitBytes: number | null;
+  /** `imap`: IMAP and SMTP (with CalDAV/CardDAV, Google or Microsoft Graph for calendars); `ews`: Exchange Web Services for mail, calendar and contacts. */
+  protocol?: 'imap' | 'ews';
   /** Place in the sidebar; accounts are listed by it, lowest first. */
   sortOrder: number;
   /** Months of mail kept in full on this device; older mail keeps its headers and preview. null: all. */
@@ -375,6 +383,20 @@ export interface OpenedFile {
   kind: 'eml' | 'ics' | 'vcf';
   path: string;
   name: string;
+}
+
+/** How the command line and MCP server connect to the running app. */
+export interface AutomationInfo {
+  /** Settings.automation. */
+  mode: 'off' | 'read' | 'full';
+  /** The local channel tools connect to (a named pipe on Windows, a socket elsewhere); null when off. */
+  endpoint: string | null;
+  /** The file holding the secret tools present, readable only by you. */
+  tokenFile: string | null;
+  /** The command-line program, if installed with the app. */
+  cliPath: string | null;
+  /** An MCP client configuration (JSON) to paste into Claude Desktop or another MCP client. */
+  mcpConfig: string | null;
 }
 
 export interface ImageSender {
@@ -794,6 +816,12 @@ export interface Settings {
   workOffline: boolean;
   /** When a message you open asks for a read receipt. */
   readReceipts: 'ask' | 'always' | 'never';
+  /**
+   * Scripts and AI tools (the mocky-mail command line and its MCP server) on
+   * this computer: `off`, `read` (look only), or `full` (also send, move,
+   * delete and change things).
+   */
+  automation: 'off' | 'read' | 'full';
   /** Sign every new message when the account has a key. */
   signByDefault: boolean;
   /** Encrypt when every recipient's key is known. */
@@ -824,6 +852,17 @@ export interface NewAccountInput {
   password: string;
   imap: ServerConfig;
   smtp: ServerConfig;
+}
+
+/** An account on an organisation's own Exchange Server (Exchange Web Services). */
+export interface ExchangeAccountInput {
+  email: string;
+  displayName: string;
+  /** The Windows/Exchange sign-in name if it isn't the address (e.g. DOMAIN\\user); empty: the address. */
+  username: string;
+  password: string;
+  /** The EWS address (https://…/EWS/Exchange.asmx); null: find it with Autodiscover. */
+  ewsUrl: string | null;
 }
 
 export interface OAuthAccountInput {
@@ -936,6 +975,12 @@ export interface MailApi {
   openComposeWindow(draft: Draft): Promise<void>;
   /** The draft a compose window was opened with (`?compose=<key>` in its address); null once taken. */
   takeComposeDraft(key: string): Promise<Draft | null>;
+  /** Add an Exchange Server account (finds the server with Autodiscover when ewsUrl is null). */
+  addExchangeAccount(input: ExchangeAccountInput): Promise<Account>;
+  /** Computers: how scripts and AI tools reach the app (see Settings.automation). */
+  getAutomationInfo(): Promise<AutomationInfo>;
+  /** Make a new secret for the command line and MCP server; the old one stops working. */
+  resetAutomationToken(): Promise<AutomationInfo>;
   /** Your keys and certificates, and the ones collected from other people. */
   listKeys(): Promise<SecurityKey[]>;
   /**

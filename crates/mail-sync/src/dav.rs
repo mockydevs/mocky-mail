@@ -227,7 +227,7 @@ const MAX_REFERENCE_LEN: usize = 10;
 /// numeric ones in decimal (`&#13;`) or hex (`&#xD;`), which servers use
 /// for the line breaks and non-ASCII letters of card and event text.
 /// Anything else after an `&` is kept as written.
-fn unescape_xml(text: &str) -> String {
+pub(crate) fn unescape_xml(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find('&') {
@@ -424,7 +424,7 @@ fn check_scheme(url: &Url) -> Result<(), SyncError> {
     }
 }
 
-fn http_error(url: &Url, error: &reqwest::Error) -> SyncError {
+pub(crate) fn http_error(url: &Url, error: &reqwest::Error) -> SyncError {
     let host = url.host_str().unwrap_or_default().to_owned();
     if error.is_timeout() {
         SyncError::Timeout { host }

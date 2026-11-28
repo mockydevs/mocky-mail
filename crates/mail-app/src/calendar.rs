@@ -312,6 +312,11 @@ pub(crate) async fn client_for(
     state: &AppState,
     calendar: &Calendar,
 ) -> AppResult<(DavClient, Url)> {
+    if crate::ews_sync::is_ews_calendar(calendar) {
+        return Err(AppError::invalid(
+            "Exchange calendars are changed through Exchange: open the event in the calendar to change it.",
+        ));
+    }
     let account = account_of(state, calendar)?;
     let url = Url::parse(&calendar.url).map_err(|e| AppError::internal(e.to_string()))?;
     match calendar.provider {
@@ -549,6 +554,10 @@ fn keep_reminders_here(
 }
 
 /// `save_event`: create or change an event on the server, then here.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the CalDAV save, step by step, after the Microsoft and Exchange ones"
+)]
 pub async fn save_event(ctx: &Ctx, event: EventSave) -> AppResult<CalendarEvent> {
     let state = &ctx.state;
     let mut input = checked(event.event)?;
@@ -567,6 +576,9 @@ pub async fn save_event(ctx: &Ctx, event: EventSave) -> AppResult<CalendarEvent>
     input.organizer = organizer_for(existing.as_ref(), &account);
     if calendar.provider == CalendarProvider::Microsoft {
         return save_graph_event(ctx, state, &account, &calendar, existing, &input).await;
+    }
+    if account.is_ews() {
+        return save_ews_event(ctx, &account, &calendar, existing.as_ref(), &input).await;
     }
     let (client, url) = client_for(state, &calendar).await?;
     let stamp = i64::try_from(now()).unwrap_or(0);
@@ -654,6 +666,31 @@ pub async fn save_event(ctx: &Ctx, event: EventSave) -> AppResult<CalendarEvent>
         .reminder_overrides()?
         .apply(&shown.id, &mut shown.occurrence);
     Ok(shown)
+}
+
+/// Save an event in an Exchange calendar (Exchange sends the invitations),
+/// then show it.
+async fn save_ews_event(
+    ctx: &Ctx,
+    account: &Account,
+    calendar: &Calendar,
+    existing: Option<&StoredEvent>,
+    input: &EventInput,
+) -> AppResult<CalendarEvent> {
+    let state = &ctx.state;
+    let rule = graph_rule(input);
+    let stored = crate::ews_sync::save_event(
+        state,
+        account,
+        calendar,
+        existing,
+        input,
+        rule.as_ref().map(Option::as_ref),
+    )
+    .await?;
+    changed(ctx, &[]);
+    reminders_on_server(state, &stored.id, input)?;
+    shown_event(state, calendar, account, &stored)
 }
 
 /// What an edit asks of a Microsoft series' rule: `None` leaves it,
@@ -759,6 +796,18 @@ pub async fn delete_event(
         };
         graph::delete_event(&client, &target).await?;
         sync_graph_calendar(state, &client, &calendar).await?;
+        changed(ctx, &[]);
+        return Ok(());
+    }
+    if account.is_ews() {
+        crate::ews_sync::delete_event(
+            state,
+            &account,
+            &stored,
+            occurrence,
+            notify.unwrap_or(false),
+        )
+        .await?;
         changed(ctx, &[]);
         return Ok(());
     }
@@ -882,6 +931,7 @@ async fn remote_busy(
             let client = connections::graph_client(state, account).await?;
             Ok(graph::get_schedule(&client, emails, from, to).await?)
         }
+        Service::Exchange => crate::ews_sync::free_busy(state, account, emails, from, to).await,
         Service::Dav => {
             let Credentials::Password { username, password } =
                 crate::credentials::for_account(state, account).await?
@@ -1054,6 +1104,9 @@ async fn sync_account(state: &AppState, account: &Account) -> AppResult<Option<S
         Service::NotConnected => Ok(Some(connections::NOT_CONNECTED.to_owned())),
         Service::Google => sync_google(state, account).await.map(|()| None),
         Service::Microsoft => sync_microsoft(state, account).await.map(|()| None),
+        Service::Exchange => crate::ews_sync::sync_calendars(state, account)
+            .await
+            .map(|()| None),
         Service::Dav => sync_dav(state, account).await,
     }
 }
@@ -1362,6 +1415,7 @@ mod tests {
             created_at: 0,
             sort_order: 0,
             sync_months: None,
+            protocol: mail_store::Protocol::Imap,
         }
     }
 

@@ -279,6 +279,7 @@ export const MOCK_SETTINGS: Settings = {
   readingPane: 'right',
   workOffline: false,
   readReceipts: 'ask',
+  automation: 'off',
   signByDefault: false,
   encryptWhenPossible: false,
   device: { tray: true, startAtLogin: true },

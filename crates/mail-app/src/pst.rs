@@ -115,8 +115,7 @@ impl Import<'_> {
         let target = self.paths.of(path);
         for step in self.paths.chain(path) {
             if self.created.insert(step.clone()) {
-                // "Already exists" is fine: it is the folder of an earlier import.
-                let _ = self.up.conn().await?.create_folder(&step).await;
+                self.up.create_folder(&step).await?;
             }
         }
         Ok(target)

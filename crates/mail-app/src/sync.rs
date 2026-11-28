@@ -36,15 +36,15 @@ const FETCH_CHUNK: usize = 100;
 /// UIDs per flag fetch.
 const FLAG_CHUNK: usize = 500;
 /// Bodies prefetched per folder per pass, for offline reading and search.
-const BODY_PREFETCH: u32 = 40;
+pub(crate) const BODY_PREFETCH: u32 = 40;
 /// The inbox is read most, so more of it is kept offline.
-const INBOX_BODY_PREFETCH: u32 = 200;
+pub(crate) const INBOX_BODY_PREFETCH: u32 = 200;
 /// With a sync window (`Account::sync_months`), every body inside it is
 /// downloaded instead of the counts above, this many per folder per pass so
 /// new mail isn't held up behind a long first download.
 const WINDOW_BODY_BATCH: u32 = 500;
 /// How often every folder is checked, not just the inbox.
-const FULL_SYNC_EVERY: Duration = Duration::from_mins(10);
+pub(crate) const FULL_SYNC_EVERY: Duration = Duration::from_mins(10);
 /// First retry delay after a network error; doubles up to `MAX_BACKOFF`.
 const FIRST_BACKOFF: Duration = Duration::from_secs(15);
 /// Longest retry delay.
@@ -201,6 +201,14 @@ pub const WORKING_OFFLINE: &str = "Working offline. Turn off Work Offline to syn
 /// # Errors
 /// Database errors.
 pub fn enqueue(state: &AppState, account_id: &str, op: &Op) -> AppResult<()> {
+    // Exchange accounts queue the change by Exchange ids.
+    if state
+        .store
+        .get_account(account_id)
+        .is_ok_and(|account| account.is_ews())
+    {
+        return crate::ews_sync::enqueue(state, account_id, op);
+    }
     let kind = match op {
         Op::SetFlags { .. }
         | Op::SetFlagsByMessageId { .. }
@@ -263,8 +271,16 @@ async fn run(ctx: Ctx, state: Arc<AppState>, account_id: String, wake: Arc<Notif
         events::sync_status(&ctx, &account_id, "syncing", None);
         // A bug must not stop this account's mail for good: a session that
         // panics is reported like any other error and retried.
-        let attempt = AssertUnwindSafe(session(&ctx, &state, &account, &wake)).catch_unwind();
-        let error = match attempt.await {
+        let error = if account.is_ews() {
+            let attempt = AssertUnwindSafe(crate::ews_sync::session(&ctx, &state, &account, &wake))
+                .catch_unwind();
+            attempt.await
+        } else {
+            AssertUnwindSafe(session(&ctx, &state, &account, &wake))
+                .catch_unwind()
+                .await
+        };
+        let error = match error {
             Ok(Ok(())) => {
                 backoff = FIRST_BACKOFF;
                 fresh_token_tried = false;
@@ -307,7 +323,7 @@ async fn run(ctx: Ctx, state: Arc<AppState>, account_id: String, wake: Arc<Notif
 
 /// What started a sync pass within one connected session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Trigger {
+pub(crate) enum Trigger {
     /// Just logged in.
     Connected,
     /// IDLE or the poll timer ended on its own (new mail, or time to look).
@@ -318,7 +334,7 @@ enum Trigger {
 
 /// Which folders a pass syncs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
+pub(crate) enum Scope {
     /// Re-list the folders and sync every one.
     All,
     /// The inbox, plus folders the replayed changes touched.
@@ -331,7 +347,7 @@ enum Scope {
 /// A wake with changes to send syncs only what they touched. A wake with
 /// none is "check now" (or new sign-in details): everything is checked, as
 /// a fresh login would, but on the same connection.
-const fn scope_of(trigger: Trigger, replayed_any: bool) -> Scope {
+pub(crate) const fn scope_of(trigger: Trigger, replayed_any: bool) -> Scope {
     match trigger {
         Trigger::Waited => Scope::Inbox,
         Trigger::Woken if replayed_any => Scope::Changes,
@@ -341,7 +357,7 @@ const fn scope_of(trigger: Trigger, replayed_any: bool) -> Scope {
 
 /// Whether a pass with this scope syncs a folder with this role; `touched`
 /// says whether a change replayed in this pass was in it.
-const fn folder_due(scope: Scope, role: FolderRole, touched: bool) -> bool {
+pub(crate) const fn folder_due(scope: Scope, role: FolderRole, touched: bool) -> bool {
     // Virtual views of other folders (Gmail's All Mail, Starred).
     if matches!(role, FolderRole::All | FolderRole::Flagged) {
         return false;
@@ -572,7 +588,10 @@ async fn wait_for_change(
 
 /// A lost connection (or a refused login) ends the pass; anything else is
 /// remembered, the first one reported after the pass.
-fn stop_if_disconnected(error: AppError, problem: &mut Option<AppError>) -> AppResult<()> {
+pub(crate) fn stop_if_disconnected(
+    error: AppError,
+    problem: &mut Option<AppError>,
+) -> AppResult<()> {
     if ends_session(error.kind) {
         return Err(error);
     }
@@ -582,7 +601,7 @@ fn stop_if_disconnected(error: AppError, problem: &mut Option<AppError>) -> AppR
 }
 
 /// Errors after which the connection can't be used for anything else.
-fn ends_session(kind: &str) -> bool {
+pub(crate) fn ends_session(kind: &str) -> bool {
     matches!(kind, "connect" | "tls" | "auth" | "config" | "keyring")
 }
 
@@ -805,7 +824,7 @@ async fn replay_ops(
 /// given up. Giving up is safe: the next sync shows the server's real state.
 const MAX_OP_REFUSALS: u32 = 3;
 
-const fn give_up_after(refusals: u32) -> bool {
+pub(crate) const fn give_up_after(refusals: u32) -> bool {
     refusals >= MAX_OP_REFUSALS
 }
 
@@ -1200,6 +1219,10 @@ pub async fn body_now(state: &AppState, id: &str) -> AppResult<Vec<u8>> {
         ));
     }
     let message = state.store.get_message(id)?;
+    let account = state.store.get_account(&message.item.account_id)?;
+    if account.is_ews() {
+        return crate::ews_sync::fetch_body(state, &account, id).await;
+    }
     let uid = message.uid.ok_or_else(|| {
         AppError::new(
             "connect",
@@ -1207,7 +1230,6 @@ pub async fn body_now(state: &AppState, id: &str) -> AppResult<Vec<u8>> {
         )
     })?;
     let folder = state.store.get_folder(&message.item.folder_id)?;
-    let account = state.store.get_account(&message.item.account_id)?;
     let credentials = credentials::for_account(state, &account).await?;
     let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
     let raw = conn

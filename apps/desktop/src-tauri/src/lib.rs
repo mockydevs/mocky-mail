@@ -192,6 +192,7 @@ pub fn run() {
             commands::list_accounts,
             commands::add_account,
             commands::add_oauth_account,
+            commands::add_exchange_account,
             commands::update_account,
             commands::reconnect_account,
             commands::remove_account,
@@ -314,6 +315,8 @@ pub fn run() {
             commands::read_message_file,
             commands::import_pst,
             commands::take_opened_files,
+            commands::get_automation_info,
+            commands::reset_automation_token,
         ])
         .build(tauri::generate_context!())
         .map(|app| app.run(on_run_event));

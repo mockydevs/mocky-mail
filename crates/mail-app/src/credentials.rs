@@ -25,7 +25,7 @@ pub fn oauth_key(account_id: &str) -> String {
 #[must_use]
 pub const fn provider(auth: AuthKind) -> Option<Provider> {
     match auth {
-        AuthKind::Password => None,
+        AuthKind::Password | AuthKind::Exchange => None,
         AuthKind::Google => Some(Provider::Google),
         AuthKind::Microsoft => Some(Provider::Microsoft),
     }

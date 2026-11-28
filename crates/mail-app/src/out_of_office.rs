@@ -158,6 +158,10 @@ async fn from_provider(
             };
             Ok(Some(Ok(provider_status(account, settings))))
         }
+        Service::Exchange => {
+            let settings = crate::ews_sync::out_of_office(state, account, change).await?;
+            Ok(Some(Ok(provider_status(account, settings))))
+        }
         Service::Microsoft => {
             let client = connections::graph_client(state, account).await?;
             let now = i64::try_from(crate::state::now()).unwrap_or(0);

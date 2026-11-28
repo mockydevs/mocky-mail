@@ -4,8 +4,9 @@ import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
 import type { Account, AddressBookStatus, CalendarStatus } from '../../api/types';
 import { Icon } from '../../ui/Icon';
+import { AdminConsentPanel } from '../accounts/AdminConsent';
 
-type Phase = { kind: 'idle' } | { kind: 'busy' } | { kind: 'done' } | { kind: 'failed'; message: string };
+type Phase = { kind: 'idle' } | { kind: 'busy' } | { kind: 'done' } | { kind: 'failed'; message: string; adminConsentUrl?: string | undefined };
 
 /** The name a provider goes by in the card. */
 function providerName(account: Account): string {
@@ -29,7 +30,8 @@ export function ConnectCard({ account, onConnected }: { account: Account; onConn
         onConnected?.();
       },
       (e: unknown) => {
-        setPhase({ kind: 'failed', message: toAppError(e).message });
+        const failure = toAppError(e);
+        setPhase({ kind: 'failed', message: failure.message, adminConsentUrl: failure.adminConsentUrl });
       },
     );
   };
@@ -47,13 +49,16 @@ export function ConnectCard({ account, onConnected }: { account: Account; onConn
               ? `Finish signing in to ${account.email} in your browser…`
               : `${account.email} only shares its mail with Mocky Mail so far. Sign in once more to add the rest.`}
         </p>
-        {phase.kind === 'failed' && (
+        {phase.kind === 'failed' && phase.adminConsentUrl && (
+          <AdminConsentPanel url={phase.adminConsentUrl} onRetry={connect} />
+        )}
+        {phase.kind === 'failed' && !phase.adminConsentUrl && (
           <p className="form-error" role="alert">
             {phase.message}
           </p>
         )}
       </div>
-      {phase.kind !== 'done' && (
+      {phase.kind !== 'done' && !(phase.kind === 'failed' && phase.adminConsentUrl) && (
         <button type="button" className="btn btn--primary btn--small" disabled={phase.kind === 'busy'} onClick={connect}>
           {phase.kind === 'busy' ? 'Connecting…' : phase.kind === 'failed' ? 'Try again' : 'Connect'}
         </button>

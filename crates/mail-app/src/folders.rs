@@ -106,6 +106,9 @@ pub async fn create_folder(
         Some(id) => Some(state.store.get_folder(&id)?).filter(|f| f.account_id == account_id),
         None => None,
     };
+    if account.is_ews() {
+        return crate::ews_sync::create_folder(ctx, &account, parent.as_ref(), &name).await;
+    }
     let path = new_path(&folders, parent.as_ref(), &name)?;
     if folders.iter().any(|f| f.path.eq_ignore_ascii_case(&path)) {
         return Err(AppError::invalid(
@@ -123,6 +126,9 @@ pub async fn rename_folder(ctx: &Ctx, folder_id: String, name: String) -> AppRes
     let folder = state.store.get_folder(&folder_id)?;
     own_folder(&folder)?;
     let account = state.store.get_account(&folder.account_id)?;
+    if account.is_ews() {
+        return crate::ews_sync::rename_folder(ctx, &account, &folder, &name).await;
+    }
     let folders = state.store.list_folders(&account.id)?;
     let delimiter = folder.delimiter.clone().or_else(|| delimiter_of(&folders));
     let name = clean_folder_name(&name, delimiter.as_deref()).map_err(AppError::invalid)?;
@@ -165,6 +171,9 @@ pub async fn delete_folder(ctx: &Ctx, folder_id: String) -> AppResult<()> {
                 folder.name
             )));
         }
+    }
+    if account.is_ews() {
+        return crate::ews_sync::delete_folder(ctx, &account, &folder).await;
     }
     let mut conn = connect(state, &account).await?;
     conn.delete_folder(&folder.path).await?;

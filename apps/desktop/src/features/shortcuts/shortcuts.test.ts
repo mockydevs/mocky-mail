@@ -12,7 +12,8 @@ describe('shortcutFor', () => {
     expect(press('Escape')).toBe('close');
     expect(press('x')).toBeNull();
     expect(press('v')).toBe('move');
-    expect(SHORTCUTS).toHaveLength(18);
+    expect(SHORTCUTS).toHaveLength(19);
+    expect(SHORTCUTS.map((s) => s.action)).toContain('palette');
   });
 
   it('maps Ctrl+A, Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z, but not while typing', () => {

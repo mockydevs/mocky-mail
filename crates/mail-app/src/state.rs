@@ -10,6 +10,9 @@ use tokio::sync::Notify;
 
 use crate::host::Host;
 
+/// Events kept for an automation subscriber that falls behind.
+const EVENT_BACKLOG: usize = 256;
+
 /// A running sync engine for one account.
 pub struct EngineHandle {
     /// Wake the engine early (new local changes, "sync now").
@@ -47,6 +50,10 @@ pub struct AppState {
     pub compose_drafts: Mutex<Vec<(String, crate::outbox::Draft)>>,
     /// Trusted roots and decrypted messages, in memory only.
     pub security: crate::security::SecurityState,
+    /// The automation channel (Settings › Automation), while it runs.
+    pub automation: crate::automation::AutomationState,
+    /// Every event sent to the interface, for automation subscribers.
+    pub events: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
     /// The host, once a [`Ctx`](crate::Ctx) has been made, for code that
     /// has only the state (signing in to servers with the device's own
     /// Google accounts).
@@ -75,6 +82,8 @@ impl AppState {
             due_reminders: Mutex::new(Vec::new()),
             compose_drafts: Mutex::new(Vec::new()),
             security: crate::security::SecurityState::default(),
+            automation: crate::automation::AutomationState::default(),
+            events: tokio::sync::broadcast::channel(EVENT_BACKLOG).0,
             host: OnceLock::new(),
         }
     }

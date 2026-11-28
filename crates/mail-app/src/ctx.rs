@@ -39,6 +39,10 @@ impl Ctx {
     /// # Errors
     /// When the host couldn't send it.
     pub fn emit(&self, event: &str, payload: serde_json::Value) -> AppResult<()> {
+        // Automation subscribers hear it too; none listening is fine.
+        if self.state.events.receiver_count() > 0 {
+            let _ = self.state.events.send((event.to_owned(), payload.clone()));
+        }
         self.host.emit(event, payload)
     }
 

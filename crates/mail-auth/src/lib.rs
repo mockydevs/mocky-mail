@@ -286,6 +286,81 @@ pub enum AuthError {
     /// Malformed response.
     #[error("The sign-in service returned an invalid response")]
     Protocol,
+    /// Microsoft 365: the organisation lets only an administrator approve
+    /// new apps (AADSTS65001, AADSTS90094, "Need admin approval").
+    /// [`admin_consent_url`] is the page the administrator opens.
+    #[error(
+        "Your organisation lets only an administrator approve new apps. Ask your IT administrator to approve Mocky Mail (send them the approval link), then sign in again."
+    )]
+    AdminConsent {
+        /// The organisation's tenant id, when the error named it.
+        tenant: Option<String>,
+    },
+}
+
+/// Microsoft's sign-in error codes that mean an administrator must approve
+/// the app first: consent not given, the grant needs an administrator, or
+/// an approval request is waiting for one.
+const ADMIN_CONSENT_CODES: &[&str] = &["AADSTS65001", "AADSTS90094", "AADSTS90095"];
+
+/// Whether a sign-in error (its `error` and `error_description`) says an
+/// administrator must approve the app.
+fn needs_admin_consent(error: Option<&str>, description: Option<&str>) -> bool {
+    let description = description.unwrap_or_default();
+    let lower = description.to_ascii_lowercase();
+    error == Some("consent_required")
+        || ADMIN_CONSENT_CODES
+            .iter()
+            .any(|code| description.contains(code))
+        || lower.contains("admin approval")
+        || lower.contains("admin consent")
+        || lower.contains("requires admin permission")
+}
+
+/// A tenant id (a GUID) named after the word "tenant" in an error.
+fn tenant_in(description: &str) -> Option<String> {
+    let lower = description.to_ascii_lowercase();
+    let at = lower.find("tenant")?;
+    let after = lower.get(at..)?;
+    after
+        .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+        .take(8)
+        .find(|word| is_guid(word))
+        .map(str::to_owned)
+}
+
+fn is_guid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8usize, 4, 4, 4, 12])
+            .all(|(group, len)| group.len() == len && group.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn admin_consent(description: Option<&str>) -> AuthError {
+    AuthError::AdminConsent {
+        tenant: description.and_then(tenant_in),
+    }
+}
+
+/// The page where an administrator of a Microsoft 365 organisation approves
+/// Mocky Mail for everyone there: the tenant's own when known, else
+/// `organizations` (the administrator signs in and their tenant is used).
+/// Only the app's client id is in it, nothing about the user. `None` when
+/// this build has no Microsoft registration.
+#[must_use]
+pub fn admin_consent_url(tenant: Option<&str>) -> Option<String> {
+    let client_id = option_env!("MOCKY_MAIL_MS_CLIENT_ID").filter(|id| !id.is_empty())?;
+    Some(admin_consent_url_for(client_id, tenant))
+}
+
+fn admin_consent_url_for(client_id: &str, tenant: Option<&str>) -> String {
+    let tenant = tenant.filter(|t| is_guid(t)).unwrap_or("organizations");
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", client_id)
+        .finish();
+    format!("https://login.microsoftonline.com/{tenant}/adminconsent?{query}")
 }
 fn nonce() -> Result<String, AuthError> {
     let mut bytes = [0; 32];
@@ -305,11 +380,13 @@ fn callback(line: &str, expected: &str) -> Option<Result<String, AuthError>> {
     let mut state = None;
     let mut code = None;
     let mut error = None;
+    let mut description = None;
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let slot = match k.as_ref() {
             "state" => &mut state,
             "code" => &mut code,
             "error" => &mut error,
+            "error_description" => &mut description,
             _ => continue,
         };
         if slot.replace(v.into_owned()).is_some() {
@@ -321,10 +398,11 @@ fn callback(line: &str, expected: &str) -> Option<Result<String, AuthError>> {
     }
     Some(match (code, error.as_deref()) {
         (Some(c), None) if !c.is_empty() => Ok(c),
-        (None, Some("access_denied")) => Err(AuthError::Denied),
-        (None, Some("invalid_scope" | "unauthorized_client" | "consent_required")) => {
-            Err(AuthError::NotEnabled)
+        (None, error @ Some(_)) if needs_admin_consent(error, description.as_deref()) => {
+            Err(admin_consent(description.as_deref()))
         }
+        (None, Some("access_denied")) => Err(AuthError::Denied),
+        (None, Some("invalid_scope" | "unauthorized_client")) => Err(AuthError::NotEnabled),
         _ => Err(AuthError::Protocol),
     })
 }
@@ -492,6 +570,22 @@ fn email_from_id_token(id_token: &str) -> Option<String> {
 #[derive(Deserialize)]
 struct TokenError {
     error: String,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+/// What a refused token request means.
+fn token_error(error: &TokenError) -> AuthError {
+    let description = error.error_description.as_deref();
+    if needs_admin_consent(Some(&error.error), description) {
+        return admin_consent(description);
+    }
+    match error.error.as_str() {
+        "invalid_grant" => AuthError::Reauthorize,
+        "access_denied" => AuthError::Denied,
+        "invalid_scope" | "unauthorized_client" => AuthError::NotEnabled,
+        _ => AuthError::Protocol,
+    }
 }
 fn expires(now: u64, lifetime: u64) -> Result<u64, AuthError> {
     now.checked_add(lifetime)
@@ -520,22 +614,12 @@ async fn exchange(
         if response.status().is_server_error() || response.status().as_u16() == 429 {
             return Err(AuthError::Network);
         }
-        return Err(
-            match response
-                .json::<TokenError>()
-                .await
-                .ok()
-                .map(|e| e.error)
-                .as_deref()
-            {
-                Some("invalid_grant") => AuthError::Reauthorize,
-                Some("access_denied") => AuthError::Denied,
-                Some("invalid_scope" | "unauthorized_client" | "consent_required") => {
-                    AuthError::NotEnabled
-                }
-                _ => AuthError::Protocol,
-            },
-        );
+        return Err(response
+            .json::<TokenError>()
+            .await
+            .ok()
+            .as_ref()
+            .map_or(AuthError::Protocol, token_error));
     }
     let token = response
         .json::<TokenResponse>()
@@ -627,6 +711,76 @@ mod tests {
         assert!(url.starts_with("https://sign-in.invalid/authorize?"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("login_hint=a%40x.co"));
+    }
+
+    #[test]
+    fn an_organisation_that_needs_its_administrator_is_told_apart() {
+        // The browser comes back with Microsoft's admin-consent errors.
+        for request in [
+            "GET /?state=x&error=consent_required HTTP/1.1",
+            "GET /?state=x&error=access_denied&error_description=AADSTS90094%3A+The+grant+requires+admin+permission. HTTP/1.1",
+            "GET /?state=x&error=invalid_request&error_description=AADSTS65001%3A+The+user+or+administrator+has+not+consented HTTP/1.1",
+        ] {
+            assert_eq!(
+                callback(request, "x"),
+                Some(Err(AuthError::AdminConsent { tenant: None })),
+                "{request}"
+            );
+        }
+        // A user who just pressed Cancel is not sent to an administrator.
+        assert_eq!(
+            callback(
+                "GET /?state=x&error=access_denied&error_description=AADSTS65004%3A+User+declined+to+consent HTTP/1.1",
+                "x"
+            ),
+            Some(Err(AuthError::Denied))
+        );
+        // The token endpoint says so too, sometimes naming the tenant.
+        let refused = |error: &str, description: Option<&str>| {
+            token_error(&TokenError {
+                error: error.into(),
+                error_description: description.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            refused(
+                "invalid_grant",
+                Some(
+                    "AADSTS65001: The user or administrator has not consented to use the application with ID 'abc' in tenant '72f988bf-86f1-41af-91ab-2d7cd011db47'. Trace ID: 0b0e8c6a-1111-2222-3333-444455556666"
+                )
+            ),
+            AuthError::AdminConsent {
+                tenant: Some("72f988bf-86f1-41af-91ab-2d7cd011db47".into())
+            }
+        );
+        assert_eq!(
+            refused("invalid_grant", Some("AADSTS70008: expired")),
+            AuthError::Reauthorize
+        );
+        assert_eq!(refused("invalid_scope", None), AuthError::NotEnabled);
+        assert_eq!(refused("weird", None), AuthError::Protocol);
+    }
+
+    #[test]
+    fn the_approval_page_has_only_the_app_and_the_tenant() {
+        assert_eq!(
+            admin_consent_url_for("client-1", None),
+            "https://login.microsoftonline.com/organizations/adminconsent?client_id=client-1"
+        );
+        assert_eq!(
+            admin_consent_url_for("client-1", Some("72f988bf-86f1-41af-91ab-2d7cd011db47")),
+            "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/adminconsent?client_id=client-1"
+        );
+        // Anything but a tenant id is not put in the address.
+        assert_eq!(
+            admin_consent_url_for("client-1", Some("../evil?x=1")),
+            "https://login.microsoftonline.com/organizations/adminconsent?client_id=client-1"
+        );
+        // Trace and correlation ids are not tenants.
+        assert_eq!(
+            tenant_in("Trace ID: 0b0e8c6a-1111-2222-3333-444455556666"),
+            None
+        );
     }
 
     fn id_token(claims: &str) -> String {

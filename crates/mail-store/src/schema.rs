@@ -575,8 +575,34 @@ CREATE TABLE account_security (
 );
 ";
 
+/// Version 13: Exchange Server accounts (0.11.0), over Exchange Web
+/// Services.
+///
+/// - `accounts.protocol`: `imap` (IMAP and SMTP) or `ews`. An Exchange
+///   account keeps `auth = 'password'` (its password is in the keyring as
+///   any password account's) and is told apart by `protocol`.
+///   `ews_url` is its EWS address; `ews_username` the Windows sign-in
+///   name when it isn't the address (`DOMAIN\user`).
+/// - `folders.remote_id`: the folder's Exchange id; `sync_state` where
+///   its `SyncFolderItems` left off. `path` is the folder's names from
+///   the top, joined with `/`.
+/// - `messages.remote_id`: the item's Exchange id. Exchange items get a
+///   UID here (one more than the folder's highest), so everything that works
+///   by UID works for them too.
+const V13: &str = r"
+ALTER TABLE accounts ADD COLUMN protocol TEXT NOT NULL DEFAULT 'imap'
+    CHECK (protocol IN ('imap', 'ews'));
+ALTER TABLE accounts ADD COLUMN ews_url TEXT;
+ALTER TABLE accounts ADD COLUMN ews_username TEXT;
+ALTER TABLE folders ADD COLUMN remote_id TEXT;
+ALTER TABLE folders ADD COLUMN sync_state TEXT;
+CREATE UNIQUE INDEX folders_remote ON folders (account_id, remote_id) WHERE remote_id IS NOT NULL;
+ALTER TABLE messages ADD COLUMN remote_id TEXT;
+CREATE INDEX messages_remote ON messages (folder_id, remote_id) WHERE remote_id IS NOT NULL;
+";
+
 /// All migrations in order. Index `n` upgrades version `n` to `n + 1`.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
 
 /// Highest schema version this build understands.
 pub(crate) fn latest_version() -> i64 {
@@ -997,6 +1023,44 @@ mod tests {
             })
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_version_twelve_database_keeps_its_accounts_as_imap() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(12) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 12).unwrap();
+        conn.execute_batch(
+            "INSERT INTO accounts (id, email, display_name, auth, color, imap_host, imap_port,
+                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at)
+             VALUES ('a', 'a@x.co', 'A', 'password', '#000', 'imap.x.co', 993, 'tls',
+                 'smtp.x.co', 465, 'tls', NULL, 0);
+             INSERT INTO folders (id, account_id, path, name, role) VALUES ('f', 'a', 'INBOX', 'Inbox', 'inbox');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(version(&conn), latest_version());
+        let (protocol, url): (String, Option<String>) = conn
+            .query_row(
+                "SELECT protocol, ews_url FROM accounts WHERE id = 'a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(protocol, "imap");
+        assert_eq!(url, None);
+        let remote: Option<String> = conn
+            .query_row("SELECT remote_id FROM folders WHERE id = 'f'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remote, None);
+        assert!(
+            conn.execute("UPDATE accounts SET protocol = 'pop3' WHERE id = 'a'", [])
+                .is_err()
+        );
     }
 
     #[test]

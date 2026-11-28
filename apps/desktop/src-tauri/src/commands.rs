@@ -40,6 +40,16 @@ pub async fn add_oauth_account(
     mail_app::accounts::add_oauth_account(&ctx, input).await
 }
 
+/// `add_exchange_account`: an account on an organisation's own Exchange
+/// Server (Autodiscover finds the server when `ewsUrl` is null).
+#[tauri::command]
+pub async fn add_exchange_account(
+    ctx: State<'_, Ctx>,
+    input: mail_app::accounts::ExchangeAccountInput,
+) -> AppResult<mail_store::Account> {
+    mail_app::accounts::add_exchange_account(&ctx, input).await
+}
+
 /// `update_account`: rename, or replace the password after testing it.
 #[tauri::command]
 pub async fn update_account(
@@ -64,6 +74,22 @@ pub async fn reconnect_account(ctx: State<'_, Ctx>, id: String) -> AppResult<mai
 #[tauri::command]
 pub fn remove_account(ctx: State<'_, Ctx>, id: String) -> AppResult<()> {
     mail_app::accounts::remove_account(&ctx, id)
+}
+
+// ---------------------------------------------------------------- automation
+
+/// `get_automation_info`: how the command line and MCP server reach the app.
+#[tauri::command]
+pub fn get_automation_info(ctx: State<'_, Ctx>) -> AppResult<mail_app::automation::AutomationInfo> {
+    mail_app::automation::get_automation_info(&ctx)
+}
+
+/// `reset_automation_token`: a new secret; the old one stops working.
+#[tauri::command]
+pub fn reset_automation_token(
+    ctx: State<'_, Ctx>,
+) -> AppResult<mail_app::automation::AutomationInfo> {
+    mail_app::automation::reset_automation_token(&ctx)
 }
 
 // ---------------------------------------------------------------- attachments

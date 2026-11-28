@@ -5,11 +5,17 @@ use serde::Serialize;
 
 /// An error returned from any command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppError {
     /// Category, one of the `AppError.kind` strings.
     pub kind: &'static str,
     /// Text safe to show the user.
     pub message: String,
+    /// Microsoft 365 refused the sign-in because only an administrator may
+    /// approve new apps there: the page an administrator opens to approve
+    /// Mocky Mail for the organisation. No personal data is in it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_consent_url: Option<String>,
 }
 
 /// Result type for commands.
@@ -21,6 +27,7 @@ impl AppError {
         Self {
             kind,
             message: message.into(),
+            admin_consent_url: None,
         }
     }
 
@@ -84,13 +91,17 @@ impl From<mail_core::limits::TooLarge> for AppError {
 impl From<mail_auth::AuthError> for AppError {
     fn from(error: mail_auth::AuthError) -> Self {
         use mail_auth::AuthError as E;
-        let kind = match error {
+        let kind = match &error {
             E::NotConfigured(_) | E::NotEnabled => "config",
-            E::Denied | E::Reauthorize => "auth",
+            E::Denied | E::Reauthorize | E::AdminConsent { .. } => "auth",
             E::Timeout | E::Network => "connect",
             E::Local | E::Browser | E::Protocol => "internal",
         };
-        Self::new(kind, error.to_string())
+        let mut app = Self::new(kind, error.to_string());
+        if let E::AdminConsent { tenant } = &error {
+            app.admin_consent_url = mail_auth::admin_consent_url(tenant.as_deref());
+        }
+        app
     }
 }
 
@@ -128,5 +139,25 @@ mod tests {
     fn serializes_for_the_interface() {
         let json = serde_json::to_string(&AppError::invalid("Bad")).unwrap_or_default();
         assert_eq!(json, r#"{"kind":"invalid","message":"Bad"}"#);
+        let mut consent = AppError::new("auth", "Ask your administrator.");
+        consent.admin_consent_url =
+            Some("https://login.microsoftonline.com/organizations/adminconsent?client_id=x".into());
+        let json = serde_json::to_value(&consent).unwrap_or_default();
+        assert_eq!(
+            json["adminConsentUrl"],
+            "https://login.microsoftonline.com/organizations/adminconsent?client_id=x"
+        );
+    }
+
+    #[test]
+    fn an_administrators_approval_is_an_auth_error_in_plain_words() {
+        let error = AppError::from(mail_auth::AuthError::AdminConsent { tenant: None });
+        assert_eq!(error.kind, "auth");
+        assert!(error.message.contains("administrator"));
+        // Set only when the build has a Microsoft registration.
+        assert_eq!(
+            error.admin_consent_url.is_some(),
+            option_env!("MOCKY_MAIL_MS_CLIENT_ID").is_some_and(|id| !id.is_empty())
+        );
     }
 }

@@ -41,6 +41,11 @@ The way the `.pst` import turns Outlook items into messages, contacts and
 events follows MailCraft's own import (`mailcraft-engine`), under the same
 licence.
 
+The NTLMv2 sign-in for Exchange Server (`crates/mail-sync/src/ews/ntlm.rs`
+and its tests) is adapted from MailCraft's `crates/ews/src/ntlm.rs` at the
+same commit, under the same licence; those files keep MailCraft's
+`SPDX-FileCopyrightText` and `SPDX-License-Identifier` lines.
+
 ## rPGP
 
 Crate used: `pgp` 0.21.1 (OpenPGP signing, encryption and decryption), from
@@ -74,7 +79,8 @@ SOFTWARE.
 Crates used for S/MIME and the algorithms both kinds need: `cms`, `x509-cert`,
 `der`, `spki`, `const-oid`, `pkcs1`, `pkcs5`, `pkcs8`, `pkcs12`, `rsa`,
 `p256`, `p384`, `signature`, `sha1`, `sha2`, `hmac`, `aes`, `aes-gcm`, `cbc`,
-`des`, `rc2`, `rand_core`, `zeroize`, from <https://github.com/RustCrypto>.
+`des`, `rc2`, `rand_core`, `zeroize`, and for Exchange Server's NTLM sign-in
+`md4` and `md-5`, from <https://github.com/RustCrypto>.
 Dual-licensed Apache-2.0 OR MIT; Mocky Mail uses them under the MIT licence:
 
 ```text
