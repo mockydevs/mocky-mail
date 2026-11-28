@@ -60,6 +60,10 @@ pkcs5 = { version = "0.7.1", features = ["pbes2", "3des", "sha1-insecure", "allo
 pkcs8 = { version = "0.10.2", features = ["alloc", "pem", "encryption"] }
 pkcs12 = { version = "0.1.0", features = ["kdf"] }
 hmac = "0.12.1"
+# Exchange Server sign-in (NTLMv2): MD4 of the password, then HMAC-MD5.
+# RustCrypto, MIT OR Apache-2.0.
+md4 = "0.10.2"
+md-5 = "0.10.6"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 zeroize = "1.9.1"
 

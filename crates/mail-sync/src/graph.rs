@@ -1454,13 +1454,13 @@ pub async fn delete_todo(client: &RestClient, list_id: &str, id: &str) -> Result
 
 // ------------------------------------------------------- automatic replies
 
-fn day_of(seconds: i64, offset: i32) -> Option<String> {
+pub(crate) fn day_of(seconds: i64, offset: i32) -> Option<String> {
     Utc.timestamp_opt(seconds.saturating_add(i64::from(offset)), 0)
         .single()
         .map(|d| d.format("%Y-%m-%d").to_string())
 }
 
-fn day_start(day: &str, offset: i32) -> Option<i64> {
+pub(crate) fn day_start(day: &str, offset: i32) -> Option<i64> {
     let date = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
     Some(
         date.and_hms_opt(0, 0, 0)?

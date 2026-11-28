@@ -3562,6 +3562,8 @@ dependencies = [
  "lettre",
  "mail-core",
  "mailcraft-openpgp",
+ "md-5",
+ "md4",
  "p256",
  "p384",
  "pgp",
@@ -3684,6 +3686,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "md4"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da5ac363534dce5fabf69949225e174fbf111a498bf0ff794c8ea1fba9f3dda"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3739,6 +3750,14 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mocky-mail-cli"
+version = "0.11.0"
+dependencies = [
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ pub mod config;
 pub mod dav;
 pub mod discover;
 pub mod error;
+pub mod ews;
 pub mod google;
 pub mod graph;
 pub mod imap;
