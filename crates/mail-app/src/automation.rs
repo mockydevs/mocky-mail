@@ -360,8 +360,18 @@ fn start(ctx: &Ctx, mode: Mode) -> AppResult<()> {
         token,
         generation: (Arc::clone(&generation), 0),
     };
-    let listener = transport::Listener::bind(&endpoint)?;
-    let task = ctx.spawn(transport::serve(ctx.clone(), listener, session));
+    // Bound inside the runtime (a pipe or socket needs its reactor); this
+    // may be called from the main thread.
+    let task = ctx.spawn({
+        let ctx = ctx.clone();
+        let endpoint = endpoint.clone();
+        async move {
+            match transport::Listener::bind(&endpoint) {
+                Ok(listener) => transport::serve(ctx, listener, session).await,
+                Err(error) => eprintln!("automation channel didn't start: {}", error.message),
+            }
+        }
+    });
     *lock(&ctx.state.automation.running) = Some(Running {
         task,
         endpoint,
