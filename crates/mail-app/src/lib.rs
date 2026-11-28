@@ -28,6 +28,7 @@ pub mod credentials;
 pub mod ctx;
 pub mod error;
 pub mod events;
+pub mod ews_sync;
 pub mod files;
 pub mod folders;
 pub mod host;

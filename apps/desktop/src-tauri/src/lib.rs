@@ -192,6 +192,7 @@ pub fn run() {
             commands::list_accounts,
             commands::add_account,
             commands::add_oauth_account,
+            commands::add_exchange_account,
             commands::update_account,
             commands::reconnect_account,
             commands::remove_account,

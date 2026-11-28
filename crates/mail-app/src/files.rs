@@ -249,6 +249,7 @@ pub enum Outcome {
 pub struct Uploader<'a> {
     state: &'a AppState,
     account: Account,
+    /// None for an Exchange account, which uploads through EWS.
     conn: Option<ImapConnection>,
     /// Message-IDs per folder path, read once per folder.
     known: HashMap<String, HashSet<String>>,
@@ -262,13 +263,32 @@ impl<'a> Uploader<'a> {
     /// Connect to the account's server (refused when working offline).
     pub async fn new(state: &'a AppState, account: Account) -> AppResult<Self> {
         require_online(state)?;
-        let conn = connect(state, &account).await?;
+        let conn = if account.is_ews() {
+            crate::ews_sync::client(state, &account)?;
+            None
+        } else {
+            Some(connect(state, &account).await?)
+        };
         Ok(Self {
             state,
             account,
-            conn: Some(conn),
+            conn,
             known: HashMap::new(),
         })
+    }
+
+    /// Make a folder (and the folders above it) on the server; one that is
+    /// there already is fine.
+    ///
+    /// # Errors
+    /// When the server can't be reached.
+    pub async fn create_folder(&mut self, path: &str) -> AppResult<()> {
+        if self.account.is_ews() {
+            return crate::ews_sync::ensure_folder(self.state, &self.account, path).await;
+        }
+        // "Already exists" is fine: it is the folder of an earlier import.
+        let _ = self.conn().await?.create_folder(path).await;
+        Ok(())
     }
 
     /// The connection, made again if it was lost.
@@ -284,13 +304,16 @@ impl<'a> Uploader<'a> {
     async fn known_ids(&mut self, path: &str) -> AppResult<&mut HashSet<String>> {
         if !self.known.contains_key(path) {
             // A folder made just now, or one the server can't list: only what
-            // this import brings is known.
-            let mut ids: HashSet<String> = self
-                .conn()
-                .await?
-                .message_ids(path)
-                .await
-                .unwrap_or_default();
+            // this import brings is known. Exchange folders: what is here.
+            let mut ids: HashSet<String> = if self.account.is_ews() {
+                HashSet::new()
+            } else {
+                self.conn()
+                    .await?
+                    .message_ids(path)
+                    .await
+                    .unwrap_or_default()
+            };
             let local = self
                 .state
                 .store
@@ -328,6 +351,17 @@ impl<'a> Uploader<'a> {
             return Ok(Outcome::Duplicate);
         }
         let raw = to_crlf(raw);
+        if self.account.is_ews() {
+            match crate::ews_sync::import_message(self.state, &self.account, path, &raw).await {
+                Ok(()) => {}
+                Err(error) if connection_lost(&error) => return Err(error),
+                Err(error) => return Ok(Outcome::Refused(error.message)),
+            }
+            if let Some(key) = key {
+                self.known_ids(path).await?.insert(key);
+            }
+            return Ok(Outcome::Imported);
+        }
         let date = date.filter(|d| *d > 0).map(imap_date);
         let flags = flags.imap();
         let mut tries = 0u8;
@@ -791,7 +825,12 @@ async fn export_folder(
     progress: &mut Progress,
 ) -> AppResult<()> {
     let account = state.store.get_account(&folder.account_id)?;
-    let mut conn = if settings::working_offline(state) {
+    // Exchange: the bodies not here yet are fetched first, then the folder
+    // is written from this device's copy.
+    if account.is_ews() && !settings::working_offline(state) {
+        crate::ews_sync::fetch_missing_bodies(state, &account, folder).await?;
+    }
+    let mut conn = if settings::working_offline(state) || account.is_ews() {
         None
     } else {
         Some(connect(state, &account).await?)

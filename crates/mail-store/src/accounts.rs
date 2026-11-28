@@ -19,12 +19,15 @@ pub enum AuthKind {
     Google,
     /// Microsoft OAuth.
     Microsoft,
+    /// An organisation's own Exchange Server, with a password (stored as a
+    /// password account whose `protocol` is `ews`).
+    Exchange,
 }
 
 impl AuthKind {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Password => "password",
+            Self::Password | Self::Exchange => "password",
             Self::Google => "google",
             Self::Microsoft => "microsoft",
         }
@@ -38,6 +41,44 @@ impl AuthKind {
             _ => Err(StoreError::Corrupt("account auth")),
         }
     }
+}
+
+/// What an account's mail goes over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    /// IMAP and SMTP (with `CalDAV` and `CardDAV`, Google or Microsoft Graph for
+    /// calendars and contacts).
+    #[default]
+    Imap,
+    /// Exchange Web Services, for mail, calendar and contacts.
+    Ews,
+}
+
+impl Protocol {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Imap => "imap",
+            Self::Ews => "ews",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "imap" => Ok(Self::Imap),
+            "ews" => Ok(Self::Ews),
+            _ => Err(StoreError::Corrupt("account protocol")),
+        }
+    }
+}
+
+/// Where an Exchange account's server is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EwsSettings {
+    /// The EWS address (`https://…/EWS/Exchange.asmx`).
+    pub url: String,
+    /// The Windows sign-in name, when it isn't the address.
+    pub username: Option<String>,
 }
 
 /// How a connection to a server is secured.
@@ -125,9 +166,18 @@ pub struct Account {
     pub sort_order: u32,
     /// Months of mail kept in full on this device; `None` for all.
     pub sync_months: Option<u32>,
+    /// What its mail goes over.
+    #[serde(default)]
+    pub protocol: Protocol,
 }
 
 impl Account {
+    /// An Exchange Server account (Exchange Web Services).
+    #[must_use]
+    pub fn is_ews(&self) -> bool {
+        self.protocol == Protocol::Ews
+    }
+
     /// A Gmail account (Google sign-in, or Gmail's IMAP server), whose
     /// categories are Gmail labels.
     #[must_use]
@@ -154,7 +204,7 @@ macro_rules! account_columns {
         concat!(
             "id, email, display_name, auth, color, imap_host, imap_port, imap_security, \
              smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at, sync_months, \
-             row_number() OVER (ORDER BY ",
+             protocol, row_number() OVER (ORDER BY ",
             account_order!(),
             ") - 1"
         )
@@ -172,6 +222,7 @@ struct AccountRow {
     size_limit_bytes: Option<i64>,
     created_at: i64,
     sync_months: Option<i64>,
+    protocol: String,
     position: i64,
 }
 
@@ -188,16 +239,23 @@ impl AccountRow {
             size_limit_bytes: row.get(11)?,
             created_at: row.get(12)?,
             sync_months: row.get(13)?,
-            position: row.get(14)?,
+            protocol: row.get(14)?,
+            position: row.get(15)?,
         })
     }
 
     fn into_account(self) -> Result<Account> {
+        let protocol = Protocol::parse(&self.protocol)?;
+        let auth = match (AuthKind::parse(&self.auth)?, protocol) {
+            (AuthKind::Password, Protocol::Ews) => AuthKind::Exchange,
+            (auth, _) => auth,
+        };
         Ok(Account {
             id: self.id,
             email: self.email,
             display_name: self.display_name,
-            auth: AuthKind::parse(&self.auth)?,
+            auth,
+            protocol,
             color: self.color,
             imap: ServerConfig {
                 host: self.imap.0,
@@ -229,16 +287,56 @@ impl Store {
     /// # Errors
     /// Fails on a database error or a value too large to store.
     pub fn insert_account(&self, new: &NewAccount) -> Result<Account> {
+        self.insert_account_with(new, None)
+    }
+
+    /// Save a new Exchange Server account (`protocol` `ews`) with its EWS
+    /// address and sign-in name.
+    ///
+    /// # Errors
+    /// As [`Store::insert_account`].
+    pub fn insert_exchange_account(&self, new: &NewAccount, ews: &EwsSettings) -> Result<Account> {
+        self.insert_account_with(new, Some(ews))
+    }
+
+    /// An Exchange account's EWS address and sign-in name; `None` for
+    /// other accounts.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] if there is no such account.
+    pub fn ews_settings(&self, account_id: &str) -> Result<Option<EwsSettings>> {
+        let (protocol, url, username): (String, Option<String>, Option<String>) = self
+            .conn()
+            .query_row(
+                "SELECT protocol, ews_url, ews_username FROM accounts WHERE id = ?1",
+                params![account_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("account"))?;
+        Ok(match (Protocol::parse(&protocol)?, url) {
+            (Protocol::Ews, Some(url)) => Some(EwsSettings { url, username }),
+            _ => None,
+        })
+    }
+
+    fn insert_account_with(&self, new: &NewAccount, ews: Option<&EwsSettings>) -> Result<Account> {
         let id = new_id()?;
         let size_limit = new
             .size_limit_bytes
             .map(|v| to_i64(v, "size limit"))
             .transpose()?;
         let created_at = to_i64(new.created_at, "created_at")?;
+        let protocol = if ews.is_some() {
+            Protocol::Ews
+        } else {
+            Protocol::Imap
+        };
         self.conn().execute(
             "INSERT INTO accounts (id, email, display_name, auth, color, imap_host, imap_port,
-                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 imap_security, smtp_host, smtp_port, smtp_security, size_limit_bytes, created_at,
+                 protocol, ews_url, ews_username)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 id,
                 new.email,
@@ -253,6 +351,9 @@ impl Store {
                 new.smtp.security.as_str(),
                 size_limit,
                 created_at,
+                protocol.as_str(),
+                ews.map(|e| e.url.as_str()),
+                ews.and_then(|e| e.username.as_deref()),
             ],
         )?;
         self.get_account(&id)

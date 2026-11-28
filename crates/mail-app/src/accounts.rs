@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use mail_auth::Provider;
 use mail_store::{Account, AuthKind, NewAccount};
+use mail_sync::ews::{EwsClient, EwsLogin};
 use mail_sync::imap::ImapConnection;
 use mail_sync::{Credentials, Security, ServerConfig, ServerSuggestion, smtp};
 use serde::Deserialize;
@@ -40,6 +41,23 @@ pub struct AddOAuthInput {
     email: String,
     display_name: String,
     provider: String,
+}
+
+/// Input for `add_exchange_account`: an account on an organisation's
+/// own Exchange Server, over Exchange Web Services.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeAccountInput {
+    email: String,
+    display_name: String,
+    /// The Windows sign-in name (`DOMAIN\user` or `user@domain`); empty:
+    /// the address.
+    #[serde(default)]
+    username: String,
+    password: String,
+    /// The EWS address; `None`: found with Autodiscover.
+    #[serde(default)]
+    ews_url: Option<String>,
 }
 
 /// Changes for `update_account`.
@@ -306,6 +324,87 @@ pub async fn add_oauth_account(ctx: &Ctx, input: AddOAuthInput) -> AppResult<Acc
     Ok(account)
 }
 
+/// The EWS address typed (a server name is enough), or found with
+/// Autodiscover.
+async fn ews_url(email: &str, typed: Option<&str>, login: &EwsLogin) -> AppResult<String> {
+    match typed.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(typed) => mail_sync::ews::autodiscover::ews_url_for(typed).ok_or_else(|| {
+            AppError::invalid(
+                "Enter the EWS address as https://… (for example https://mail.example.com/EWS/Exchange.asmx).",
+            )
+        }),
+        None => mail_sync::ews::discover(email, login)
+            .await
+            .map_err(crate::ews_sync::sign_in_error),
+    }
+}
+
+/// `add_exchange_account`: an account on an organisation's own Exchange
+/// Server. The EWS address is found with Autodiscover unless given; the
+/// account is saved only after a sign-in there has worked. The password is
+/// kept in the system keyring, as for any password account.
+pub async fn add_exchange_account(ctx: &Ctx, input: ExchangeAccountInput) -> AppResult<Account> {
+    let state = &ctx.state;
+    let email = clean_email(&input.email)?;
+    ensure_new(state, &email)?;
+    if input.password.is_empty() {
+        return Err(AppError::invalid("Enter the password."));
+    }
+    let username = input.username.trim().to_owned();
+    if username.chars().any(char::is_control) || username.len() > 256 {
+        return Err(AppError::invalid("That user name can't be used."));
+    }
+    let login = EwsLogin {
+        username: if username.is_empty() {
+            email.clone()
+        } else {
+            username.clone()
+        },
+        password: input.password,
+    };
+    let url = ews_url(&email, input.ews_url.as_deref(), &login).await?;
+    let client = EwsClient::new(&url, login.clone())?;
+    client
+        .test()
+        .await
+        .map_err(crate::ews_sync::sign_in_error)?;
+    let host = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let server = mail_store::ServerConfig {
+        host,
+        port: 443,
+        security: mail_store::Security::Tls,
+    };
+    let new = NewAccount {
+        display_name: clean_name(&input.display_name, &email),
+        email: email.clone(),
+        auth: AuthKind::Exchange,
+        color: next_color(state)?,
+        imap: server.clone(),
+        smtp: server,
+        size_limit_bytes: None,
+        created_at: now(),
+    };
+    let settings = mail_store::EwsSettings {
+        url,
+        username: Some(username).filter(|u| !u.is_empty() && !u.eq_ignore_ascii_case(&email)),
+    };
+    let account = state.store.insert_exchange_account(&new, &settings)?;
+    if let Err(error) = state
+        .secrets
+        .set(&password_key(&account.id), &login.password)
+    {
+        // Never keep an account we can't sign in to later.
+        let _ = state.store.delete_account(&account.id);
+        return Err(error.into());
+    }
+    sync::start(ctx, state, &account.id);
+    events::accounts_changed(ctx);
+    Ok(account)
+}
+
 /// `update_account`: rename, or replace the password after testing it.
 pub async fn update_account(ctx: &Ctx, id: String, patch: AccountPatch) -> AppResult<Account> {
     let state = &ctx.state;
@@ -318,7 +417,25 @@ pub async fn update_account(ctx: &Ctx, id: String, patch: AccountPatch) -> AppRe
             mail_core::sync_window::MAX_MONTHS
         )));
     }
-    if let Some(password) = patch.password.filter(|p| !p.is_empty()) {
+    if let Some(password) = patch.password.clone().filter(|p| !p.is_empty())
+        && account.auth == AuthKind::Exchange
+    {
+        let settings = state.store.ews_settings(&id)?.ok_or_else(|| {
+            AppError::new("config", "This Exchange account has no server address.")
+        })?;
+        let login = EwsLogin {
+            username: settings.username.unwrap_or_else(|| account.email.clone()),
+            password,
+        };
+        EwsClient::new(&settings.url, login.clone())?
+            .test()
+            .await
+            .map_err(crate::ews_sync::sign_in_error)?;
+        state.secrets.set(&password_key(&id), &login.password)?;
+        crate::ews_sync::forget_client(&id);
+        state.wake_sync(Some(&id));
+        state.outbox_wake.notify_one();
+    } else if let Some(password) = patch.password.filter(|p| !p.is_empty()) {
         if account.auth != AuthKind::Password {
             return Err(AppError::invalid(
                 "This account signs in with its provider, not a password.",
@@ -366,7 +483,7 @@ pub async fn reconnect_account(ctx: &Ctx, id: String) -> AppResult<Account> {
     let provider = match account.auth {
         AuthKind::Google => Provider::Google,
         AuthKind::Microsoft => Provider::Microsoft,
-        AuthKind::Password => {
+        AuthKind::Password | AuthKind::Exchange => {
             return Err(AppError::invalid(
                 "This account signs in with a password. Update it in Settings instead.",
             ));
@@ -413,6 +530,7 @@ pub fn remove_account(ctx: &Ctx, id: String) -> AppResult<()> {
     }
     lock(&state.access_tokens).remove(&id);
     lock(&state.access_tokens).remove(&crate::connections::graph_key(&id));
+    crate::ews_sync::forget_client(&id);
     // The account's row goes first. If that fails, nothing is lost and the
     // account still works; had its password been deleted first, it would
     // be left listed but unable to sign in. A secret that can't be removed

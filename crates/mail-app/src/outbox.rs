@@ -455,6 +455,9 @@ fn remove_saved_draft(
     )
 }
 
+/// How a draft is marked when saved over IMAP.
+const DRAFT_FLAGS: &str = "(\\Draft \\Seen)";
+
 /// Result of `save_draft`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -483,8 +486,6 @@ pub async fn save_draft(ctx: &Ctx, draft: Draft) -> AppResult<DraftSaved> {
     let built = build(&message)?;
     let path = folder_path(state, &account.id, FolderRole::Drafts)?
         .ok_or_else(|| AppError::invalid("This account has no Drafts folder."))?;
-    let credentials = credentials::for_account(state, &account).await?;
-    let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
     // A draft of an encrypted message is saved encrypted to the sender
     // only (and never signed).
     let raw = crate::security::protect_outgoing(
@@ -499,8 +500,14 @@ pub async fn save_draft(ctx: &Ctx, draft: Draft) -> AppResult<DraftSaved> {
     // The saved copy names the Bcc recipients, or reopening the draft
     // would lose them.
     let saved = with_bcc_header(&raw, &bcc);
-    conn.append(&path, &saved, "(\\Draft \\Seen)").await?;
-    conn.logout().await;
+    if account.is_ews() {
+        crate::ews_sync::save_draft(state, &account, &path, &saved).await?;
+    } else {
+        let credentials = credentials::for_account(state, &account).await?;
+        let mut conn = ImapConnection::connect(&to_sync(&account.imap), &credentials).await?;
+        conn.append(&path, &saved, DRAFT_FLAGS).await?;
+        conn.logout().await;
+    }
     if let Some(old) = draft
         .draft_message_id
         .as_deref()
@@ -590,7 +597,11 @@ fn join(list: &[Mailbox]) -> String {
 
 /// The envelope recipients that are in neither To nor Cc: the Bcc list,
 /// which the message itself never carries.
-fn hidden_recipients(recipients: &[String], to: &[Mailbox], cc: &[Mailbox]) -> Vec<String> {
+pub(crate) fn hidden_recipients(
+    recipients: &[String],
+    to: &[Mailbox],
+    cc: &[Mailbox],
+) -> Vec<String> {
     recipients
         .iter()
         .filter(|address| {
@@ -908,6 +919,16 @@ async fn check_sent(state: &AppState, entry: &OutboxEntry) -> AppResult<SentChec
     if folders.is_empty() {
         return Ok(SentCheck::Impossible(NO_SENT_FOLDER));
     }
+    if account.is_ews() {
+        for path in &folders {
+            match crate::ews_sync::folder_has_message(state, &account, path, message_id).await {
+                Ok(true) => return Ok(SentCheck::Done(true)),
+                Ok(false) => {}
+                Err(_) => return Ok(SentCheck::TryLater),
+            }
+        }
+        return Ok(SentCheck::Done(false));
+    }
     let Ok(credentials) = credentials::for_account(state, &account).await else {
         return Ok(SentCheck::TryLater);
     };
@@ -959,31 +980,40 @@ async fn send_one(ctx: &Ctx, state: &AppState, entry: &OutboxEntry) -> AppResult
         return Ok(());
     }
 
-    let outcome = match credentials::for_account(state, &account).await {
-        Err(error) => SendOutcome::Transient(error.message),
-        Ok(credentials) => {
-            match smtp::send(
-                &to_sync(&account.smtp),
-                &credentials,
-                &account.email,
-                &message.recipients,
-                &message.raw,
-            )
-            .await
-            {
-                Ok(()) => SendOutcome::Delivered,
-                Err(mail_sync::SyncError::Send {
-                    message,
-                    permanent: true,
-                }) => SendOutcome::Permanent(message),
-                // The hand-over broke off part-way. Where the provider files
-                // sent mail itself, Sent can tell whether it went through.
-                Err(error @ mail_sync::SyncError::SendUnconfirmed { .. })
-                    if account.auth != AuthKind::Password =>
+    let outcome = if account.is_ews() {
+        // Exchange takes the whole MIME message and files the Sent copy.
+        match crate::ews_sync::send(state, &account, &message.raw, &message.recipients).await {
+            Ok(()) => SendOutcome::Delivered,
+            Err(mail_sync::SyncError::Refused(why)) => SendOutcome::Permanent(why),
+            Err(error) => SendOutcome::Transient(error.to_string()),
+        }
+    } else {
+        match credentials::for_account(state, &account).await {
+            Err(error) => SendOutcome::Transient(error.message),
+            Ok(credentials) => {
+                match smtp::send(
+                    &to_sync(&account.smtp),
+                    &credentials,
+                    &account.email,
+                    &message.recipients,
+                    &message.raw,
+                )
+                .await
                 {
-                    SendOutcome::Uncertain(error.to_string())
+                    Ok(()) => SendOutcome::Delivered,
+                    Err(mail_sync::SyncError::Send {
+                        message,
+                        permanent: true,
+                    }) => SendOutcome::Permanent(message),
+                    // The hand-over broke off part-way. Where the provider files
+                    // sent mail itself, Sent can tell whether it went through.
+                    Err(error @ mail_sync::SyncError::SendUnconfirmed { .. })
+                        if account.auth != AuthKind::Password =>
+                    {
+                        SendOutcome::Uncertain(error.to_string())
+                    }
+                    Err(error) => SendOutcome::Transient(error.to_string()),
                 }
-                Err(error) => SendOutcome::Transient(error.to_string()),
             }
         }
     };

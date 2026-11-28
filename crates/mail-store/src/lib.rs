@@ -14,6 +14,7 @@ mod calendar;
 mod categories;
 mod contacts;
 mod error;
+mod ews;
 mod files;
 mod folders;
 mod groups;
@@ -39,13 +40,14 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
-pub use accounts::{Account, AuthKind, NewAccount, Security, ServerConfig};
+pub use accounts::{Account, AuthKind, EwsSettings, NewAccount, Protocol, Security, ServerConfig};
 pub use calendar::{
     Calendar, CalendarProvider, FoundCalendar, ReminderOverrides, StoredEvent, new_event_uid,
 };
 pub use categories::Category;
 pub use contacts::{Contact, ContactState, ContactSync, MAX_CONTACTS};
 pub use error::{Result, StoreError};
+pub use ews::EwsItem;
 pub use files::{Book, ContactKeys, ExportRow, message_id_key, person_key};
 pub use folders::{Folder, NewFolder};
 pub use groups::{ContactGroup, GroupSync, MAX_GROUP_MEMBERS, MAX_GROUPS};

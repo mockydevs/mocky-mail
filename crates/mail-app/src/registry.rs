@@ -101,6 +101,7 @@ commands! {
     "add_oauth_account", true, "Add a Google or Microsoft account by signing in in the browser." => reply(Box::pin(accounts::add_oauth_account(ctx, arg(args, "input")?)).await);
     "update_account", true, "Rename an account, change its colour or sync window, or replace its password." => reply(Box::pin(accounts::update_account(ctx, arg(args, "id")?, arg(args, "patch")?)).await);
     "reconnect_account", true, "Sign in again to a Google or Microsoft account whose sign-in expired." => reply(Box::pin(accounts::reconnect_account(ctx, arg(args, "id")?)).await);
+    "add_exchange_account", true, "Add an account on an organisation's own Exchange Server (finds the server with Autodiscover when ewsUrl is null), after a test sign-in." => reply(Box::pin(accounts::add_exchange_account(ctx, arg(args, "input")?)).await);
     "remove_account", true, "Remove an account and its local mail; mail on the server stays." => reply(accounts::remove_account(ctx, arg(args, "id")?));
     "preview_attachment", false, "An attachment's bytes (base64 here) for an in-app preview; photos, PDFs and text only." => bytes(Box::pin(attachments::preview_attachment(ctx, arg(args, "messageId")?, arg(args, "index")?)).await);
     "open_attachment", true, "Open an attachment in the app the device uses for its type." => reply(Box::pin(attachments::open_attachment(ctx, arg(args, "messageId")?, arg(args, "index")?)).await);
