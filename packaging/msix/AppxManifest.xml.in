@@ -20,7 +20,7 @@
     <Resource Language="en-us" />
   </Resources>
   <Applications>
-    <!-- Id must match STORE_APPLICATION_ID in apps/desktop/src-tauri/src/events.rs (notifications). -->
+    <!-- Id must match STORE_APPLICATION_ID in apps/desktop/src-tauri/src/host.rs (notifications). -->
     <Application Id="MockyMail" Executable="mocky-mail-desktop.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="Mocky Mail"

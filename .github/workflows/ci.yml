@@ -35,8 +35,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy -p mail-core -p mail-sync -p mail-store --all-targets
-      - run: cargo test -p mail-core -p mail-sync -p mail-store
+      - run: cargo clippy -p mail-core -p mail-sync -p mail-store -p mail-app --all-targets
+      - run: cargo test -p mail-core -p mail-sync -p mail-store -p mail-app
       - name: IMAP and SMTP against a disposable test server
         run: cargo test -p mail-sync --features insecure-plaintext --test live_server
         env:

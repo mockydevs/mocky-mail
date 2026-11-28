@@ -9,7 +9,7 @@ downloads folder, then upload latest.json next to them:
 The manifest is signed with Mocky Digital's update key (Ed25519), kept off the
 server at ~/.config/mocky-mail-release/update-signing.key; apps only believe a
 manifest signed by the key whose public half is in
-apps/desktop/src-tauri/update-key.pub.
+crates/mail-app/update-key.pub.
 
 It reads the version from apps/desktop/src-tauri/tauri.conf.json, finds that
 version's installers in SHA256SUMS and checks each file's SHA-256 before
@@ -26,7 +26,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "apps/desktop/src-tauri/tauri.conf.json"
-PUBLIC_KEY = ROOT / "apps/desktop/src-tauri/update-key.pub"
+PUBLIC_KEY = ROOT / "crates/mail-app/update-key.pub"
 DEFAULT_KEY = pathlib.Path.home() / ".config/mocky-mail-release/update-signing.key"
 INSTALLERS = {
     "linux-deb": "mocky-mail_{version}_amd64.deb",

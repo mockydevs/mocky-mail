@@ -7,11 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use mail_app::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use tauri::Wry;
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
-
-use crate::error::{AppError, AppResult};
 
 static PLUGIN: OnceLock<PluginHandle<Wry>> = OnceLock::new();
 
@@ -180,4 +179,31 @@ pub async fn wait_shared_files() -> AppResult<Vec<Shared>> {
         .await
         .map_err(plugin_error)?
         .files)
+}
+
+/// Wait for files shared to the app, for as long as it runs, and hand each
+/// one over (`mail_app::opened`).
+pub fn watch_shared(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let host = crate::host::TauriHost::new(app);
+        loop {
+            match wait_shared_files().await {
+                Ok(files) => {
+                    for file in files {
+                        let kind = match file.kind.as_str() {
+                            "eml" => Some("eml"),
+                            "ics" => Some("ics"),
+                            "vcf" => Some("vcf"),
+                            _ => None,
+                        };
+                        mail_app::opened::deliver(Some(&host), &file.path, Some(&file.name), kind);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("shared files: {error}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    });
 }

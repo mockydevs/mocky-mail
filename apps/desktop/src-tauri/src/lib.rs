@@ -1,54 +1,26 @@
-//! Tauri shell for Mocky Mail: opens the database, starts one sync engine
-//! per account and the outbox worker, and exposes the commands in
-//! `docs/ipc.md`. Mail rules live in `mail-core`; network code in
-//! `mail-sync`; storage in `mail-store`.
+//! Tauri shell for Mocky Mail: the windows, the tray, the Android plugins,
+//! and [`host::TauriHost`], through which `mail-app` (the state, the
+//! background workers and every command) reaches the platform. The
+//! commands in `docs/ipc.md` are thin wrappers in [`commands`]. Mail rules
+//! live in `mail-core`; network code in `mail-sync`; storage in
+//! `mail-store`.
 
 // Tauri hands commands owned `State`, `AppHandle` and deserialized
 // arguments, so taking them by value is required, not wasteful.
 #![allow(clippy::needless_pass_by_value)]
 
-mod accounts;
-mod attachments;
-mod calendar;
-mod compose;
-mod connections;
-mod contacts;
-mod convert;
-mod credentials;
-mod error;
-mod events;
-mod files;
+mod commands;
 #[cfg(target_os = "android")]
 mod files_android;
-mod folders;
 #[cfg(target_os = "android")]
 mod google_android;
-mod invitations;
-mod mail;
-mod mailto;
-mod message_tools;
-mod message_window;
-mod opened;
-mod organize;
-mod out_of_office;
-mod outbox;
-mod pst;
-mod read_receipts;
-mod reminders;
-mod rules;
-mod security;
-mod server_rules;
-mod settings;
-mod signatures;
-mod state;
-mod sync;
-mod tasks;
+mod host;
 #[cfg(desktop)]
 mod tray;
-mod updates;
 
 use std::sync::Arc;
 
+use mail_app::{Ctx, mailto, opened};
 use mail_sync::secrets::KeyringStore;
 #[cfg(desktop)]
 use tauri::Emitter;
@@ -56,7 +28,7 @@ use tauri::webview::NewWindowResponse;
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::state::{AppState, now};
+use crate::host::TauriHost;
 
 /// Whether a URL is the app itself (bundled pages, dev server, iframes).
 fn is_app_url(url: &Url) -> bool {
@@ -149,33 +121,24 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     create_window(app)?;
     let data_dir = app.path().app_data_dir()?;
     let cache_dir = app.path().app_cache_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
-    std::fs::create_dir_all(&cache_dir)?;
-    attachments::clear_opened(&cache_dir);
-    let store = mail_store::Store::open(data_dir.join("mail.db"))?;
-    let recovered = store.recover_outbox_after_restart(now())?;
-    if recovered > 0 {
-        eprintln!(
-            "{recovered} message(s) were mid-send when the app stopped; checking Sent before retrying"
-        );
-    }
-    let state = Arc::new(AppState::new(store, Arc::new(KeyringStore), cache_dir));
-    app.manage(Arc::clone(&state));
+    let state = Arc::new(mail_app::open(
+        &data_dir,
+        &cache_dir,
+        Arc::new(KeyringStore),
+    )?);
+    let ctx = Ctx::new(
+        state,
+        Arc::new(TauriHost::new(app.handle().clone())),
+        tauri::async_runtime::handle().inner().clone(),
+    );
+    app.manage(ctx.clone());
     #[cfg(desktop)]
     tray::build(app);
 
-    let handle = app.handle().clone();
-    for account in state.store.list_accounts()? {
-        sync::start(&handle, &state, &account.id);
-    }
-    contacts::start(handle.clone(), Arc::clone(&state));
-    calendar::start(handle.clone(), Arc::clone(&state));
-    reminders::start(handle.clone(), Arc::clone(&state));
-    server_rules::start(&handle);
+    mail_app::start(&ctx)?;
     // Android: files shared to the app or opened with it.
     #[cfg(target_os = "android")]
-    opened::watch_shared(handle.clone());
-    tauri::async_runtime::spawn(outbox::run(handle, state));
+    files_android::watch_shared(app.handle().clone());
     Ok(())
 }
 
@@ -200,8 +163,9 @@ pub fn run() {
         }
         // A mail, calendar or contact file opened while the app runs.
         let cwd = std::path::PathBuf::from(cwd);
+        let host = TauriHost::new(app.clone());
         for path in opened::from_args(args.iter().skip(1).map(String::as_str), &cwd) {
-            opened::deliver(Some(app), &path, None, None);
+            opened::deliver(Some(&host), &path, None, None);
         }
     }));
     // Android: Gmail sign-in with the phone's own Google accounts.
@@ -224,132 +188,132 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
-            accounts::suggest_servers,
-            accounts::list_accounts,
-            accounts::add_account,
-            accounts::add_oauth_account,
-            accounts::update_account,
-            accounts::reconnect_account,
-            accounts::remove_account,
-            mail::list_folders,
-            folders::create_folder,
-            folders::rename_folder,
-            folders::delete_folder,
-            mail::list_messages,
-            mail::get_thread,
-            mail::set_focus_rule,
-            mail::preview_body,
-            mailto::take_mailto,
-            mailto::parse_mailto,
-            mail::get_message,
-            mail::set_flags,
-            mail::move_messages,
-            mail::suggest_recipients,
-            mail::delete_forever,
-            organize::copy_messages,
-            organize::mark_junk,
-            organize::list_categories,
-            organize::save_category,
-            organize::delete_category,
-            organize::set_categories,
-            organize::set_folder_favorite,
-            organize::reorder_accounts,
-            message_window::open_message_window,
-            attachments::save_attachment,
-            attachments::pick_attachments,
-            attachments::preview_attachment,
-            attachments::open_attachment,
-            message_tools::save_message,
-            message_tools::message_source,
-            message_tools::print_html,
-            mail::sync_now,
-            mail::open_external,
-            outbox::check_draft,
-            outbox::send_message,
-            outbox::save_draft,
-            outbox::attachments_for_draft,
-            outbox::list_outbox,
-            outbox::outbox_send_now,
-            outbox::outbox_cancel,
-            outbox::outbox_edit,
-            settings::get_settings,
-            settings::set_settings,
-            contacts::list_contacts,
-            contacts::get_contact,
-            contacts::save_contact,
-            contacts::delete_contact,
-            contacts::sync_contacts,
-            contacts::list_contact_groups,
-            contacts::save_contact_group,
-            contacts::delete_contact_group,
-            connections::connect_calendar_and_contacts,
-            calendar::list_calendars,
-            calendar::list_events,
-            calendar::get_event,
-            calendar::save_event,
-            calendar::delete_event,
-            calendar::sync_calendars,
-            calendar::set_calendar_visible,
-            calendar::get_free_busy,
-            reminders::list_due_reminders,
-            reminders::dismiss_reminder,
-            reminders::snooze_reminder,
-            tasks::list_task_lists,
-            tasks::list_tasks,
-            tasks::save_task,
-            tasks::delete_task,
-            tasks::sync_tasks,
-            invitations::answer_invitation,
-            out_of_office::get_out_of_office,
-            out_of_office::set_out_of_office,
-            invitations::remove_cancelled_event,
-            invitations::apply_invitation_reply,
-            signatures::get_signature,
-            signatures::list_signatures,
-            signatures::save_signature,
-            signatures::delete_signature,
-            signatures::set_signature_defaults,
-            signatures::set_signature_image,
-            signatures::set_signature_image_width,
-            signatures::remove_signature_image,
-            updates::check_for_update,
-            updates::install_update,
-            rules::parse_search,
-            rules::list_rules,
-            rules::save_rule,
-            rules::delete_rule,
-            rules::reorder_rules,
-            rules::run_rules,
-            rules::preview_rule,
-            rules::list_image_senders,
-            rules::trust_image_sender,
-            rules::untrust_image_sender,
-            compose::resolve_recipients,
-            compose::contact_card_attachment,
-            compose::message_as_attachment,
-            compose::open_compose_window,
-            compose::take_compose_draft,
-            read_receipts::answer_read_receipt,
-            security::list_keys,
-            security::import_key,
-            security::export_public_key,
-            security::remove_key,
-            security::set_key_trusted,
-            security::set_account_key,
-            security::get_account_keys,
-            security::set_preferred_kind,
-            security::check_encryption,
-            files::import_mail_files,
-            files::export_mail,
-            files::import_calendar_file,
-            files::export_calendar,
-            files::import_contacts_file,
-            files::export_contacts,
-            files::import_opened_file,
-            files::import_message_file,
-            files::read_message_file,
-            pst::import_pst,
-            opened::take_opened_files,
+            commands::suggest_servers,
+            commands::list_accounts,
+            commands::add_account,
+            commands::add_oauth_account,
+            commands::update_account,
+            commands::reconnect_account,
+            commands::remove_account,
+            commands::list_folders,
+            commands::create_folder,
+            commands::rename_folder,
+            commands::delete_folder,
+            commands::list_messages,
+            commands::get_thread,
+            commands::set_focus_rule,
+            commands::preview_body,
+            commands::take_mailto,
+            commands::parse_mailto,
+            commands::get_message,
+            commands::set_flags,
+            commands::move_messages,
+            commands::suggest_recipients,
+            commands::delete_forever,
+            commands::copy_messages,
+            commands::mark_junk,
+            commands::list_categories,
+            commands::save_category,
+            commands::delete_category,
+            commands::set_categories,
+            commands::set_folder_favorite,
+            commands::reorder_accounts,
+            commands::open_message_window,
+            commands::save_attachment,
+            commands::pick_attachments,
+            commands::preview_attachment,
+            commands::open_attachment,
+            commands::save_message,
+            commands::message_source,
+            commands::print_html,
+            commands::sync_now,
+            commands::open_external,
+            commands::check_draft,
+            commands::send_message,
+            commands::save_draft,
+            commands::attachments_for_draft,
+            commands::list_outbox,
+            commands::outbox_send_now,
+            commands::outbox_cancel,
+            commands::outbox_edit,
+            commands::get_settings,
+            commands::set_settings,
+            commands::list_contacts,
+            commands::get_contact,
+            commands::save_contact,
+            commands::delete_contact,
+            commands::sync_contacts,
+            commands::list_contact_groups,
+            commands::save_contact_group,
+            commands::delete_contact_group,
+            commands::connect_calendar_and_contacts,
+            commands::list_calendars,
+            commands::list_events,
+            commands::get_event,
+            commands::save_event,
+            commands::delete_event,
+            commands::sync_calendars,
+            commands::set_calendar_visible,
+            commands::get_free_busy,
+            commands::list_due_reminders,
+            commands::dismiss_reminder,
+            commands::snooze_reminder,
+            commands::list_task_lists,
+            commands::list_tasks,
+            commands::save_task,
+            commands::delete_task,
+            commands::sync_tasks,
+            commands::answer_invitation,
+            commands::get_out_of_office,
+            commands::set_out_of_office,
+            commands::remove_cancelled_event,
+            commands::apply_invitation_reply,
+            commands::get_signature,
+            commands::list_signatures,
+            commands::save_signature,
+            commands::delete_signature,
+            commands::set_signature_defaults,
+            commands::set_signature_image,
+            commands::set_signature_image_width,
+            commands::remove_signature_image,
+            commands::check_for_update,
+            commands::install_update,
+            commands::parse_search,
+            commands::list_rules,
+            commands::save_rule,
+            commands::delete_rule,
+            commands::reorder_rules,
+            commands::run_rules,
+            commands::preview_rule,
+            commands::list_image_senders,
+            commands::trust_image_sender,
+            commands::untrust_image_sender,
+            commands::resolve_recipients,
+            commands::contact_card_attachment,
+            commands::message_as_attachment,
+            commands::open_compose_window,
+            commands::take_compose_draft,
+            commands::answer_read_receipt,
+            commands::list_keys,
+            commands::import_key,
+            commands::export_public_key,
+            commands::remove_key,
+            commands::set_key_trusted,
+            commands::set_account_key,
+            commands::get_account_keys,
+            commands::set_preferred_kind,
+            commands::check_encryption,
+            commands::import_mail_files,
+            commands::export_mail,
+            commands::import_calendar_file,
+            commands::export_calendar,
+            commands::import_contacts_file,
+            commands::export_contacts,
+            commands::import_opened_file,
+            commands::import_message_file,
+            commands::read_message_file,
+            commands::import_pst,
+            commands::take_opened_files,
         ])
         .build(tauri::generate_context!())
         .map(|app| app.run(on_run_event));
@@ -366,9 +330,10 @@ pub fn run() {
 fn on_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     if let tauri::RunEvent::Opened { urls } = &event {
+        let host = TauriHost::new(app.clone());
         for url in urls {
             if let Ok(path) = url.to_file_path() {
-                opened::deliver(Some(app), &path, None, None);
+                opened::deliver(Some(&host), &path, None, None);
             }
         }
     }

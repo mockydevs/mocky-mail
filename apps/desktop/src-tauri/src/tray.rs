@@ -3,14 +3,12 @@
 //! reminder notifications keep coming. Also start at login, opening
 //! straight into the tray.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use mail_app::Ctx;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
-
-use crate::state::AppState;
 
 /// The tray icon is showing, so a closed window can come back from it.
 static READY: AtomicBool = AtomicBool::new(false);
@@ -61,9 +59,9 @@ fn try_build(app: &tauri::App) -> tauri::Result<()> {
                 let _ = app.emit("mail://compose", serde_json::json!({}));
             }
             "check" => {
-                if let Some(state) = app.try_state::<Arc<AppState>>() {
-                    state.wake_sync(None);
-                    state.outbox_wake.notify_one();
+                if let Some(ctx) = app.try_state::<Ctx>() {
+                    ctx.state.wake_sync(None);
+                    ctx.state.outbox_wake.notify_one();
                 }
             }
             "quit" => app.exit(0),
@@ -97,11 +95,12 @@ pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
         return;
     }
     let app = window.app_handle();
-    let Some(state) = app.try_state::<Arc<AppState>>() else {
+    let Some(ctx) = app.try_state::<Ctx>() else {
         return;
     };
+    let state = &ctx.state;
     let keep = READY.load(Ordering::Relaxed)
-        && crate::settings::load(&state).is_ok_and(|s| s.close_to_tray);
+        && mail_app::settings::load(state).is_ok_and(|s| s.close_to_tray);
     if !keep {
         return;
     }
@@ -109,8 +108,8 @@ pub fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
     let _ = window.hide();
     if state.store.get_setting(TOLD_KEY).ok().flatten().is_none() {
         let _ = state.store.set_setting(TOLD_KEY, "1");
-        crate::events::notify(
-            app,
+        mail_app::events::notify(
+            &ctx,
             "Mocky Mail is still running",
             "It keeps checking for mail. Open it from the tray icon; Quit is there too.",
         );

@@ -87,7 +87,7 @@ scripts/write-latest-json.py path/to/downloads --notes "One line on what's new."
 `latest.json` is signed with Mocky Digital's update key (Ed25519), which
 stays on the release machine at `~/.config/mocky-mail-release/update-signing.key`
 and is never uploaded; back it up somewhere safe and offline. Apps trust only
-the key in `apps/desktop/src-tauri/update-key.pub` and only install files from
+the key in `crates/mail-app/update-key.pub` and only install files from
 the same `downloads/` folder, so a compromised web server can't push an update.
 Losing the key means installed copies need one manual update to a build with a
 new key.

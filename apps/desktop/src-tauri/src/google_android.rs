@@ -5,16 +5,12 @@
 
 use std::sync::OnceLock;
 
-use serde::Deserialize;
+use mail_app::host::DeviceGoogleGrant as Granted;
+use mail_app::{AppError, AppResult};
 use tauri::Wry;
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 
-use crate::error::{AppError, AppResult};
-
 static PLUGIN: OnceLock<PluginHandle<Wry>> = OnceLock::new();
-
-/// Google issues access tokens for about an hour; count a little less.
-pub const TOKEN_LIFETIME_SECS: u64 = 50 * 60;
 
 /// Register the Kotlin plugin. Android only.
 pub fn init() -> TauriPlugin<Wry> {
@@ -25,19 +21,6 @@ pub fn init() -> TauriPlugin<Wry> {
             Ok(())
         })
         .build()
-}
-
-/// An account and a fresh access token for it.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Granted {
-    /// The Google account chosen on the phone.
-    pub email: String,
-    /// Bearer token for IMAP and SMTP (XOAUTH2).
-    pub access_token: String,
-    /// The permissions this token carries, as Google listed them.
-    #[serde(default)]
-    pub granted_scopes: Vec<String>,
 }
 
 fn handle() -> AppResult<&'static PluginHandle<Wry>> {
