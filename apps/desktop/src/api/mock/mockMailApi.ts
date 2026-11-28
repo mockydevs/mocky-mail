@@ -3,6 +3,7 @@ import { addressOf, isPlausibleAddress, parseRecipients, splitRecipients } from 
 import type {
   Account,
   AddressBookStatus,
+  AutomationInfo,
   CalendarEvent,
   CalendarInfo,
   CalendarStatus,
@@ -131,7 +132,17 @@ export interface MockOptions {
   reminders?: boolean;
   /** Find a Time: busy times by lower-case address (others are unknown); default: made-up times for everyone. */
   freeBusy?: Record<string, { start: number; end: number; showAs: ShowAs }[]>;
+  /**
+   * Microsoft 365 sign-ins (adding, signing in again, connecting calendars)
+   * are refused until an administrator approves the app: an `auth` error with
+   * `adminConsentUrl`, until approveAdminConsent is called.
+   */
+  adminConsent?: boolean;
 }
+
+/** The approval page the mock's admin-consent errors point to. */
+export const MOCK_ADMIN_CONSENT_URL =
+  'https://login.microsoftonline.com/organizations/adminconsent?client_id=00000000-0000-0000-0000-000000000000';
 
 export interface MockMailApi extends MailApi {
   /** Fire a backend event, as the Rust side would. */
@@ -164,6 +175,10 @@ export interface MockMailApi extends MailApi {
   readonly cancellations: { eventId: string; occurrence: number | null }[];
   /** The reminder clock ticks: emit mail://reminders with what is due at now(). */
   tickReminders(): void;
+  /** An administrator approved the app: Microsoft sign-ins work from now on. */
+  approveAdminConsent(): void;
+  /** How many times resetAutomationToken made a new secret. */
+  readonly tokenResets: number;
 }
 
 const SECURITY_KINDS: readonly SecurityKind[] = ['smime', 'openpgp'];
@@ -387,6 +402,28 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
   /** While set, imports and exports wait here after their first step. */
   let fileGate: Promise<void> | null = null;
   const now = options.now ?? (() => MOCK_NOW);
+  /** Microsoft sign-ins wait for an administrator's approval until approveAdminConsent. */
+  let needsAdminConsent = options.adminConsent ?? false;
+  /** How many times the automation secret was replaced, for assertions. */
+  let tokenResets = 0;
+  const adminConsentError = () =>
+    appError(
+      'auth',
+      'Your organisation lets only an administrator approve new apps. Ask your administrator to approve Mocky Mail, then try again.',
+      MOCK_ADMIN_CONSENT_URL,
+    );
+  const automationInfo = (): AutomationInfo => {
+    if (options.phone) return { mode: settings.automation, endpoint: null, tokenFile: null, cliPath: null, mcpConfig: null };
+    const on = settings.automation !== 'off';
+    const cli = 'C:\\Program Files\\Mocky Mail\\mocky-mail.exe';
+    return {
+      mode: settings.automation,
+      endpoint: on ? '\\\\.\\pipe\\mocky-mail-you' : null,
+      tokenFile: on ? 'C:\\Users\\you\\AppData\\Roaming\\ke.co.mocky.mail\\automation-token' : null,
+      cliPath: cli,
+      mcpConfig: JSON.stringify({ mcpServers: { 'mocky-mail': { command: cli, args: ['mcp'] } } }, null, 2),
+    };
+  };
   /** Play a sent message through sending and sent, then drop it, as Rust does. */
   const deliver = (id: string, holdSecs: number) => {
     const step = (status: OutboxEntry['status'], next?: () => void) => {
@@ -810,6 +847,12 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     tickReminders: () => {
       emit('mail://reminders', { reminders: due() });
     },
+    approveAdminConsent: () => {
+      needsAdminConsent = false;
+    },
+    get tokenResets() {
+      return tokenResets;
+    },
     emit,
     failNext(method, error) {
       failures.set(method, error);
@@ -882,6 +925,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
           const name = input.provider === 'google' ? 'Google' : 'Microsoft';
           throw appError('config', `${name} sign-in is not configured in this build yet.`);
         }
+        if (input.provider === 'microsoft' && needsAdminConsent) throw adminConsentError();
         const id = `acc${String(seq++)}`;
         // Like the real flow: with no address typed, the account picked in
         // the provider's chooser is used.
@@ -925,7 +969,10 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
     reconnectAccount: (id) =>
       run('reconnectAccount', () => {
         const acc = account(id);
-        if (acc.auth === 'password') throw appError('invalid', 'This account signs in with a password.');
+        if (acc.auth === 'password' || acc.auth === 'exchange') {
+          throw appError('invalid', 'This account signs in with a password.');
+        }
+        if (acc.auth === 'microsoft' && needsAdminConsent) throw adminConsentError();
         accountsChanged();
         return acc;
       }),
@@ -1175,6 +1222,56 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         const draft = composeDrafts.get(key) ?? null;
         composeDrafts.delete(key);
         return draft;
+      }),
+
+    addExchangeAccount: (input) =>
+      run('addExchangeAccount', () => {
+        if (!parseRecipients(input.email).valid.length) throw appError('invalid', 'Enter a valid email address.');
+        if (accounts.some((a) => a.email.toLowerCase() === input.email.toLowerCase())) {
+          throw appError('invalid', 'That account is already added.');
+        }
+        if (!input.password) throw appError('invalid', 'Enter the password.');
+        const domain = input.email.slice(input.email.lastIndexOf('@') + 1).toLowerCase();
+        const given = input.ewsUrl?.trim() ?? null;
+        if (given !== null && /^[a-z][a-z0-9+.-]*:/i.test(given) && !/^https:\/\//i.test(given)) {
+          throw appError('invalid', 'The server address must start with https://.');
+        }
+        // Like Autodiscover finding nothing (example: a made-up domain).
+        if (given === null && domain.endsWith('.invalid')) {
+          throw appError('config', `No Exchange server was found for ${domain}. Enter the server address.`);
+        }
+        const host = given === null ? `mail.${domain}` : given.replace(/^https:\/\//i, '').split(/[/:]/)[0] ?? '';
+        if (host.endsWith('.invalid')) throw appError('connect', `Could not connect to ${host}.`);
+        if (input.password === 'wrong') throw appError('auth', 'The Exchange server did not accept that sign-in name and password.');
+        const id = `acc${String(seq++)}`;
+        const server = { host, port: 443, security: 'tls' as const };
+        const created: Account = {
+          id,
+          email: input.email,
+          displayName: input.displayName || input.email,
+          auth: 'exchange',
+          protocol: 'ews',
+          createdAt: now(),
+          color: PALETTE[accounts.length % PALETTE.length] ?? '#2450C8',
+          imap: server,
+          smtp: server,
+          sizeLimitBytes: null,
+          sortOrder: Math.max(-1, ...accounts.map((a) => a.sortOrder)) + 1,
+          syncMonths: null,
+        };
+        accounts = [...accounts, created];
+        folders = [...folders, ...foldersFor(id)];
+        accountsChanged();
+        return created;
+      }),
+
+    getAutomationInfo: () => run('getAutomationInfo', automationInfo),
+
+    resetAutomationToken: () =>
+      run('resetAutomationToken', () => {
+        if (options.phone) throw appError('invalid', 'Automation is available on computers only.');
+        tokenResets += 1;
+        return automationInfo();
       }),
 
     listKeys: () => run('listKeys', () => keys),
@@ -1491,6 +1588,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
         if (!options.oauthConfigured) {
           throw appError('config', `${name} calendar and contacts access is not set up in this build yet.`);
         }
+        if (acc.auth === 'microsoft' && needsAdminConsent) throw adminConsentError();
         const fixed = (list: (CalendarStatus | AddressBookStatus)[]) =>
           list.map((s) => (s.accountId === accountId ? { accountId, state: 'synced' as const, message: null } : s));
         calendarStatus = fixed(calendarStatuses());
@@ -2453,6 +2551,7 @@ export function createMockMailApi(options: MockOptions = {}): MockMailApi {
 
     setSettings: (next) =>
       run('setSettings', () => {
+        if (!['off', 'read', 'full'].includes(next.automation)) throw appError('invalid', 'Choose off, look only or full access.');
         settings = clone(next);
         return settings;
       }),

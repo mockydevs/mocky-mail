@@ -6,12 +6,20 @@ import { APP_ERROR_KINDS, type AppError, type AppErrorKind } from './types';
  */
 export class MailError extends Error implements AppError {
   readonly kind: AppErrorKind;
+  /** Microsoft 365: the page an administrator opens to approve Mocky Mail (see AppError). */
+  readonly adminConsentUrl?: string;
 
-  constructor(kind: AppErrorKind, message: string) {
+  constructor(kind: AppErrorKind, message: string, adminConsentUrl?: string) {
     super(message);
     this.name = 'MailError';
     this.kind = kind;
+    if (adminConsentUrl !== undefined) this.adminConsentUrl = adminConsentUrl;
   }
+}
+
+/** Only an https page is ever offered as the administrator's approval page. */
+function consentUrlOf(value: unknown): string | undefined {
+  return typeof value === 'string' && /^https:\/\/\S+$/i.test(value) ? value : undefined;
 }
 
 export function isAppError(value: unknown): value is AppError {
@@ -31,12 +39,12 @@ export function isAppError(value: unknown): value is AppError {
  */
 export function toAppError(error: unknown): MailError {
   if (error instanceof MailError) return error;
-  if (isAppError(error)) return new MailError(error.kind, error.message);
+  if (isAppError(error)) return new MailError(error.kind, error.message, consentUrlOf(error.adminConsentUrl));
   return new MailError('internal', 'Something went wrong. Please try again.');
 }
 
-export function appError(kind: AppErrorKind, message: string): MailError {
-  return new MailError(kind, message);
+export function appError(kind: AppErrorKind, message: string, adminConsentUrl?: string): MailError {
+  return new MailError(kind, message, adminConsentUrl);
 }
 
 /** A short headline for each kind; the backend message gives the detail. */

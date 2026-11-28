@@ -6,6 +6,8 @@ import type { Account, AppError, Security, ServerConfig, ServerSuggestion } from
 import { Icon } from '../../ui/Icon';
 import { PasswordField } from '../../ui/PasswordField';
 import { parseRecipients } from '../compose/recipients';
+import { AdminConsentPanel } from './AdminConsent';
+import { ExchangeForm } from './ExchangeForm';
 import { ProviderLogo } from './ProviderLogo';
 import { accountErrorCopy, appPasswordProvider, domainOf, guessServers, isValidServer, serverErrorCopy } from './providers';
 
@@ -111,6 +113,12 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
   const serversEdited = useRef(false);
   const [suggestedOAuth, setSuggestedOAuth] = useState<'google' | 'microsoft' | null>(null);
   const [noSuggestion, setNoSuggestion] = useState(false);
+  /** The lookup says this domain is on an Exchange Server. */
+  const [suggestedExchange, setSuggestedExchange] = useState(false);
+  /** The Exchange Server form is shown instead. */
+  const [exchange, setExchange] = useState(false);
+  /** The provider last tried, for Try again after an administrator approves the app. */
+  const [lastOAuth, setLastOAuth] = useState<'google' | 'microsoft'>('microsoft');
   const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   // Which sign-in failed: the message goes next to that part of the form.
@@ -145,7 +153,8 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
         setImap(chosen.imap);
         setSmtp(chosen.smtp);
       }
-      setSuggestedOAuth(suggestion && suggestion.auth !== 'password' ? suggestion.auth : null);
+      setSuggestedOAuth(suggestion && (suggestion.auth === 'google' || suggestion.auth === 'microsoft') ? suggestion.auth : null);
+      setSuggestedExchange(suggestion?.auth === 'exchange');
       setNoSuggestion(suggestion === null);
       if (suggestion === null) setAdvanced(true);
     });
@@ -163,6 +172,7 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
     lookup.current = null;
     setLooking(false);
     setSuggestedOAuth(null);
+    setSuggestedExchange(false);
     setNoSuggestion(false);
     if (!serversEdited.current) {
       setImap(null);
@@ -234,6 +244,7 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
       return;
     }
     setFieldError(null);
+    setLastOAuth(provider);
     setBusy(provider);
     api.addOAuthAccount({ email: email.trim(), displayName: displayName.trim(), provider }).then(onAdded, fail('oauth'));
   };
@@ -262,6 +273,17 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
 
   const notice = (from: 'password' | 'oauth') => {
     if (!otherError || errorFrom !== from) return null;
+    if (from === 'oauth' && otherError.adminConsentUrl) {
+      return (
+        <AdminConsentPanel
+          url={otherError.adminConsentUrl}
+          onRetry={() => {
+            oauth(lastOAuth);
+          }}
+          busy={busy === lastOAuth}
+        />
+      );
+    }
     const copy = accountErrorCopy(otherError, email, from);
     return (
       <div className="notice notice--error" role="alert">
@@ -431,13 +453,42 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
       .filter(Boolean)
       .join(' ') || undefined;
 
+  if (exchange) {
+    return (
+      <ExchangeForm
+        onAdded={onAdded}
+        onCancel={onCancel}
+        initialEmail={email}
+        onBack={(typed) => {
+          if (typed !== email) changeEmail(typed);
+          setExchange(false);
+        }}
+      />
+    );
+  }
+
+  const exchangeButton = (
+    <button
+      type="button"
+      className="btn btn--secondary btn--large"
+      disabled={busy !== null}
+      onClick={() => {
+        setError(null);
+        setExchange(true);
+      }}
+    >
+      <Icon name="mail" />
+      Exchange Server
+    </button>
+  );
+
   return (
     <form className="account-form" aria-labelledby={`${id}-title`} onSubmit={submit} noValidate>
       <header className="account-form__header">
         <h2 id={`${id}-title`} className="account-form__title">
           Add an email account
         </h2>
-        <p className="form-hint">Works with Mocky Mail, Gmail, Outlook and any other IMAP mailbox.</p>
+        <p className="form-hint">Works with Mocky Mail, Gmail, Outlook, Exchange Server and any other IMAP mailbox.</p>
       </header>
 
       {!suggestedOAuth && (
@@ -445,6 +496,7 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
           <div className="oauth">
             {oauthButton('google')}
             {oauthButton('microsoft')}
+            {exchangeButton}
           </div>
           {signinProgress}
           {notice('oauth')}
@@ -478,6 +530,22 @@ export function AddAccountForm({ onAdded, onCancel }: Props) {
           </p>
         )}
       </div>
+
+      {suggestedExchange && !suggestedOAuth && (
+        <div className="oauth-suggest" role="status">
+          <p>This address is on an Exchange Server. Adding it as an Exchange Server account brings your mail, calendar and contacts.</p>
+          <button
+            type="button"
+            className="btn btn--primary btn--block"
+            disabled={busy !== null}
+            onClick={() => {
+              setExchange(true);
+            }}
+          >
+            Add as Exchange Server
+          </button>
+        </div>
+      )}
 
       {!suggestedOAuth && mailSettings()}
 

@@ -35,6 +35,8 @@ import {
   folderLabel,
   INBOX_VIEW,
   resolveSelection,
+  ROLE_TITLES,
+  UNIFIED_ROLES,
   rowHolds,
   viewInfo,
   viewQuery,
@@ -52,7 +54,8 @@ import { isActive } from '../features/outbox/outboxCopy';
 import { useSendStatus, type SendStatus } from '../features/outbox/useSendStatus';
 import { playChime } from '../features/notifications/chime';
 import { ReadingPane } from '../features/reader/ReadingPane';
-import { SettingsView } from '../features/settings/SettingsView';
+import { SETTINGS_SECTIONS, SettingsView, type SettingsSection } from '../features/settings/SettingsView';
+import { CommandPalette, type PaletteCommand } from '../features/palette/CommandPalette';
 import { ContactsView } from '../features/contacts/ContactsView';
 import { RemindersPanel } from '../features/reminders/RemindersPanel';
 import { ManageFolders } from '../features/mailbox/ManageFolders';
@@ -80,7 +83,7 @@ import { CalendarScreen, preloadScreens, TasksScreen } from './screens';
 type Screen =
   | { kind: 'mail' }
   | { kind: 'compose'; draft: Draft; title: string; compose: ComposeKind; attachmentsFrom: string | null; unsaved: boolean }
-  | { kind: 'settings'; section?: 'security' }
+  | { kind: 'settings'; section?: SettingsSection }
   | { kind: 'contacts' }
   | { kind: 'calendar'; focus?: { eventId: string; at: number } }
   | { kind: 'tasks'; focusTaskId?: string }
@@ -140,6 +143,7 @@ const DEFAULT_SETTINGS: Settings = {
   readingPane: 'right',
   workOffline: false,
   readReceipts: 'ask',
+  automation: 'off',
   signByDefault: false,
   encryptWhenPossible: false,
   device: { tray: false, startAtLogin: false },
@@ -371,6 +375,8 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const [readPending, setReadPending] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<MessageDetail | null>(null);
   const [help, setHelp] = useState(false);
+  /** Ctrl+K: the command palette is open (computers). */
+  const [palette, setPalette] = useState(false);
   // The account whose folders are being managed, if any.
   const [managing, setManaging] = useState<string | null>(null);
   const managedAccount = managing === null ? undefined : accounts.find((a) => a.id === managing);
@@ -396,6 +402,11 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   }
   const searchRef = useRef<HTMLInputElement>(null);
   const readerRef = useRef<HTMLElement>(null);
+  /** Bumped by the palette's Search mail: focus the search box once it is shown. */
+  const [focusSearch, setFocusSearch] = useState(0);
+  useEffect(() => {
+    if (focusSearch > 0) searchRef.current?.focus();
+  }, [focusSearch]);
 
   const filtering = filter !== 'all' || search.trim() !== '';
   const items = applyOverrides(filtering ? withPinned(page.items, kept) : page.items, actions.overrides, page.version);
@@ -842,6 +853,11 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
   const handlerRef = useRef<(action: ShortcutAction, event: KeyboardEvent) => void>(() => undefined);
   useEffect(() => {
     handlerRef.current = (action, event) => {
+      if (action === 'palette') {
+        event.preventDefault();
+        if (!phone) setPalette(true);
+        return;
+      }
       if (action === 'close') {
         if (
           screen.kind === 'settings' ||
@@ -1368,6 +1384,208 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
     }
   }
 
+  /** Everything the command palette offers: the same handlers the menus and buttons use. */
+  const paletteCommands = (): PaletteCommand[] => {
+    const list: PaletteCommand[] = [];
+    const mail = 'Mail';
+    list.push(
+      { id: 'compose', label: 'New message', group: mail, detail: 'C', keywords: 'write compose email', run: newMessage },
+      {
+        id: 'search',
+        label: 'Search mail',
+        group: mail,
+        detail: '/',
+        keywords: 'find look for',
+        run: () => {
+          leaving(() => {
+            setScreen({ kind: 'mail' });
+            setFocusSearch((n) => n + 1);
+          });
+        },
+      },
+    );
+    if (!workOffline) {
+      list.push({
+        id: 'sync',
+        label: 'Check for new mail',
+        group: mail,
+        keywords: 'sync refresh send receive',
+        run: () => {
+          api.syncNow(null).catch((e: unknown) => {
+            report(toAppError(e), 'Could not check for mail');
+          });
+        },
+      });
+    }
+    list.push({
+      id: 'offline',
+      label: workOffline ? 'Turn off Work Offline' : 'Turn on Work Offline',
+      group: mail,
+      keywords: 'work offline online connection',
+      run: () => {
+        changeSettings({ ...currentSettings, workOffline: !workOffline });
+      },
+    });
+
+    const viewGroup = 'View';
+    if (!phone) {
+      list.push({
+        id: 'pane',
+        label: pane === 'off' ? 'Turn on the reading pane' : 'Turn off the reading pane',
+        group: viewGroup,
+        keywords: 'reading pane preview layout',
+        run: () => {
+          changeSettings({ ...currentSettings, readingPane: pane === 'off' ? 'right' : 'off' });
+        },
+      });
+      if (pane !== 'right') {
+        list.push({
+          id: 'pane-right',
+          label: 'Reading pane on the right',
+          group: viewGroup,
+          keywords: 'layout preview',
+          run: () => {
+            changeSettings({ ...currentSettings, readingPane: 'right' });
+          },
+        });
+      }
+      if (pane !== 'bottom') {
+        list.push({
+          id: 'pane-bottom',
+          label: 'Reading pane below the list',
+          group: viewGroup,
+          keywords: 'layout preview bottom',
+          run: () => {
+            changeSettings({ ...currentSettings, readingPane: 'bottom' });
+          },
+        });
+      }
+    }
+    list.push({
+      id: 'theme',
+      label: theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode',
+      group: viewGroup,
+      keywords: 'theme appearance colours colors',
+      run: () => {
+        changeSettings({ ...currentSettings, theme: theme === 'dark' ? 'light' : 'dark' });
+      },
+    });
+
+    const go = 'Go to';
+    for (const role of UNIFIED_ROLES) {
+      list.push({
+        id: `unified:${role}`,
+        label: ROLE_TITLES[role],
+        group: go,
+        detail: 'All accounts',
+        keywords: 'folder',
+        run: () => {
+          goTo({ type: 'unified', role });
+        },
+      });
+    }
+    list.push(
+      {
+        id: 'outbox',
+        label: 'Outbox',
+        group: go,
+        detail: 'All accounts',
+        keywords: 'folder waiting to send',
+        run: () => {
+          goTo({ type: 'outbox' });
+        },
+      },
+      {
+        id: 'calendar',
+        label: 'Calendar',
+        group: go,
+        keywords: 'events meetings schedule',
+        run: () => {
+          show({ kind: 'calendar' });
+        },
+      },
+      {
+        id: 'tasks',
+        label: 'Tasks',
+        group: go,
+        keywords: 'to-do todo',
+        run: () => {
+          show({ kind: 'tasks' });
+        },
+      },
+      {
+        id: 'contacts',
+        label: 'Contacts',
+        group: go,
+        keywords: 'people address book',
+        run: () => {
+          show({ kind: 'contacts' });
+        },
+      },
+    );
+    for (const account of accounts) {
+      const name = account.displayName || account.email;
+      for (const folder of foldersByAccount[account.id] ?? []) {
+        const path = folder.path.split(folder.delimiter ?? '/').filter(Boolean).join(' › ');
+        list.push({
+          id: `folder:${folder.id}`,
+          label: folder.role === 'other' ? path || folder.name : folderLabel(folder),
+          group: go,
+          detail: name,
+          keywords: `folder ${account.email}`,
+          run: () => {
+            goTo({ type: 'folder', accountId: account.id, folderId: folder.id });
+          },
+        });
+      }
+    }
+
+    const settingsGroup = 'Settings';
+    list.push({
+      id: 'settings',
+      label: 'Settings',
+      group: settingsGroup,
+      keywords: 'preferences options',
+      run: () => {
+        show({ kind: 'settings' });
+      },
+    });
+    for (const [section, label] of SETTINGS_SECTIONS) {
+      if (section === 'automation' && phone) continue;
+      list.push({
+        id: `settings:${section}`,
+        label: `${label} settings`,
+        group: settingsGroup,
+        keywords: 'preferences options',
+        run: () => {
+          show({ kind: 'settings', section });
+        },
+      });
+    }
+    list.push(
+      {
+        id: 'add-account',
+        label: 'Add an account',
+        group: settingsGroup,
+        keywords: 'new email account exchange gmail outlook',
+        run: () => {
+          show({ kind: 'addAccount' });
+        },
+      },
+      {
+        id: 'help',
+        label: 'Keyboard shortcuts',
+        group: 'Help',
+        detail: '?',
+        keywords: 'help keys',
+        run: () => {
+          setHelp(true);
+        },
+      },
+    );
+    return list;
+  };
+
   const panesClass = phone
     ? `panes panes--phone ${reading ? 'panes--reading' : 'panes--listing'}`
     : `panes${screen.kind === 'mail' && pane !== 'right' ? ` panes--${pane}` : ''}`;
@@ -1589,6 +1807,14 @@ export function Shell({ now = nowSeconds }: { now?: () => number }) {
               title: 'Rule saved',
               text: `“${saved.name.trim()}” sorts new mail from now on. Run it on mail you already have from Settings › Rules.`,
             });
+          }}
+        />
+      )}
+      {palette && (
+        <CommandPalette
+          commands={paletteCommands()}
+          onClose={() => {
+            setPalette(false);
           }}
         />
       )}

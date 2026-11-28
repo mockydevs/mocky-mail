@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 
 import { useMailApi } from '../../api/MailApiContext';
 import { toAppError } from '../../api/errors';
@@ -17,6 +17,8 @@ import { accountErrorCopy } from '../accounts/providers';
 import { SignatureEditor } from './SignatureEditor';
 import { SecuritySection } from '../security/SecuritySection';
 import { ImportExportSection } from '../files/ImportExportSection';
+import { AdminConsentPanel } from '../accounts/AdminConsent';
+import { AutomationSection } from './AutomationSection';
 
 const MARK_READ: readonly [MarkReadSetting, string][] = [
   ['open', 'Mark as read as soon as I open a message'],
@@ -53,6 +55,24 @@ export const SYNC_WINDOW: readonly [number | null, string][] = [
   [null, 'All mail'],
 ];
 
+/** Parts of Settings that can be opened directly (the command palette, a message's security). */
+export const SETTINGS_SECTIONS = [
+  ['appearance', 'Appearance'],
+  ['images', 'Images in email'],
+  ['reading', 'Reading'],
+  ['checking', 'Checking for mail'],
+  ['sending', 'Sending'],
+  ['notifications', 'Notifications'],
+  ['security', 'Security'],
+  ['replies', 'Automatic replies'],
+  ['categories', 'Categories'],
+  ['rules', 'Rules'],
+  ['files', 'Import and export'],
+  ['accounts', 'Accounts'],
+  ['automation', 'Automation'],
+] as const;
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number][0];
+
 interface Props {
   settings: Settings;
   accounts: readonly Account[];
@@ -69,8 +89,8 @@ interface Props {
   folders?: Readonly<Record<string, Folder[]>>;
   /** A toast (rules run now say what they did). */
   onNotice?: (notice: Notice) => void;
-  /** Open at a section: `security` scrolls to Settings › Security. */
-  section?: 'security' | undefined;
+  /** Open at a section: scrolls to it (`security` also focuses its heading). */
+  section?: SettingsSection | undefined;
 }
 
 export function SettingsView({
@@ -90,6 +110,19 @@ export function SettingsView({
   const id = useId();
   const api = useMailApi();
   const [orderError, setOrderError] = useState<AppError | null>(null);
+
+  // Scroll to the section asked for. Security does this itself.
+  useEffect(() => {
+    if (!section || section === 'security') return;
+    const anchor = document.querySelector(`[data-section="${section}"]`);
+    const target = anchor?.classList.contains('settings__anchor') ? anchor.firstElementChild : anchor;
+    if (!(target instanceof HTMLElement)) return;
+    // scrollIntoView is missing in some test DOMs.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    target.scrollIntoView?.({ block: 'start' });
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus();
+  }, [section]);
 
   /** Move an account one place up (-1) or down (1) in the sidebar. */
   const move = (accountId: string, by: -1 | 1) => {
@@ -118,7 +151,7 @@ export function SettingsView({
 
       <div className="settings__body">
         <div className="settings__columns">
-          <fieldset className="settings__group">
+          <fieldset className="settings__group" data-section="appearance">
             <legend className="settings__legend">Appearance</legend>
             {(['system', 'light', 'dark'] as ThemeSetting[]).map((theme) => (
               <label key={theme} className="choice">
@@ -153,7 +186,7 @@ export function SettingsView({
             )}
           </fieldset>
 
-          <fieldset className="settings__group">
+          <fieldset className="settings__group" data-section="images">
             <legend className="settings__legend">Images in email</legend>
             <label className="choice">
               <input
@@ -180,7 +213,7 @@ export function SettingsView({
             <TrustedSenders />
           </fieldset>
 
-          <fieldset className="settings__group">
+          <fieldset className="settings__group" data-section="reading">
             <legend className="settings__legend">Reading</legend>
             {MARK_READ.map(([value, label]) => (
               <label key={value} className="choice">
@@ -256,7 +289,7 @@ export function SettingsView({
             <p className="form-hint">Read receipts: what to do when a message you open asks to know that you read it.</p>
           </fieldset>
 
-          <fieldset className="settings__group">
+          <fieldset className="settings__group" data-section="checking">
             <legend className="settings__legend">Checking for mail</legend>
             <label className="form-field">
               <span className="form-field__label">Check for new mail every</span>
@@ -298,7 +331,7 @@ export function SettingsView({
             )}
           </fieldset>
 
-          <fieldset className="settings__group">
+          <fieldset className="settings__group" data-section="sending">
             <legend className="settings__legend">Sending</legend>
             <label className="form-field">
               <span className="form-field__label">Undo send</span>
@@ -322,7 +355,7 @@ export function SettingsView({
             <p className="form-hint">After you tap Send, you have this long to take a message back.</p>
           </fieldset>
 
-          <fieldset className="settings__group">
+          <fieldset className="settings__group" data-section="notifications">
             <legend className="settings__legend">Notifications</legend>
             <label className="choice">
               <input
@@ -421,23 +454,39 @@ export function SettingsView({
 
           <SecuritySection settings={settings} onChange={onChange} accounts={accounts} focus={section === 'security'} />
 
-          {accounts.length > 0 && <OutOfOffice accounts={accounts} />}
-
-          {onCategoriesChanged && <CategoryManager categories={categories ?? []} onChange={onCategoriesChanged} />}
-
-          {folders && accounts.length > 0 && (
-            <RulesSection
-              accounts={accounts}
-              folders={folders}
-              categories={categories ?? []}
-              phone={phone}
-              {...(onNotice ? { onNotice } : {})}
-            />
+          {accounts.length > 0 && (
+            <div className="settings__anchor" data-section="replies">
+              <OutOfOffice accounts={accounts} />
+            </div>
           )}
 
-          {folders && accounts.length > 0 && <ImportExportSection accounts={accounts} folders={folders} />}
+          {onCategoriesChanged && (
+            <div className="settings__anchor" data-section="categories">
+              <CategoryManager categories={categories ?? []} onChange={onCategoriesChanged} />
+            </div>
+          )}
 
-          <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`}>
+          {folders && accounts.length > 0 && (
+            <div className="settings__anchor" data-section="rules">
+              <RulesSection
+                accounts={accounts}
+                folders={folders}
+                categories={categories ?? []}
+                phone={phone}
+                {...(onNotice ? { onNotice } : {})}
+              />
+            </div>
+          )}
+
+          {folders && accounts.length > 0 && (
+            <div className="settings__anchor" data-section="files">
+              <ImportExportSection accounts={accounts} folders={folders} />
+            </div>
+          )}
+
+          {!phone && <AutomationSection settings={settings} onChange={onChange} />}
+
+          <section className="settings__group settings__group--wide" aria-labelledby={`${id}-accounts`} data-section="accounts">
             <h2 id={`${id}-accounts`} className="settings__legend">
               Accounts
             </h2>
@@ -540,9 +589,18 @@ function AccountRow({ account, onChanged, order }: { account: Account; onChanged
     );
   };
 
-  const copy = error ? accountErrorCopy(error, account.email) : null;
-  const authLabel =
-    account.auth === 'password' ? 'Password' : account.auth === 'google' ? 'Google sign-in' : 'Microsoft sign-in';
+  const consentUrl = error?.adminConsentUrl ?? null;
+  const copy = error && !consentUrl ? accountErrorCopy(error, account.email) : null;
+  const ews = account.protocol === 'ews' || account.auth === 'exchange';
+  const authLabel = ews
+    ? 'Exchange'
+    : account.auth === 'password'
+      ? 'Password'
+      : account.auth === 'google'
+        ? 'Google sign-in'
+        : 'Microsoft sign-in';
+  /** Exchange signs in with a password, like IMAP; Google and Microsoft through the browser. */
+  const usesPassword = account.auth === 'password' || account.auth === 'exchange';
 
   return (
     <li className="account-row">
@@ -551,7 +609,7 @@ function AccountRow({ account, onChanged, order }: { account: Account; onChanged
         <div className="account-row__who">
           <p className="account-row__email">{account.email}</p>
           <p className="muted small">
-            {authLabel}, {account.imap.host}
+            {authLabel}, {ews ? `server ${account.imap.host}` : account.imap.host}
           </p>
         </div>
         {order && (
@@ -638,7 +696,7 @@ function AccountRow({ account, onChanged, order }: { account: Account; onChanged
 
       <SignatureEditor accountId={account.id} />
 
-      {account.auth === 'password' &&
+      {usesPassword &&
         (changingPassword ? (
           <form className="inline-form" onSubmit={updatePassword}>
             <div className="form-field">
@@ -672,7 +730,7 @@ function AccountRow({ account, onChanged, order }: { account: Account; onChanged
           </button>
         ))}
 
-      {account.auth !== 'password' && (
+      {!usesPassword && (
         // A Google or Microsoft sign-in can expire or be withdrawn; this opens
         // the provider's sign-in again and keeps the account and its mail.
         <button
@@ -686,6 +744,7 @@ function AccountRow({ account, onChanged, order }: { account: Account; onChanged
         </button>
       )}
 
+      {consentUrl && <AdminConsentPanel url={consentUrl} onRetry={reconnect} busy={reconnecting} />}
       {copy && (
         <div className="notice notice--error" role="alert">
           <p className="notice__title">{copy.title}</p>
