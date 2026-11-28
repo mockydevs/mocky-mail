@@ -116,6 +116,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          # Gradle downloads (Kotlin, Android Gradle plugin…) kept between runs:
+          # fewer requests to Maven Central, which rate-limits busy runners.
+          cache: gradle
+          cache-dependency-path: |
+            apps/desktop/src-tauri/gen/android/**/*.gradle*
+            apps/desktop/src-tauri/gen/android/**/gradle-wrapper.properties
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: aarch64-linux-android
