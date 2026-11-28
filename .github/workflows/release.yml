@@ -65,23 +65,28 @@ jobs:
           # Built on the oldest supported Ubuntu so the .deb runs on 22.04 and newer.
           - name: Linux
             os: ubuntu-22.04
+            cli: x86_64-unknown-linux-gnu
             args: --bundles deb,rpm,appimage
             out: target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm target/release/bundle/appimage/*.AppImage
           - name: Linux ARM64
             os: ubuntu-22.04-arm
+            cli: aarch64-unknown-linux-gnu
             args: --bundles deb,rpm,appimage
             out: target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm target/release/bundle/appimage/*.AppImage
           - name: Windows
             os: windows-latest
+            cli: x86_64-pc-windows-msvc
             args: --bundles msi,nsis
             out: target/release/bundle/msi/*.msi target/release/bundle/nsis/*.exe
           - name: Windows ARM64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            cli: aarch64-pc-windows-msvc
             args: --bundles msi,nsis --target aarch64-pc-windows-msvc
             out: target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
           - name: macOS
             os: macos-latest
+            cli: universal-apple-darwin
             args: --bundles dmg --target universal-apple-darwin
             out: target/universal-apple-darwin/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
@@ -106,6 +111,11 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
       - run: npm ci
         working-directory: apps/desktop
+      # The mocky-mail command line (and MCP server), bundled with the
+      # installers as a Tauri sidecar next to the app's own program.
+      - name: Build the command line
+        shell: bash
+        run: bash scripts/build-cli.sh ${{ matrix.cli }}
       - name: Build installers
         working-directory: apps/desktop
         shell: bash
@@ -114,7 +124,7 @@ jobs:
           MOCKY_MAIL_GOOGLE_CLIENT_ID: ${{ secrets.MOCKY_MAIL_GOOGLE_CLIENT_ID }}
           MOCKY_MAIL_GOOGLE_CLIENT_SECRET: ${{ secrets.MOCKY_MAIL_GOOGLE_CLIENT_SECRET }}
           MOCKY_MAIL_MS_CLIENT_ID: ${{ secrets.MOCKY_MAIL_MS_CLIENT_ID }}
-        run: npx --yes @tauri-apps/cli@2.12.4 build ${{ matrix.args }}
+        run: npx --yes @tauri-apps/cli@2.12.4 build --config src-tauri/tauri.cli.conf.json ${{ matrix.args }}
       - name: Attach to the draft release
         shell: bash
         env:

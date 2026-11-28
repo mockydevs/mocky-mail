@@ -1,4 +1,6 @@
 /target/
+# The command line built for the installers (scripts/build-cli.sh).
+/apps/desktop/src-tauri/binaries/
 node_modules/
 dist/
 coverage/
